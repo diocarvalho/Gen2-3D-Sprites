@@ -345,6 +345,83 @@ Stadium._faintStillDue = faintStillDue
 --
 -- Runs from OverworldBattle.update, before the pics are rendered and before
 -- the scene is drawn: what this decides is exactly which sides need a pic.
+-- Current Gold's battle screen is src.ui.gen2.BattleState, whose `battle`
+-- field is the Gen-2 Battle object itself.  That object exposes the active
+-- party mons directly (`battle.player` / `battle.enemy`) rather than the
+-- Gen-1 BattleState battler wrappers this module historically followed.
+-- Keep a small dedicated adapter instead of teaching the mature Gen-1 state
+-- machine to guess which object shape it was handed.
+local function gen2SideVisible(screen, side, battler)
+  if not (screen and battler) then return false end
+  local hidden = screen.picHidden
+  if type(hidden) == "table" and hidden[side] then return false end
+  if side == "player" then
+    -- The opening still belongs to Gold's trainer back-pic.  The model takes
+    -- over when SendOutPlayerMon has actually put the party mon on the field.
+    if screen.showPlayerTrainer then return false end
+    if screen.tutorial then return false end
+  end
+  return true
+end
+
+function Stadium.updateGen2(dt, screen, groundY)
+  if not session then return end
+  session.groundY = groundY or session.groundY or 0
+  local battle = screen and screen.battle
+  if not battle then return end
+
+  local arena = session.arena
+  for _, side in ipairs({ "enemy", "player" }) do
+    local mon = session[side]
+    local battler = battle[side]
+    local dex = battler and dexOf(battler.species) or nil
+
+    if session.at[side] ~= battler then
+      session.at[side] = battler
+      if mon then mon.grow, mon.grewOwn = nil, nil end
+      if mon and mon.rig and mon.state == "faint" then mon:play("idle") end
+    end
+
+    -- Gen2's Stadium 2 importer still has provisional context routing for a
+    -- handful of species.  In-world battles prefer a real bind-pose model to
+    -- dropping that species back to a flat card, the same policy the Gold
+    -- overworld already uses.
+    mon:setSpecies(dex, true)
+    if mon.species then StadiumPack.keep(mon.species) end
+
+    mon.visible = (mon.rig ~= nil) and gen2SideVisible(screen, side, battler)
+    mon.model_matrix = nil
+    if mon.rig then
+      -- Keep the model clock alive even when a Gold battle event does not map
+      -- to one of the old Gen-1 animation seams.  Idle/bind-pose therefore
+      -- always renders, while future event-specific requests can layer on top.
+      mon:update(dt or 0)
+      if mon.visible and arena then
+        local cell = arena[side]
+        local other = arena[side == "player" and "enemy" or "player"]
+        if cell and other then
+          Stadium.guard(side, mon, "gen2-build", function()
+            mon.model_matrix = mon:matrix(cell[1], session.groundY, cell[2],
+                                          other[1] - cell[1],
+                                          other[2] - cell[2])
+            mon:build()
+          end)
+        end
+      end
+    end
+  end
+  Stadium.debug(dt)
+end
+
+-- Public draw-coverage query used by the Gen-2 BattleState shim.  It is kept
+-- separate from `covers`, whose input contract is the legacy Gen-1 battler
+-- wrapper and whose trainer/substitute rules should not be guessed at here.
+function Stadium.visible(side)
+  if side ~= "player" and side ~= "enemy" then return false end
+  local mon = session and session[side]
+  return (mon and mon.rig and mon.visible and mon.model_matrix) and true or false
+end
+
 function Stadium.update(dt, battle, groundY)
   if not session then return end
   session.groundY = groundY or session.groundY or 0

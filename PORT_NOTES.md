@@ -1,3 +1,28 @@
+## v0.1.90 battle toggle
+
+Gold reads the `battle3dWorld` option lazily through `OverworldBattle.enabled()`. The option now appears as **LIVE OVERWORLD BATTLES**, defaults to `true`, and cleanly returns `false` before any live-world battle compositor/model staging when disabled, so Gold's normal `BattleState` presentation remains authoritative.
+
+## v0.1.89 Gold-only cleanup and battle compositor
+
+Gold's in-world battle path no longer uses `BattleScene.render` for its backdrop. `OverworldBattle.update` renders the captured Gold state through the same `VoxelScene.render` path used in free roam and marks that state as a live Stadium battle so `VoxelScene` draws/casts the two Stadium models in normal world space. The battle camera therefore stays identical to the encounter camera.
+
+Current Gold `BattleAnimView.present` assumes an opaque battle BG and fills/blits blank scanlines while applying SCX/SCY/BGP effects. With a transparent battle panel that exposed the classic white rectangle (and black outside it) during moves. The Gold shim now bypasses only that background-transform pass while a live-world shot is active; the caller still executes `drawObjects`, so Gold's OBJ move effects continue to render.
+
+The package is also generation-trimmed: only Dex 1–251 generated sprite runtime sheets remain. Raw build-source follow/water atlases and legacy Gen-1-only startup modules are intentionally not shipped.
+
+## v0.1.87 Gold follower / battle / movement correction
+
+### Movement ownership restored
+`lib/GoldCameraControls.lua` is back to the v0.1.80-style adapter: camera-relative intent is quantized to Gold's native cardinal `heldDir`. The continuous free-walk position layer is no longer part of this project. `lib/OverworldStadium.lua` no longer overrides player facing from a continuous body yaw and no longer temporarily sets `Player.moving=true` around `red_3d_player` draws.
+
+### Lead-party follower
+`lib/GoldPartyFollower.lua` opts into current Gen1Recomp's `src.world.gen2.Follower.setShouldSpawn()` surface. Party slot #1 is authoritative; the engine owns trail movement/map seams, while renderer metadata points the follower entity at the live party mon for Stadium model selection.
+
+### Why v0.1.85/0.1.86 in-world battles did not appear
+Current Gold pushes `src.ui.gen2.BattleState`, not `src.battle.BattleState`, and that Gen-2 screen intentionally has no `isBattle=true` marker. The old hook patched the Gen-1 class and waited for `top.isBattle`, so it never owned current Gold's actual battle UI. There was a second Lua bug in `OverworldBattle.begin`: `isGoldGame() and nil or battle` evaluates to `battle` even when Gold is true, because Lua's `and/or` idiom cannot select nil. The session therefore held the Gen-2 battle logic object rather than waiting for its BattleState screen.
+
+v0.1.87 matches the live screen by `top.battle == session.logicBattle`, updates Stadium models through a dedicated Gen-2 adapter, and patches only the Gen-2 presentation layer: the 160x144 white field becomes transparent after a valid voxel shot exists, and each flat Pokemon picture is skipped only when its corresponding Stadium model is healthy and visible. `GoldComposeBridge` alpha-composites that native UI over the window-resolution battle-world canvas.
+
 ## v0.1.83 weather fail-safe
 
 The v0.1.82 package contained the intended `Weather.lua` integration in `Voxel3D.lua`, but also had an accidental `VoxelScene.lua -> V.require("WeatherFX")` duplicate. The standalone Gold module loader treats a missing local module as a hard require failure, which caused `GoldVoxelBridge.install()` to fail and the compose layer to fall back to vanilla 2D. v0.1.83 removes the duplicate require/calls. Every remaining `Weather.lua` invocation is guarded with `pcall`; weather is now strictly optional presentation and cannot retire the voxel renderer.

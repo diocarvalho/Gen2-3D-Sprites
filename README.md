@@ -1,3 +1,22 @@
+## v0.1.90 — optional live overworld battle mode
+
+The live in-world battle presentation is now a normal user-facing setting: **LIVE OVERWORLD BATTLES** defaults **ON**. Turn it **OFF** to use Gold's classic battle scene while keeping the voxel overworld, followers, weather, cameras, Stadium models, and the rest of the mod enabled.
+
+## v0.1.89 — live overworld battles + lean Gen-2 install
+
+- **Wild battles stay in the overworld.** The battle backdrop is now the same frozen voxel frame and camera the player was already using when the encounter began; Gold no longer changes to the mod's separate staged arena camera.
+- **Attack flash fix.** While the live-world battle is active, Gold's opaque `BattleAnimView` scanline/background pass is bypassed. Gold's battle HUD, text and OBJ effect sprites remain, but the old white/black 160×144 battle paper can no longer replace the world during Tackle and similar animations.
+- **Much smaller install payload.** This Gold/Silver package now contains runtime sprite sheets only for National Dex **1–251**. Duplicate raw PokeMMO/follow/water source PNG libraries and dead Gen-1 Yellow/free-movement compatibility modules were removed.
+- The built-in party-slot-1 follower remains enabled by default, and the v0.1.88 Gold GBC voxel-color fix remains intact.
+
+## v0.1.87 — lead-party follower and repaired live 3D wild battles
+
+**LEAD PARTY FOLLOWER** now defaults ON. The first Pokemon in the party follows one tile behind the player using Gold's native Gen-2 follower path, while the voxel renderer replaces that follower with the party lead's Stadium 2 model. Reordering the party changes the follower automatically.
+
+**IN-WORLD 3D BATTLES** is also repaired for current Gold. Ordinary wild encounters are staged at the exact encounter-site voxel terrain with Stadium 2 models while Gold's real battle HUD, text, menus, catching, switching and battle logic remain on top. The previous implementation patched the Gen-1 battle screen and also stored Gold's logic object in place of the live Gen2 BattleState, so it never reached the presentation path current Gold actually draws.
+
+The accidental true-360/free-walk work from v0.1.84/v0.1.85 has been removed from this project. First/Third Person are back to camera-relative **Gold-native cardinal movement**, and this mod no longer fakes `Player.moving` for the 3D Character Selector.
+
 ## v0.1.83 — voxel startup regression fixed
 
 v0.1.82 accidentally referenced a second weather module (`WeatherFX`) in addition to the packaged `Weather.lua`; that bad require could abort the Gold voxel renderer and force the normal 2D fallback. v0.1.83 removes the duplicate module path and makes all weather hooks fail-safe. **3D VOXEL WORLD remains authoritative even if weather fails.** Rain, fog, moving clouds, sun/moon, camera modes, camera-relative controls, Johto tree geometry, all-Pokemon 3D, Skin Selector compatibility, and visible pause menus are retained.
@@ -14,7 +33,7 @@ This build is no longer flagged experimental in `manifest.json`, so it installs 
 
 THIRD PERSON and FIRST PERSON now steer relative to the 3D camera rather than Gold's original screen/map axes. UP/W is forward in the current view, DOWN/S is backward, and LEFT/RIGHT strafe. Gold still receives one of its native four cardinal movement directions, so doors, collisions, ledges, encounters, scripted movement, and map connections continue to use the normal Gen-2 gameplay path. In FIRST PERSON, pressing A also uses the nearest cardinal to the view direction for talking/reading/interacting. DIORAMA keeps the original controls.
 
-# Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2) v0.1.83
+# Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2) v0.1.87
 
 ## v0.1.79 first-person + third-person Gold cameras
 

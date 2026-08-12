@@ -1,52 +1,20 @@
-# Gen1Recomp index / GitHub update setup
+# Release / updater setup
 
-This repository is prepared for the Generation-2 mod id:
+Repository: `randyadr/Gen2-3D-Sprites`
+Mod ID: `STADIUM2_OVERWORLD_MODELS`
+Current version: `0.1.90`
 
-`STADIUM2_OVERWORLD_MODELS`
+## One-time / manual upload
 
-and intentionally uses its own release feed:
+1. Upload this repo's contents to the `main` branch of `randyadr/Gen2-3D-Sprites`.
+2. Keep `.github/workflows/release.yml` enabled.
+3. The manifest must keep `"github": "randyadr/Gen2-3D-Sprites"`.
+4. The mod-index metadata lives under `mods/randyadr@STADIUM2_OVERWORLD_MODELS/` and uses `automatic_version_check: true`.
 
-`randyadr/3D-Pokemon-Sprites-Gen2`
+## Publishing future updates
 
-This keeps Gold/Silver releases separate from the existing Generation-1 `STADIUM_OVERWORLD_MODELS` update stream.
+Bump `manifest.json` and the exported version in `main.lua`, then push to `main`. The workflow builds and publishes an asset named:
 
-## 1. Create/upload the GitHub repository
+`STADIUM2_OVERWORLD_MODELS-X.Y.Z.zip`
 
-Create `randyadr/3D-Pokemon-Sprites-Gen2` and upload the contents of this repository bundle to its `main` branch.
-
-The mod manifest already contains:
-
-```json
-"github": "randyadr/3D-Pokemon-Sprites-Gen2"
-```
-
-## 2. First GitHub Release
-
-The included `.github/workflows/release.yml` can publish the release automatically. For this snapshot, the expected release is:
-
-- Tag: `v0.1.85`
-- Asset: `STADIUM2_OVERWORLD_MODELS-0.1.85.zip`
-
-The exact `<mod-id>-<version>.zip` name is important because Gen1Recomp's updater prefers that asset name.
-
-## 3. Submit to gen1recomp-mod-index once
-
-Copy only this folder into a fork of `bryanthaboi/gen1recomp-mod-index`:
-
-`mods/randyadr@STADIUM2_OVERWORLD_MODELS/`
-
-It contains only:
-
-- `meta.json`
-- `description.md`
-
-`meta.json` has `automatic_version_check: true`, so after the index entry is merged you do not submit a PR for every version. Publish a new GitHub Release in this repository and the index refresh job follows the newest installable release.
-
-## 4. Future versions
-
-For v0.1.86 and later:
-
-1. Update `manifest.json` version.
-2. Commit/push the new runtime files to `main`.
-3. The release workflow publishes `STADIUM2_OVERWORLD_MODELS-<version>.zip`.
-4. The index tracks the new GitHub Release automatically.
+Gen1Recomp's Update / Versions flow can then discover the new GitHub Release.

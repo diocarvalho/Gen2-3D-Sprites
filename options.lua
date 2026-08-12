@@ -18,14 +18,21 @@ return {
       { "THIRD PERSON", "third" },
       { "FIRST PERSON", "first" },
     },
-    description = "Select the Gold voxel-world camera. DIORAMA keeps Gold's native grid controls. THIRD PERSON follows behind the player and FIRST PERSON places the camera at the player's head. F6 cycles modes. In THIRD/FIRST PERSON, normal walking is true 360-degree camera-relative movement: analog stick angles and diagonal keyboard input move continuously at any angle and slide along walls; bike/surf/forced/scripted movement remains on Gold's native grid path.",
+    description = "Select the Gold voxel-world camera. DIORAMA keeps the existing view, THIRD PERSON follows behind the player, and FIRST PERSON places the camera at the player's head. F6 cycles modes. In THIRD/FIRST PERSON, Gold keeps its native grid movement but the controls are camera-relative: UP/W is forward, DOWN/S is back, and LEFT/RIGHT strafe relative to the view.",
+  },
+  {
+    key = "partyFollower",
+    type = "toggle",
+    label = "LEAD PARTY FOLLOWER",
+    default = true,
+    description = "Makes party slot #1 follow directly behind the player using Gold's native Gen-2 follower trail, like Pokemon Yellow. The follower uses its Stadium 2 3D model in voxel mode and updates automatically when party order changes. Hidden while biking or surfing.",
   },
   {
     key = "battle3dWorld",
     type = "toggle",
-    label = "IN-WORLD 3D BATTLES",
+    label = "LIVE OVERWORLD BATTLES",
     default = true,
-    description = "Stages normal Gold battles on the exact voxel overworld map where the encounter began. Stadium 2 models stand on the terrain while Gold keeps its native battle menus, HP bars, move logic, catching, switching, and text. Turn OFF for the classic battle field.",
+    description = "ON (default): ordinary wild battles stay in the exact voxel overworld view where the encounter began, using the same map, camera, weather and terrain while Gold keeps its native battle UI and logic. OFF: use Gold's classic battle scene. This can be changed without uninstalling the mod.",
   },
   {
     key = "weatherMode",
@@ -58,19 +65,6 @@ return {
     },
     description = "Choose your legally obtained Pokemon Stadium 2 ROM to build 3D models for National Dex 1-251.",
   },
-  {
-    key = "followersExCount",
-    type = "choice",
-    label = "FOLLOWER COUNT",
-    default = "followers_ex",
-    choices = {
-      { "FOLLOWERS EX", "followers_ex" },
-      { "0", 0 }, { "1", 1 }, { "2", 2 }, { "3", 3 },
-      { "4", 4 }, { "5", 5 }, { "6", 6 },
-    },
-    description = "Optional override for an external Followers EX install. The embedded Wilds follower count uses its own Followers option below.",
-  },
-
   -- ------- Core gameplay
   {
     key = "enabled",

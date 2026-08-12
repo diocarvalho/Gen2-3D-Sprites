@@ -1,34 +1,13 @@
 # Pokemon Stadium 2 Overworld Models - Gold/Silver
 
-A standalone Gen1Recomp Gold/Silver (Generation 2) 3D presentation mod. It renders the overworld as a voxel scene, imports Pokemon Stadium 2 models locally from the player's own compatible ROM, and integrates visible roaming Pokemon into the same 3D world.
+A standalone Gen1Recomp Gold/Silver (Generation 2) 3D presentation mod with a voxel overworld, Stadium 2 models built locally from the player's compatible ROM, visible roaming Pokemon, weather, followers, and 3D cameras.
 
-## Features
+## v0.1.90
 
-- Gold/Silver voxel overworld with authored Johto tree geometry.
-- Pokemon Stadium 2 overworld models for National Dex 1-251 using a user-supplied ROM.
-- Visible roaming wild Pokemon.
-- Diorama, third-person, and first-person camera modes.
-- Camera-relative Gold controls.
-- Outdoor weather, clouds, day/night sky, sun, and moon.
-- In-world 3D battle presentation while preserving Gold's native battle logic and UI.
-- Optional 3D Character Selector / Skin Selector integration.
-- Gold START/text overlays remain visible above the voxel scene.
+**LIVE OVERWORLD BATTLES** is available in Mod Settings and defaults **ON**. With it enabled, ordinary wild battles remain on the encounter-site voxel overworld. Turn it **OFF** to use Gold's classic battle presentation while leaving the rest of the mod enabled.
 
-No Nintendo ROM or extracted Stadium 2 model archive is distributed with the mod.
+The release package is the lean Gen-2-only build introduced in v0.1.89.
 
-## Install
+## Updating
 
-1. Download `STADIUM2_OVERWORLD_MODELS-X.Y.Z.zip` from GitHub Releases.
-2. In Gen1Recomp, open **MODS > Import mod .zip**.
-3. Enable the mod and start Pokemon Gold or Silver.
-4. Choose a legally obtained compatible Stadium 2 ROM from the mod's options if you want Stadium models.
-
-Once installed, Gen1Recomp's **Update** and **Versions** flow reads releases from the GitHub repository declared by the mod manifest.
-
-## Compatibility
-
-- Mod API 2.
-- Gold/Silver / Generation 2 only.
-- Non-experimental content-profile mod.
-- Optional integrations include Followers EX, PokePCFollowers Voxel Merge, Dramatic Sky Ride, and red_3d_player.
-- Conflicts with the separate Gen-1 `STADIUM_OVERWORLD_MODELS` package so both generation-specific renderers do not own the same session.
+The manifest points to `randyadr/Gen2-3D-Sprites` and this index metadata enables automatic version checking. Publish each version as a GitHub Release with an asset named exactly `STADIUM2_OVERWORLD_MODELS-X.Y.Z.zip`.

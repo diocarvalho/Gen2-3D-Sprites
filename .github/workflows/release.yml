@@ -1,14 +1,12 @@
 name: Release
 
-# Builds the installable Gen1Recomp ZIP and publishes it as a GitHub Release.
-# The archive is intentionally clean: manifest.json and all runtime files live
-# at the ZIP root, while repo/index helper files are excluded.
 on:
   push:
     branches: [main]
     paths-ignore:
       - '.github/**'
       - 'mods/**'
+      - 'release_asset/**'
       - 'RELEASE_SETUP.md'
       - '**.md'
   workflow_dispatch:
@@ -41,21 +39,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re, subprocess, sys
+          import json, os, re, subprocess
           semver = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-          def parse(s):
-              m = semver.match(s or "")
-              return tuple(map(int, m.groups())) if m else None
-          def sh(*args):
-              return subprocess.run(args, capture_output=True, text=True).stdout.strip()
           with open('manifest.json', encoding='utf-8') as fh:
               manifest_version = str(json.load(fh)['version'])
           requested = os.environ.get('DISPATCH_VERSION', '').strip()
           version = requested or manifest_version
-          if not parse(version):
+          if not semver.match(version):
               raise SystemExit(f'::error::Invalid version {version!r}; expected X.Y.Z')
           tag = f'v{version}'
-          if sh('git', 'tag', '-l', tag):
+          tags = subprocess.run(['git','tag','-l',tag], capture_output=True, text=True).stdout.strip()
+          if tags:
               raise SystemExit(f'::error::Tag {tag} already exists')
           print(f'version={version}')
           print(f'tag={tag}')
@@ -103,14 +97,14 @@ jobs:
           path, expected_version, expected_id = sys.argv[1:]
           with open(path, encoding='utf-8') as fh:
               manifest = json.load(fh)
-          assert manifest['id'] == expected_id, (manifest['id'], expected_id)
-          assert manifest['version'] == expected_version, (manifest['version'], expected_version)
+          assert manifest['id'] == expected_id
+          assert manifest['version'] == expected_version
           assert manifest.get('github') == 'randyadr/Gen2-3D-Sprites'
+          assert manifest.get('experimental') is False
           print(f"Validated {expected_id} {expected_version}")
           PY
 
           (cd "$out" && sha256sum "${MOD_ID}-${VERSION}.zip" > sha256sums.txt)
-          cat "$out/sha256sums.txt"
 
       - name: Publish GitHub Release
         env:
@@ -120,7 +114,7 @@ jobs:
           MOD_ID: STADIUM2_OVERWORLD_MODELS
         run: |
           set -euo pipefail
-          notes=$'Install from Gen1Recomp: MODS > Import mod .zip.\n\nThis release is discoverable by the mod index / Update / Versions flow.'
+          notes=$'Install from Gen1Recomp: MODS > Import mod .zip.\n\nUpdate / Versions can discover this release through randyadr/Gen2-3D-Sprites.'
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \

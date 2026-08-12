@@ -189,6 +189,7 @@ local function drawGoldBattleFrame(shot, ctx)
   local ok, err = pcall(function()
     G.push("all")
     G.origin()
+    G.setBlendMode("alpha")
     if not drawCanvasFull(canvas, ctx) then error("unusable 3D battle canvas") end
     -- Game2's sceneCanvas is window-sized. Once BattleState has a 3D shot it
     -- clears the old white field to transparent and leaves only Gold's native

@@ -73,7 +73,7 @@ end
 Bridge.lib = V
 
 local Voxel, Voxel3D, VoxelScene, ChunkMesher, FirstPerson, GoldCameraControls
-local OverworldBattle
+local OverworldBattle, GoldColorAtlas
 local logOnce
 
 local function optionEnabled()
@@ -306,9 +306,43 @@ local function attachRenderer(world, map)
   end
 
   map.renderer = map.renderer or {}
-  map.renderer.image = atlas
-  map.renderer.gbcAtlas = false
   map.renderer.data = (world.game and world.game.data) or map.renderer.data
+
+  -- Gold's generated tileset sheet is intentionally four-shade source art.
+  -- The native 2D renderer assigns one of eight GBC palettes PER 8x8 tile at
+  -- draw/bake time. Voxel geometry samples the atlas directly, so feeding it
+  -- World:atlasFor's raw sheet produces a correct-but-monochrome world. Bake
+  -- that same Gen-2 PalMap into a private atlas before the voxel mesh sees it.
+  if not GoldColorAtlas then
+    local okColor, moduleOrErr = pcall(V.require, "GoldColorAtlas")
+    if okColor and type(moduleOrErr) == "table" then
+      GoldColorAtlas = moduleOrErr
+    else
+      logOnce("gold-color-module:" .. tostring(moduleOrErr), "warn",
+        "Gold voxel GBC-color adapter unavailable; raw atlas fallback: %s",
+        tostring(moduleOrErr))
+    end
+  end
+
+  local image, pixels, colored, colorErr, colorKey = atlas, nil, false, nil, nil
+  if GoldColorAtlas and type(GoldColorAtlas.forMap) == "function" then
+    local okColor, a, b, c, d, e = pcall(GoldColorAtlas.forMap, world, map, atlas)
+    if okColor then
+      image, pixels, colored, colorErr, colorKey = a or atlas, b, c == true, d, e
+    else
+      colorErr = tostring(a)
+    end
+  end
+
+  map.renderer.image = image or atlas
+  map.renderer.gbcAtlas = colored == true
+  map.renderer._stadiumAtlasData = colored and pixels or nil
+  map.renderer._stadiumColorKey = colored and colorKey or nil
+  map.renderer._stadiumGen2Color = colored == true
+  if not colored and colorErr then
+    logOnce("gold-color-fallback:" .. tostring(colorErr), "warn",
+      "Gold voxel color atlas fell back to raw source art: %s", tostring(colorErr))
+  end
   return true
 end
 

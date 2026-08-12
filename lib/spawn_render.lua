@@ -683,12 +683,16 @@ function SpawnRender:registerContent()
   self.missingCount = missing
   self.contentRegistrationOpen = false
 
-  -- Follow-sprite mapping: load-once, no registry writes.
-  local okAnim, animErr = pcall(function()
-    self.animated:load()
-  end)
-  if not okAnim then
-    DebugLog.warn(self.mod, "follow sprite load failed: %s", tostring(animErr))
+  -- Gen-2 lean package: do not load the legacy raw PokeMMO follow-sprite
+  -- atlas. Gold already has prebuilt 16x96 RuntimeSheets for every supported
+  -- National-Dex entry, and the default follower provider uses the compact
+  -- poke_followers set. Keeping the 1,400+ raw source PNGs only made installs
+  -- slower and duplicated art that never reaches the active renderer.
+  if self.animated then
+    self.animated.loaded = false
+    self.animated.mappingReady = false
+    self.animated.atlasReady = false
+    self.animated.error = "legacy raw follow-sprite atlas omitted in Gen-2 lean build"
   end
 
   local okWater, waterErr = pcall(function()

@@ -2,8 +2,9 @@
 --
 -- The engine's battle is a screen: a white field with two pics on it, pushed
 -- over a frozen overworld that stops drawing. This turns that white field
--- into the world -- the same terrain the free-roam mode extrudes, shot from
--- a placed over-the-shoulder camera at a clear patch of ground nearby --
+-- into the world -- the same terrain AND the same free-roam camera the
+-- encounter was already using. Gold no longer cuts to a separately staged
+-- battle camera; the battle UI is layered over the frozen overworld itself --
 -- while leaving the battle ITSELF alone. Every pic, HUD, HP bar, move
 -- animation, faint slide and text box is the engine's own, drawn in the
 -- engine's own order. What changes is what is behind them, and where the two
@@ -16,10 +17,10 @@
 --      arena shot
 --   2. the engine's own transition wipes the screen (untouched: it is the
 --      right wipe, picked by the right three bits)
---   3. the battle draws over a live, window-resolution render of the arena,
---      with each mon PINNED to the cell it is standing on, the camera
---      drifting slowly enough to read as parallax, and a depth-of-field pass
---      holding the slab of world the two of them occupy sharp
+--   3. on Gold, the battle draws over the frozen free-roam voxel frame at the
+--      encounter site, using the exact overworld camera that was already on
+--      screen. Stadium models stand in that world; the battle never changes
+--      to a second arena camera
 --   4. the battle ends, the cast comes back, and the player is exactly
 --      where they were standing
 --
@@ -629,8 +630,14 @@ function OverworldBattle.begin(state, battle)
   -- optional any more (see forceOG)
   OverworldBattle.forceOG()
 
+  local liveScreen = nil
+  if not isGoldGame() then liveScreen = battle end
   session = { state = state, arena = arena,
-              battle = isGoldGame() and nil or battle,
+              -- Do not write this as `isGoldGame() and nil or battle`: in Lua
+              -- that expression always falls through to `battle` when the
+              -- true arm is nil. v0.1.85 therefore stored the Gen-2 *logic*
+              -- object here and tried to render it as a BattleState screen.
+              battle = liveScreen,
               logicBattle = battle, shot = nil,
               armed = false, token = 0 }
   cullCast(state)
@@ -704,7 +711,15 @@ function OverworldBattle.update(dt)
   if gold then
     if top ~= nil then
       session.armed = true
-      if top.isBattle == true then session.battle = top end
+      -- Current Gold's screen is src.ui.gen2.BattleState.  It is opaque but
+      -- deliberately has no `isBattle` marker; the v0.1.85 hook therefore
+      -- mistook it for an unrelated pushed screen and never rendered a shot.
+      -- Match the actual Gen-2 battle object captured at pushBattleTransition
+      -- instead.  Submenus pushed above it do not own that exact object.
+      if type(top) == "table" and top.battle ~= nil
+         and (session.logicBattle == nil or top.battle == session.logicBattle) then
+        session.battle = top
+      end
     elseif session.armed then
       OverworldBattle.finish()
       return
@@ -725,13 +740,19 @@ function OverworldBattle.update(dt)
   -- was solved for (the slow drift aside, which was always there). Polled
   -- per frame rather than latched at battle start: the row is reachable
   -- from the mod manager's page mid-session.
-  BattleCam.steerable = not OverworldBattle.backPinned()
-  -- the right stick, read as a rate before the rig is built from it: the
-  -- wheel, the keys, the mouse and a drag all arrive as events and have
-  -- already landed, but a stick is a HELD position and only a tick can
-  -- turn it into travel (CamControl, which owns every one of those inputs)
-  pcall(V.require("CamControl").tick, dt)
-  BattleCam.update(dt)
+  -- Gold v0.1.89 deliberately keeps the exact overworld camera that was on
+  -- screen when the encounter started. The old BattleCam/CamControl path is a
+  -- separate staged-arena camera and is therefore only meaningful to the
+  -- legacy Gen-1 presentation.
+  if not gold then
+    BattleCam.steerable = not OverworldBattle.backPinned()
+    -- the right stick, read as a rate before the rig is built from it: the
+    -- wheel, the keys, the mouse and a drag all arrive as events and have
+    -- already landed, but a stick is a HELD position and only a tick can
+    -- turn it into travel (CamControl, which owns every one of those inputs)
+    pcall(V.require("CamControl").tick, dt)
+    BattleCam.update(dt)
+  end
   -- the battle only exists once it has been pushed; a session opened at
   -- pushBattle time has it, one opened from battle.started was handed it
   if not gold then
@@ -753,15 +774,23 @@ function OverworldBattle.update(dt)
   -- headset, both eyes all draw the same skinned meshes.
   pcall(function()
     local host = (session.arena and session.arena.map) or session.state.map
-    V.require("Stadium").update(dt, session.battle,
-                                BattleScene.groundY(host, session.arena))
+    local stadium = V.require("Stadium")
+    local groundY = BattleScene.groundY(host, session.arena)
+    if gold and type(stadium.updateGen2) == "function" then
+      stadium.updateGen2(dt, session.battle, groundY)
+    else
+      stadium.update(dt, session.battle, groundY)
+    end
   end)
 
   -- The mons' textures are rendered HERE, with no canvas bound, for the same
   -- reason the scene is: the pics layer binds its own targets, and doing that
   -- inside somebody else's frame means putting the frame back afterwards.
-  local okTex, textures = pcall(OverworldBattle.textures, session.battle)
-  if not okTex then textures = nil end
+  local okTex, textures = true, nil
+  if not gold then
+    okTex, textures = pcall(OverworldBattle.textures, session.battle)
+    if not okTex then textures = nil end
+  end
   -- stashed for the VR eye pass, which stands these same pics on the map
   -- in ITS view of the world (VoxelScene's eyes path). Stashed HERE
   -- because rendering them binds canvases, which the eye pass -- mid-scene
@@ -780,8 +809,56 @@ function OverworldBattle.update(dt)
     if okA then session.animTex = anim end
   end
   session.token = (session.token or 0) + 1
-  local ok, shot = pcall(BattleScene.render, session.state, session.arena,
-                         textures, session.token)
+  local ok, shot
+  if gold then
+    -- Gold's battle backdrop is the ACTUAL frozen overworld frame, not a
+    -- second BattleScene camera. Render the same VoxelScene the player was
+    -- already looking at and let it draw the two live Stadium combatants in
+    -- world space. The state was captured from GoldVoxelBridge before the
+    -- transition, so camera, map, player and terrain all remain identical to
+    -- the encounter frame.
+    ok, shot = pcall(function()
+      local G = love and love.graphics
+      if not G then return nil end
+      local pw, ph
+      if G.getPixelDimensions then
+        local okDim, a, b = pcall(G.getPixelDimensions)
+        if okDim then pw, ph = tonumber(a), tonumber(b) end
+      end
+      if not (pw and ph and pw > 0 and ph > 0) then
+        pw, ph = G.getDimensions()
+      end
+      local world = g and g.world
+      local vw = tonumber(world and world.viewW)
+      local vh = tonumber(world and world.viewH)
+      if not (vw and vh and vw > 0 and vh > 0) then
+        local ww, wh = G.getDimensions()
+        local scale = 1
+        if world and type(world.zoomScale) == "function" then
+          local okScale, value = pcall(world.zoomScale, world)
+          if okScale and tonumber(value) and tonumber(value) > 0 then
+            scale = tonumber(value)
+          end
+        end
+        vw, vh = math.max(1, math.ceil(ww / scale)),
+                 math.max(1, math.ceil(wh / scale))
+      end
+      session.state._stadiumLiveBattle = true
+      local canvas = V.require("VoxelScene").render(
+        session.state, pw, ph, vw, vh, nil)
+      if not canvas then return nil end
+      return {
+        canvas = canvas,
+        liveWorld = true,
+        pw = pw, ph = ph,
+        -- Kept for diagnostics and callers that label the battle site.
+        arena = session.arena,
+      }
+    end)
+  else
+    ok, shot = pcall(BattleScene.render, session.state, session.arena,
+                     textures, session.token)
+  end
   if not ok then
     -- One failure retires the arena for THIS battle and nothing else: the
     -- battle screen carries on as the engine's own, the free-roam pipeline
@@ -1247,7 +1324,136 @@ end
 --
 -- Four wraps, each idempotent so a hot reload cannot stack them.
 
+-- Current Gold's battle UI is a separate class from the Gen-1 BattleState
+-- this module originally wrapped.  v0.1.85 only patched the latter, so even a
+-- successfully rendered encounter-site canvas was covered by Gen2's opaque
+-- white panel and its flat Pokemon pics.  Keep the Gold shim deliberately
+-- small: Gold continues to own every menu/HUD/text/animation; we only make the
+-- field transparent and omit a flat pic when a real Stadium model is present.
+local function goldShotFor(screen)
+  if not (session and not session.broken and session.battle == screen) then
+    return nil
+  end
+  local shot = session.shot
+  return (shot and shot.canvas) and shot or nil
+end
+
+local function installGoldBattleState()
+  local okState, GoldBattleState = pcall(require, "src.ui.gen2.BattleState")
+  if not okState or type(GoldBattleState) ~= "table" then return false end
+  if GoldBattleState.stadiumInWorldBattleUiHook then return true end
+
+  local okChrome, Chrome = pcall(require, "src.ui.gen2.Chrome")
+  if not okChrome or type(Chrome) ~= "table" then return false end
+
+  -- Gold's native battle-animation presenter assumes an opaque white 160x144
+  -- battle BG. During attacks it bakes that panel to a canvas, fills exposed
+  -- scanlines white, and blits the rows back after SCX/SCY/BGP effects. Once
+  -- our panel is transparent those "blank BG" rows become the black/white
+  -- rectangle seen over the voxel world. For a live-world battle, keep Gold's
+  -- OBJ effect sprites but do not run the old opaque-background scanline pass.
+  -- BattleState calls drawObjects immediately after `present`, so calling the
+  -- panel directly here preserves the attack effects without ever replacing
+  -- the overworld backdrop.
+  local okAnimView, GoldAnimView = pcall(require, "src.ui.gen2.BattleAnimView")
+  if okAnimView and type(GoldAnimView) == "table"
+     and not GoldAnimView.stadiumLiveWorldBackgroundHook then
+    if type(GoldAnimView.present) == "function" then
+      local innerPresent = GoldAnimView.present
+      function GoldAnimView:present(runner, drawBg, ...)
+        if session and session.battle and session.shot
+           and session.shot.canvas and session.shot.liveWorld then
+          if type(drawBg) == "function" then drawBg() end
+          return
+        end
+        return innerPresent(self, runner, drawBg, ...)
+      end
+    end
+    if type(GoldAnimView.presentSlide) == "function" then
+      local innerSlide = GoldAnimView.presentSlide
+      function GoldAnimView:presentSlide(frame, drawBg, drawBack, ...)
+        if session and session.battle and session.shot
+           and session.shot.canvas and session.shot.liveWorld then
+          if type(drawBg) == "function" then drawBg() end
+          -- The caller has lifted the trainer back-pic out of the BG while an
+          -- intro slide is active. Put it at its final position rather than
+          -- leaving it missing; the world itself intentionally does not slide.
+          if type(drawBack) == "function" then drawBack(0) end
+          return
+        end
+        return innerSlide(self, frame, drawBg, drawBack, ...)
+      end
+    end
+    GoldAnimView.stadiumLiveWorldBackgroundHook = true
+  end
+
+  if type(GoldBattleState.drawPanel) == "function" then
+    local innerPanel = GoldBattleState.drawPanel
+    function GoldBattleState:drawPanel(...)
+      if not goldShotFor(self) then return innerPanel(self, ...) end
+      local clear = Chrome.clear
+      Chrome.clear = function()
+        -- Preserve the native panel's end-state (black ink colour), but make
+        -- its full 160x144 paper transparent so GoldComposeBridge can put the
+        -- voxel encounter site underneath it.
+        love.graphics.clear(0, 0, 0, 0)
+        love.graphics.setColor(0, 0, 0, 1)
+      end
+      local ok, a, b, c = pcall(innerPanel, self, ...)
+      Chrome.clear = clear
+      if not ok then error(a, 0) end
+      return a, b, c
+    end
+  end
+
+  if type(GoldBattleState.drawPic) == "function" then
+    local innerPic = GoldBattleState.drawPic
+    function GoldBattleState:drawPic(mon, playerSide, ...)
+      if goldShotFor(self) then
+        local side = playerSide and "player" or "enemy"
+        local okVisible, visible = pcall(function()
+          return V.require("Stadium").visible(side)
+        end)
+        if okVisible and visible then
+          -- During the opening Gold intentionally shows the trainer's back
+          -- sprite in the player's slot.  That is not the Pokemon duplicate
+          -- we are replacing, so let it through until SendOutPlayerMon swaps
+          -- the slot to the party mon.
+          if not (playerSide and self.showPlayerTrainer) then return end
+        end
+      end
+      return innerPic(self, mon, playerSide, ...)
+    end
+  end
+
+  if type(GoldBattleState.drawWidescreen) == "function" then
+    local innerWide = GoldBattleState.drawWidescreen
+    function GoldBattleState:drawWidescreen(winW, winH, ...)
+      if not goldShotFor(self) then return innerWide(self, winW, winH, ...) end
+      -- Gen2's native implementation starts with a window-sized white fill.
+      -- Reproduce only its centred integer-scaled 160x144 UI draw; the world
+      -- itself is already a window-sized canvas underneath in compose.
+      local G = love.graphics
+      local scale = Chrome.fitScale(winW, winH)
+      local ox, oy = Chrome.fitOrigin(winW, winH, scale)
+      G.setColor(1, 1, 1, 1)
+      G.push()
+      G.translate(ox, oy)
+      G.scale(scale, scale)
+      self:drawScene()
+      G.pop()
+    end
+  end
+
+  -- Useful both for diagnostics and for the session matcher in older engine
+  -- builds.  Current Gold does not publish an isBattle marker itself.
+  GoldBattleState.stadiumInWorldBattleUiHook = true
+  return true
+end
+
 function OverworldBattle.install()
+  pcall(installGoldBattleState)
+
   -- Gold: snapshot/stage at the exact moment World has constructed the battle
   -- object but before Gen2BattleTransition is pushed. This is the last point
   -- where the live encounter map and player position are guaranteed present.
@@ -1256,7 +1462,12 @@ function OverworldBattle.install()
      and not GoldWorld.stadiumInWorldBattleHook then
     local inner = GoldWorld.pushBattleTransition
     function GoldWorld:pushBattleTransition(battle, opts, onDone)
-      if not (opts and (opts.tutorial or opts.contest or opts.safari)) then
+      -- v0.1.87 intentionally scopes the new live-world presentation to the
+      -- encounter case it is designed for.  Trainer/tutorial/contest/safari
+      -- battles keep Gold's native staging until they have purpose-built 3D
+      -- choreography of their own.
+      local ordinaryWild = battle and battle.wild == true
+      if ordinaryWild and not (opts and (opts.tutorial or opts.contest or opts.safari)) then
         local state = self
         if type(V.goldStateForWorld) == "function" then
           local okState, adapted = pcall(V.goldStateForWorld, self)

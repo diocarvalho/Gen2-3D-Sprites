@@ -380,6 +380,11 @@ end
 local function rendererPixels(map)
   local renderer = map.renderer
   if not renderer then return nil end
+  -- GoldColorAtlas already owns the exact CPU pixels behind its private
+  -- per-tile GBC atlas. Prefer them over the Gen-1/RED++ reconstruction path
+  -- below; this also lets water/flower animation inherit the same Gold colors
+  -- without a GPU readback.
+  if renderer._stadiumAtlasData then return renderer._stadiumAtlasData end
   if TileRenderer.atlasImageData then
     local ok, data = pcall(TileRenderer.atlasImageData, renderer)
     if ok and data then return data end
@@ -521,8 +526,12 @@ function TerrainAtlas.animate(map, colors, base, baked)
   -- on the tileset and palette alone, which is bounded by how many of those
   -- exist at all.
   local perMap = map.renderer and map.renderer.gbcAtlas and map.id or nil
+  -- Gold's GBC atlas can change while staying on the same map (MORN/DAY/NITE
+  -- or a COLOR-mode change). Include its bake key so an animated water/flower
+  -- copy cannot keep sampling yesterday's/previous-mode colors.
+  local colorTag = map.renderer and map.renderer._stadiumColorKey or ""
   local key = map.tileset.image .. "#a#" .. paletteKey(colors or {})
-    .. (perMap or "")
+    .. (perMap or "") .. tostring(colorTag)
   local entry = animated[key]
   if entry == nil then
     entry = newEntry(map, base, baked)

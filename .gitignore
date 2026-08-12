@@ -1,5 +1,3 @@
 dist/
-release_asset/
-*.zip
+*.tmp
 .DS_Store
-Thumbs.db

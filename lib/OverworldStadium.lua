@@ -141,6 +141,14 @@ local function logOnce(key, fmt, ...)
 end
 
 local function gameObject()
+  -- Gold/Game2 is supplied live by GoldVoxelBridge as V.game. Prefer it so
+  -- party slot #1 and Gen-2 data resolve from the active save. Keep the old
+  -- Gen-1 singleton fallback for compatibility with the shared renderer.
+  if type(V.game) == "table" then return V.game end
+  local ok2, Game2 = pcall(require, "src.core.Game2")
+  if ok2 and type(Game2) == "table" and (Game2.world or Game2.save) then
+    return Game2
+  end
   local ok, Game = pcall(require, "src.core.Game")
   if not ok or type(Game) ~= "table" then return nil end
   return Game
@@ -971,15 +979,7 @@ local function prepareOne(p, dex, dt)
   -- main.lua publishes after Sky Ride and Followers EX finish updating.
   local renderFacing = (skyMount and entity._stadiumSkyRideAnchorFacing)
       or p.facing
-  local fx, fz
-  -- In Gold FIRST/THIRD PERSON the free-walk body bearing is continuous.
-  -- Let a player-controlled Stadium Pokemon use that true bearing too instead
-  -- of snapping the 3D model back to the nearest four-way sprite direction.
-  if p.isPlayer and FirstPerson and tonumber(FirstPerson.bodyYaw) then
-    fx, fz = math.sin(FirstPerson.bodyYaw), math.cos(FirstPerson.bodyYaw)
-  else
-    fx, fz = facingVector(renderFacing)
-  end
+  local fx, fz = facingVector(renderFacing)
   local x = ((skyMount and tonumber(entity._stadiumSkyRideAnchorPx))
       or (p.px or 0)) + 8
   local z = ((skyMount and tonumber(entity._stadiumSkyRideAnchorPy))
@@ -1186,23 +1186,6 @@ end
 -- voxel scene.  This deliberately calls the selector's own drawVoxel method
 -- rather than copying any character/model logic, so all built-in, imported,
 -- renamed, scaled, accessory-equipped, and future skins remain selector-owned.
-local function withFreeWalkAnimation(entity, fn)
-  if type(fn) ~= "function" then return false end
-  if not entity or not entity._stadiumFreeMoving then
-    return fn()
-  end
-  -- Gold's 360-degree controller deliberately keeps Player.moving false so
-  -- cartridge movement logic does not start its own grid interpolation. The
-  -- 3D Character Selector uses that same flag only as its locomotion gate.
-  -- Lie about it only for the renderer call, then restore it immediately.
-  local oldMoving = entity.moving
-  entity.moving = true
-  local ok, a, b = pcall(fn)
-  entity.moving = oldMoving
-  if not ok then error(a, 0) end
-  return a, b
-end
-
 function OverworldStadium.drawPlayerSkin(p)
   local renderer = red3dRendererForPose(p)
   if not renderer then return false end
@@ -1213,9 +1196,8 @@ function OverworldStadium.drawPlayerSkin(p)
     return false
   end
 
-  local ok, result = pcall(withFreeWalkAnimation, p.entity, function()
-    return renderer:drawVoxel(p.entity, p, Voxel3D, Mat4, FirstPerson)
-  end)
+  local ok, result = pcall(renderer.drawVoxel, renderer, p.entity, p,
+                           Voxel3D, Mat4, FirstPerson)
   if not ok then
     logOnce("red3d-draw",
       "3D Character Selector player draw failed in Gold voxel mode; using the stock trainer card: %s",
@@ -1250,10 +1232,8 @@ function OverworldStadium.castPlayerSkin(p, shadowMap)
   if not okVoxel or type(Voxel3D) ~= "table" or not okFP or type(FirstPerson) ~= "table" then
     return false
   end
-  local ok, result = pcall(withFreeWalkAnimation, p.entity, function()
-    return renderer:drawVoxelShadow(p.entity, p, Voxel3D, Mat4, shadowMap,
-                                    FirstPerson)
-  end)
+  local ok, result = pcall(renderer.drawVoxelShadow, renderer, p.entity, p,
+                           Voxel3D, Mat4, shadowMap, FirstPerson)
   if not ok then
     logOnce("red3d-shadow",
       "3D Character Selector player shadow failed in Gold voxel mode: %s", tostring(result))

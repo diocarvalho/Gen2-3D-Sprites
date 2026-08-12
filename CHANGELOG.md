@@ -1,3 +1,31 @@
+# v0.1.90 — battle-mode toggle + updater-ready repo
+
+- Promoted the live encounter-world battle presentation to the main Mod Settings as **LIVE OVERWORLD BATTLES**.
+- The setting defaults **ON**. Turning it **OFF** returns ordinary wild battles to Gold's classic battle presentation without uninstalling the mod.
+- Keeps the lean Gen-2-only package layout from v0.1.89.
+- Keeps the updater repository target `randyadr/Gen2-3D-Sprites`.
+
+# v0.1.89 — live overworld battle camera + lean Gen-2 package
+
+- Gold ordinary wild battles now render the normal frozen `VoxelScene` at the exact encounter camera instead of `BattleScene`'s separate staged camera.
+- Stadium combatants are drawn and shadowed inside that normal voxel world pass.
+- Live-world battles bypass the native opaque `BattleAnimView.present` / intro background transform, preventing black/white 160×144 rectangles during attacks. Native Gold battle HUD/text and animation OBJ sprites remain layered above the voxel world.
+- Removed legacy Yellow/Followers-EX/Dramatic-Sky-Ride startup glue from `main.lua` and removed dead Gen-1/free-movement modules unreachable from the Gold loader.
+- Removed duplicate raw follow-sprite and Pokédex-mapping source libraries.
+- Removed raw water-sprite source PNGs; the compact species/form mappings and prebuilt runtime sheets remain.
+- Pruned generated follower/water/silhouette sheets to National Dex 1–251 and rewrote their manifests accordingly.
+
+# v0.1.87 — lead-party follower + real Gold in-world 3D battle fix
+
+- Added **LEAD PARTY FOLLOWER**, enabled by default. Party slot #1 uses current Gold's native `src.world.gen2.Follower` trail and the Stadium 2 model renderer. Reordering the party updates the follower species automatically; biking/surfing hide it.
+- Reverted the accidental v0.1.84 true-360/free-walk controller from this project. First/Third Person again use the proven camera-relative cardinal adapter from v0.1.80/0.1.83, preserving Gold's native grid movement.
+- Removed the temporary `_stadiumFreeMoving` / `Player.moving` animation shim so `red_3d_player` and other character mods receive the real Gold movement state and own their animation decisions.
+- Fixed in-world 3D wild battles to hook the actual current Gold class, `src.ui.gen2.BattleState`, instead of the Gen-1 `src.battle.BattleState`.
+- Fixed a Lua nil/or bug in battle startup: `isGoldGame() and nil or battle` could never produce nil, so v0.1.85/0.1.86 stored the Gen-2 battle logic object where the renderer expected the live BattleState screen.
+- The Gold battle UI now clears its full-screen white paper to transparency only while a valid 3D shot exists, and flat Pokemon pics are suppressed per side only when the Stadium 2 model is actually visible. Gold's HUDs, menus, text, move effects and battle logic stay native.
+- In-world staging is deliberately scoped to ordinary wild encounters; tutorial, contest, Safari and trainer battles retain native presentation.
+- Retains the v0.1.86 updater repository `randyadr/Gen2-3D-Sprites` and non-experimental packaging.
+
 # v0.1.83 — restore voxel 3D + weather fail-safe
 
 - Fixed v0.1.82 disabling voxel 3D because `VoxelScene.lua` tried to load an accidental duplicate `WeatherFX` module that was not part of the packaged renderer.

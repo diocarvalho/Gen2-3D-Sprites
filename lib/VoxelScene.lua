@@ -885,6 +885,12 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   for _, card in ipairs(battleCards or {}) do
     ShadowMap.draw(BattleBillboard.mesh(), card.tex, ShadowMap.snug(card.model))
   end
+  -- Gold v0.1.89 keeps battles in the normal overworld camera. The Stadium
+  -- combatants therefore belong to this ordinary world shadow pass instead of
+  -- BattleScene's separate staged pass.
+  if state and state._stadiumLiveBattle then
+    pcall(function() V.require("Stadium").cast(ShadowMap) end)
+  end
   ShadowMap.sprites(false)
 
   ShadowMap.finish(sig)
@@ -1077,6 +1083,13 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- character genuinely behind a building is far deeper and loses the
   -- test, so buildings and trees really occlude.
   drawCast(state, posed, atlasFor)
+  -- Live Gold battles are rendered by this SAME VoxelScene instead of by a
+  -- second arena camera. Their real Stadium models are ordinary world-space
+  -- actors here: terrain/buildings can occlude them, weather stays in place,
+  -- and the camera never cuts away from the encounter view.
+  if state and state._stadiumLiveBattle then
+    pcall(function() V.require("Stadium").draw(0) end)
+  end
   -- The staged fight's mons, standing on their arena cells in THIS eye's
   -- view (VR frames only; battleTex is nil otherwise). Rebuilt per eye
   -- because the cards yaw toward the eye that is looking. No wireframe
