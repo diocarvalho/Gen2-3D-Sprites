@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
   "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.1.85",
+  "version": "0.1.86",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -23,9 +23,9 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.1.85 adds IN-WORLD 3D BATTLES: normal Gold battles are staged on the exact voxel overworld map/encounter site with Stadium 2 Pokemon models, the map's terrain, trees, buildings, day/night sky and weather behind Gold's native battle UI and logic. It also fixes v0.1.84 true-360 player locomotion so 3D Character Selector skins animate while continuous walking. Retains non-experimental status, camera modes, camera-relative 360 movement, Johto tree fix, all-Pokemon 3D fallback, Skin Selector compatibility and visible START/pause overlays.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.1.86 fixes the Gen1Recomp updater repository to randyadr/Gen2-3D-Sprites. Runtime behavior otherwise matches v0.1.85: in-world 3D battles, weather, camera modes, Johto tree geometry, all-Pokemon 3D fallback, Skin Selector compatibility, and visible START/pause overlays.",
   "options_schema": "options.lua",
-  "github": "randyadr/3D-Pokemon-Sprites-Gen2",
+  "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,
   "games": [
     "gen2"
