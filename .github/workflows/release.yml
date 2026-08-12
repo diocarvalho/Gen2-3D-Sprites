@@ -1,0 +1,129 @@
+name: Release
+
+# Builds the installable Gen1Recomp ZIP and publishes it as a GitHub Release.
+# The archive is intentionally clean: manifest.json and all runtime files live
+# at the ZIP root, while repo/index helper files are excluded.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - 'mods/**'
+      - 'RELEASE_SETUP.md'
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact version to release (X.Y.Z). Leave blank to use manifest.json."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stadium2-gen2-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: ver
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re, subprocess, sys
+          semver = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+          def parse(s):
+              m = semver.match(s or "")
+              return tuple(map(int, m.groups())) if m else None
+          def sh(*args):
+              return subprocess.run(args, capture_output=True, text=True).stdout.strip()
+          with open('manifest.json', encoding='utf-8') as fh:
+              manifest_version = str(json.load(fh)['version'])
+          requested = os.environ.get('DISPATCH_VERSION', '').strip()
+          version = requested or manifest_version
+          if not parse(version):
+              raise SystemExit(f'::error::Invalid version {version!r}; expected X.Y.Z')
+          tag = f'v{version}'
+          if sh('git', 'tag', '-l', tag):
+              raise SystemExit(f'::error::Tag {tag} already exists')
+          print(f'version={version}')
+          print(f'tag={tag}')
+          PY
+
+      - name: Build installable ZIP
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          MOD_ID: STADIUM2_OVERWORLD_MODELS
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/pkg"
+          out="$GITHUB_WORKSPACE/dist"
+          rm -rf "$staging" "$out"
+          mkdir -p "$staging" "$out"
+          git archive HEAD | tar -x -C "$staging"
+
+          rm -rf \
+            "$staging/.github" \
+            "$staging/mods" \
+            "$staging/release_asset" \
+            "$staging/RELEASE_SETUP.md" \
+            "$staging/.gitignore" \
+            "$staging/.gitattributes" \
+            "$staging/.luarc.json"
+
+          python3 - "$staging/manifest.json" "$VERSION" <<'PY'
+          import json, sys
+          path, version = sys.argv[1], sys.argv[2]
+          with open(path, encoding='utf-8') as fh:
+              manifest = json.load(fh)
+          manifest['version'] = version
+          with open(path, 'w', encoding='utf-8') as fh:
+              json.dump(manifest, fh, indent=2, ensure_ascii=False)
+              fh.write('\n')
+          PY
+
+          zip_path="$out/${MOD_ID}-${VERSION}.zip"
+          (cd "$staging" && zip -qr "$zip_path" .)
+          unzip -t "$zip_path"
+          unzip -p "$zip_path" manifest.json > "$RUNNER_TEMP/packed-manifest.json"
+
+          python3 - "$RUNNER_TEMP/packed-manifest.json" "$VERSION" "$MOD_ID" <<'PY'
+          import json, sys
+          path, expected_version, expected_id = sys.argv[1:]
+          with open(path, encoding='utf-8') as fh:
+              manifest = json.load(fh)
+          assert manifest['id'] == expected_id, (manifest['id'], expected_id)
+          assert manifest['version'] == expected_version, (manifest['version'], expected_version)
+          assert manifest.get('github') == 'randyadr/3D-Pokemon-Sprites-Gen2'
+          print(f"Validated {expected_id} {expected_version}")
+          PY
+
+          (cd "$out" && sha256sum "${MOD_ID}-${VERSION}.zip" > sha256sums.txt)
+          cat "$out/sha256sums.txt"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          MOD_ID: STADIUM2_OVERWORLD_MODELS
+        run: |
+          set -euo pipefail
+          notes=$'Install from Gen1Recomp: MODS > Import mod .zip.\n\nThis release is also discoverable by the mod index / Update / Versions flow.'
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "$notes" \
+            "dist/${MOD_ID}-${VERSION}.zip" \
+            "dist/sha256sums.txt"

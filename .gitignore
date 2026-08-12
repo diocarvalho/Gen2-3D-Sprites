@@ -1,0 +1,5 @@
+dist/
+release_asset/
+*.zip
+.DS_Store
+Thumbs.db

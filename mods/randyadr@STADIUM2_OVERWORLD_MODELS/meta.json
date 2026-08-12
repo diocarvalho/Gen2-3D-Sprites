@@ -1,0 +1,20 @@
+{
+  "id": "STADIUM2_OVERWORLD_MODELS",
+  "title": "Pokemon Stadium 2 Overworld Models - Gold/Silver",
+  "author": "randyadr",
+  "summary": "Gold/Silver voxel overworld with Stadium 2 models, visible roaming Pokemon, weather, 3D cameras, and in-world battles.",
+  "version": "0.1.85",
+  "categories": ["ART", "CONTENT", "GAMEPLAY"],
+  "tags": ["gold", "silver", "gen2", "pokemon", "stadium 2", "voxel", "3d", "overworld"],
+  "repo": "https://github.com/randyadr/3D-Pokemon-Sprites-Gen2",
+  "github": "randyadr/3D-Pokemon-Sprites-Gen2",
+  "automatic_version_check": true,
+  "api": 2,
+  "game_version": "0.0.0-dev || >0.1.77 <2.0.0",
+  "profile": "content",
+  "affects_link": false,
+  "experimental": false,
+  "permissions": ["engine_internals", "filesystem"],
+  "dependencies": [],
+  "conflicts": ["STADIUM_OVERWORLD_MODELS"]
+}
