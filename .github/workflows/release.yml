@@ -105,7 +105,7 @@ jobs:
               manifest = json.load(fh)
           assert manifest['id'] == expected_id, (manifest['id'], expected_id)
           assert manifest['version'] == expected_version, (manifest['version'], expected_version)
-          assert manifest.get('github') == 'randyadr/3D-Pokemon-Sprites-Gen2'
+          assert manifest.get('github') == 'randyadr/Gen2-3D-Sprites'
           print(f"Validated {expected_id} {expected_version}")
           PY
 
@@ -120,7 +120,7 @@ jobs:
           MOD_ID: STADIUM2_OVERWORLD_MODELS
         run: |
           set -euo pipefail
-          notes=$'Install from Gen1Recomp: MODS > Import mod .zip.\n\nThis release is also discoverable by the mod index / Update / Versions flow.'
+          notes=$'Install from Gen1Recomp: MODS > Import mod .zip.\n\nThis release is discoverable by the mod index / Update / Versions flow.'
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
