@@ -1,0 +1,19 @@
+bryanthaboi/gen1recomp matching source snapshot
+
+Repository: https://github.com/bryanthaboi/gen1recomp
+Branch at snapshot: dev
+Commit: f6a035947f7593baad6a9afca3b1157bfc76004a
+Commit date: 2026-08-13
+Official GitHub Actions CI run: 31726152142
+Official artifact used to recover the packaged runtime source: gen1recomp-xbox-uwp (artifact 9191361462)
+
+Verification against GitHub blob SHAs at this exact commit:
+  src/ui/gen2/BattleState.lua  d3dfbd761a8d8dd4b76a528d10096dce4caeec5d
+  src/ui/gen2/PackMenu.lua      7c84f3c4fe46a8e3d2dfbbcce705d002a20287d5
+  src/core/Input.lua            5ff73007888306da02c5c59926f9bba2cf41309c
+
+This ZIP is the official CI-packaged runtime source tree for the pinned commit,
+expanded from gen1recomp.love and supplied as a normal source ZIP for matching
+this mod. It contains the engine/runtime source, data, assets, and shipped tools
+used by the build. It does not contain Git history or repository-only CI/tests/docs
+that the release packager excludes.
