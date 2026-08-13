@@ -54,21 +54,13 @@ StadiumInstall.MARKER = StadiumInstall.DIR .. "/pack.info"
 
 -- Bumped whenever the .dsm format changes, so an old cache is rebuilt rather
 -- than misread. Must track StadiumPack's magic.
-StadiumInstall.FORMAT = "DSM4"
+StadiumInstall.FORMAT = "DSM5"
 
--- Bumped when the packs' CONTENT changes without the byte layout moving, so
--- a cache built by an older extractor is rebuilt rather than trusted. Rev 2
--- is the hermite-animation decode fix: the five keyframe species (Pidgeot,
--- Dodrio, Exeggutor, Tangela, Magmar) come out garbled or bind-posed from
--- any rev-1 build.
---
--- v0.2.09's full-3D standby detector intentionally does NOT bump this to 3:
--- StadiumRig repeats the new validation from the already-packed DSM data and
--- marks unstable clips static in memory.  Keeping REV=2 means a player who
--- originally imported their Stadium 2 ROM through the file picker does not lose
--- every 3D model merely because that ROM is not still mounted; old caches get
--- the repair automatically.  Fresh builds also bake the stronger static bit.
-StadiumInstall.REV = 2
+-- Bumped when the packs' CONTENT changes without the byte layout moving.
+-- DSM5 itself is the v0.2.16 structural fix: each bone now retains geo command
+-- 0x1D's transform flags, so an old DSM4 cache MUST be rebuilt from the
+-- player's Stadium 2 ROM instead of being heuristically repaired at runtime.
+StadiumInstall.REV = 3
 
 local function gameGeneration()
   local ok, GameVersion = pcall(require, "src.core.GameVersion")
@@ -192,9 +184,16 @@ local readyCache = nil
 function StadiumInstall.ready()
   if readyCache ~= nil then return readyCache end
   local m = readMarker()
-  readyCache = (m ~= nil and m.format == StadiumInstall.FORMAT
-                and m.count >= targetCount()
-                and m.rev == StadiumInstall.REV) and true or false
+  -- v0.2.19 recovery contract. v0.2.18 wrote DSM5 content revision 2
+  -- after changing geo-layout flattening globally; those packs may contain
+  -- bad parent/transform relationships even after the runtime renderer is
+  -- rolled back. Reject rev2 so affected installs cannot keep serving that
+  -- poisoned cache. Known-good DSM5 rev1 and DSM4 rev2 remain accepted,
+  -- while a clean rebuild from this release is marked DSM5 rev3.
+  local formatOk = m and (((m.format == StadiumInstall.FORMAT) and
+                            (m.rev == StadiumInstall.REV or m.rev == 1))
+                           or (m.format == "DSM4" and m.rev == 2))
+  readyCache = (formatOk and m.count >= targetCount()) and true or false
   return readyCache
 end
 
@@ -252,6 +251,40 @@ local function writePack(species, bytes)
   local ok, err = f.write(("%s/%03d.dsm"):format(StadiumInstall.DIR, species),
                           bytes)
   if not ok then return false, tostring(err) end
+
+  -- v0.2.22 diagnostic convenience: keep a clearly named COPY of Lugia's
+  -- generated DSM beside the raw geo-layout dump.  The normal 249.dsm remains
+  -- in its usual place and is byte-for-byte identical; this copy exists only
+  -- so the player can zip/upload two obvious files without hunting through the
+  -- whole cache directory.
+  if tonumber(species) == 249 then
+    local dbg = StadiumInstall.DIR .. "/lugia_debug"
+    pcall(f.createDirectory, dbg)
+    pcall(f.write, dbg .. "/249.dsm", bytes)
+    local saveDir = "<save directory>"
+    if type(f.getSaveDirectory) == "function" then
+      local okSave, got = pcall(f.getSaveDirectory)
+      if okSave and got then saveDir = tostring(got) end
+    end
+    local note = table.concat({
+      "STADIUM2_OVERWORLD_MODELS v0.2.22 - Lugia diagnostic files",
+      "",
+      "Upload BOTH of these files back to ChatGPT:",
+      "  1) 249_geo_dump.txt",
+      "  2) 249.dsm",
+      "",
+      "They are generated from your local Stadium 2 import. The text dump",
+      "contains offsets/numeric transform information only, not ROM model bytes.",
+      "",
+      "Save directory:",
+      saveDir,
+      "",
+      "Relative folder:",
+      dbg,
+      "",
+    }, "\n")
+    pcall(f.write, dbg .. "/UPLOAD_THESE_TWO_FILES.txt", note)
+  end
   return true
 end
 

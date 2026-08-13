@@ -61,6 +61,7 @@ local V = ...
 local Mat4 = V.require("Mat4")
 local StadiumPack = V.require("StadiumPack")
 local StadiumRig = V.require("StadiumRig")
+local LugiaRescue = V.require("LugiaRescue")
 
 local StadiumMon = {}
 StadiumMon.__index = StadiumMon
@@ -106,12 +107,8 @@ StadiumMon.HOVER_CAP = 0.5
 -- same rate.
 StadiumMon.FPS = StadiumPack.FPS
 
--- Stadium 2 Lugia used to be hard-disabled here after its hierarchy exploded
--- into detached pieces.  v0.2.15 removes that blanket 2D fallback: StadiumRig
--- now probes multiple bind-hierarchy interpretations for Dex 249 and keeps the
--- most compact valid 3D assembly.  If every repair probe fails, setSpecies
--- still returns false naturally and the existing sprite fallback remains the
--- last-resort safety net.
+-- Dex 249 uses the real Stadium 2 pack again in v0.2.22. The procedural
+-- Lugia module is retained strictly as a last-resort load/GPU fallback.
 local FORCE_SPRITE_FALLBACK = {}
 
 -- ------- coming out of the ball
@@ -236,8 +233,25 @@ function StadiumMon:setSpecies(dex, allowStatic)
   self.grow, self.grewOwn = nil, nil
   if not dex then return false end
   if FORCE_SPRITE_FALLBACK[dex] then return false end
+
+  -- v0.2.22: the uploaded Dex-249 diagnostics proved that Lugia's original
+  -- DSM skeleton/geometry is coherent.  What looked like an exploded model
+  -- was the renderer skipping its textureless 647-vertex main body and only
+  -- showing textured detail primitives.  Try the real Stadium 2 pack first.
+  -- The procedural Lugia remains a last-resort GPU/cache fallback only.
   local model = StadiumPack.load(dex)
-  if not model then return false end
+  if not model then
+    if tonumber(dex) == 249 then
+      local rescueModel, rescueRig = LugiaRescue.create()
+      if not (rescueModel and rescueRig) then return false end
+      self.model, self.rig = rescueModel, rescueRig
+      self.staticPose = false
+      self.state, self.anim, self.time = "idle", nil, 0
+      self:play("idle")
+      return true
+    end
+    return false
+  end
 
   -- Stadium 2's current context routing is intentionally conservative and
   -- can mark an otherwise perfectly usable model static when animation 0 is
@@ -248,7 +262,19 @@ function StadiumMon:setSpecies(dex, allowStatic)
   if model.staticPose and not allowStatic then return false end
 
   local rig = StadiumRig.new(model)
-  if not rig then return false end
+  if not rig then
+    if tonumber(dex) == 249 then
+      local rescueModel, rescueRig = LugiaRescue.create()
+      if rescueModel and rescueRig then
+        self.model, self.rig = rescueModel, rescueRig
+        self.staticPose = false
+        self.state, self.anim, self.time = "idle", nil, 0
+        self:play("idle")
+        return true
+      end
+    end
+    return false
+  end
   -- StadiumRig performs a second, cache-safe full-3D validation and may mark
   -- an old DSM model static only after the rig exists.  Re-apply this method's
   -- allowStatic contract here so callers that require animation still get the

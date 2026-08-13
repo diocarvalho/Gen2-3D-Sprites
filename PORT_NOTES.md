@@ -1,3 +1,13 @@
+## v0.2.22 - Dex 249 textureless-body fix
+
+The user-supplied `249.dsm` and `249_geo_dump.txt` falsified the previous hierarchy hypothesis. All 75 extracted joints use flags `0x01`, there are no Lugia-local `0x20`/`0x21` display-list transform nodes, and the stable bind transform produces a coherent silhouette. The missing visual mass was primitive 0: `tex=-1`, 647 vertices, 1,758 indices, spanning 38 bones. `StadiumRig:draw()` skipped parts whose `StadiumPack.image()` returned nil, so this untextured lit body never reached Voxel3D. Dex 249 now maps only the 0xFFFF texture sentinel to a cached opaque 1x1 white image. The shared extractor/rig remains untouched.
+
+## v0.2.16 Lugia root-cause pass: preserve geo joint flags
+
+The previous Lugia recovery passes were working with incomplete packed data. `StadiumFragment` had always decoded command `0x1D`'s `flags` byte, but `StadiumBuild` dropped it when writing DSM4. Stadium's own renderer does not treat all joints the same: `geo_layout.c::func_80018490` converts those bits into a transform mode, and `func_800143C0` selects different matrix/scale behavior from that mode. Lugia's Stadium 2 tree mixes those semantics enough for the lost byte to become visible as detached rigid pieces.
+
+DSM5 adds one raw flag byte to every bone record. Both `StadiumBuild.bindMatrices` and `StadiumRig:pose` now reproduce the two non-camera source paths instead of trying normal/absolute/flat hierarchy guesses. A DSM4 cache cannot be repaired perfectly at runtime because the flag byte was never stored, so the format marker is bumped and a one-time Stadium 2 ROM re-import is intentional.
+
 ## v0.2.15 Lugia hierarchy probe / capture skill pass
 
 Dex 249 is no longer rejected before `StadiumPack.load`. `StadiumRig.new` probes the bind pose before `measureBind`, selecting a hierarchy interpretation only for Lugia. The preferred repair keeps parent rotation while treating translations as model-space; the flat mode is used only when it is dramatically more compact. Repaired stance metrics overwrite the stale DSM4 measurements in memory, so existing caches are usable without deletion. Lugia remains `staticPose=true` because Stadium 2 move/context routing still maps all contexts to animation 0; this prevents a provisional clip from tearing the repaired mesh apart.
@@ -298,3 +308,7 @@ For a live overworld frame (`ctx.generation == 2` and `ctx.worldActive == true`)
 
 ### v0.1.82 weather renderer
 `Weather.paintSky` renders clouds after the day/night sky but before world depth. `Weather.paintOverlay` renders rain/fog before the 3D canvas is returned to Gold compose, so START/text UI remains clean above the weather.
+
+## v0.2.21 - Dex 249 diagnostic isolation
+
+The Lugia investigation is now completely side-band. `lib/LugiaGeoDump.lua` reparses only the original Dex-249 FRAGMENT for logging and never feeds values back to `StadiumFragment`, `StadiumBuild.pack`, `StadiumRig`, or `StadiumPack`. This is specifically designed to prevent another all-Pokemon regression while capturing the static transform and display-list nodes the simplified extractor currently discards.

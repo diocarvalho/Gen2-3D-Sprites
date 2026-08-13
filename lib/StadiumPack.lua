@@ -220,15 +220,19 @@ end
 -- The bone tree, as flat parallel arrays: a rig walk touches every bone
 -- every frame and an array of little tables would be a cache miss per bone
 -- and a table per bone to collect.
-local function readBones(s, p, model)
+local function readBones(s, p, model, hasFlags)
   local n = model.boneCount
-  local parent, t, r, sc = {}, {}, {}, {}
+  local parent, flags, t, r, sc = {}, {}, {}, {}, {}
   for i = 1, n do
     -- 0-based in the file, 1-based here, and 0 for "no parent" so the rig's
-    -- walk can test it without a sentinel comparison
+    -- walk can test it without a sentinel comparison. DSM5 adds the original
+    -- geo-layout joint flags immediately after parent; they decide whether
+    -- scale propagates through the matrix chain or through Stadium's separate
+    -- scale stack.
     local par
     par, p = i16(s, p)
     parent[i] = par + 1
+    if hasFlags then flags[i], p = u8(s, p) end
     local b = (i - 1) * 3
     t[b + 1], p = i16(s, p)
     t[b + 2], p = i16(s, p)
@@ -240,7 +244,15 @@ local function readBones(s, p, model)
     sc[b + 2], p = fixed(s, p)
     sc[b + 3], p = fixed(s, p)
   end
-  model.parent, model.restT, model.restR, model.restS = parent, t, r, sc
+  model.parent = parent
+  model.nodeFlags = hasFlags and flags or nil
+  model.restT, model.restR, model.restS = t, r, sc
+  model.hasExactNodeFlags = hasFlags == true
+  -- v0.2.17 regression guard: DSM5 preserves the raw flag byte, but the
+  -- Stadium 2 meaning of every flag combination is not verified roster-wide.
+  -- Keep the proven DSM4 transform walk for ordinary species and isolate the
+  -- flag-aware experiment to Lugia, the one model that actually needs it.
+  model.useExactNodeFlags = hasFlags == true and tonumber(model.species) == 249
   return p
 end
 
@@ -484,9 +496,37 @@ local function opaqueRgba(bytes)
   return table.concat(out)
 end
 
+local function solidWhiteImage(model)
+  -- Stadium 2 Lugia's largest/main primitive is intentionally untextured.
+  -- In the N64 renderer it is a lit white material, not an absent surface.
+  -- DSM stores texture index -1 as u16 0xFFFF; the reader converts ordinary
+  -- texture indices to Lua's 1-based convention, so that sentinel arrives
+  -- here as 65536.  Older builds returned nil and StadiumRig consequently
+  -- skipped the entire 647-vertex body, leaving only the textured eyes/fins
+  -- floating in space.  Keep this rescue material Dex-249-only so no other
+  -- species' established rendering path changes.
+  if model._lugiaSolidWhite ~= nil then
+    return model._lugiaSolidWhite or nil
+  end
+  local ok, img = pcall(function()
+    local px = string.char(255, 255, 255, 255)
+    local data = love.image.newImageData(1, 1, "rgba8", px)
+    local image = love.graphics.newImage(data)
+    image:setFilter("nearest", "nearest")
+    return image
+  end)
+  model._lugiaSolidWhite = (ok and img) or false
+  return model._lugiaSolidWhite or nil
+end
+
 function StadiumPack.image(model, index)
   local slot = model.textures and model.textures[index]
-  if not slot then return nil end
+  if not slot then
+    if tonumber(model.species) == 249 and tonumber(index) == 65536 then
+      return solidWhiteImage(model)
+    end
+    return nil
+  end
   if slot.image ~= nil then return slot.image or nil end
   local ok, img = pcall(function()
     -- Lugia exposed a Stadium-2 material-alpha mismatch: otherwise-correct
@@ -522,6 +562,10 @@ local function touch(species)
     local drop = table.remove(order, 1)
     local model = cache[drop]
     cache[drop] = nil
+    if model and model._lugiaSolidWhite and model._lugiaSolidWhite.release then
+      pcall(model._lugiaSolidWhite.release, model._lugiaSolidWhite)
+      model._lugiaSolidWhite = nil
+    end
     if model and model.textures then
       for _, slot in ipairs(model.textures) do
         if slot.image and slot.image.release then
@@ -585,13 +629,14 @@ function StadiumPack.load(species)
   end
 
   local ok, model = pcall(function()
-    if bytes:sub(1, 4) ~= "DSM4" then
-      error("not a DSM4 pack -- delete it and let the mod rebuild it", 0)
+    local magic = bytes:sub(1, 4)
+    if magic ~= "DSM4" and magic ~= "DSM5" then
+      error("not a supported DSM4/DSM5 Stadium pack", 0)
     end
-    local m = { bytes = bytes }
+    local m = { bytes = bytes, packFormat = magic }
     local p = 5
     p = readHeader(bytes, p, m)
-    p = readBones(bytes, p, m)
+    p = readBones(bytes, p, m, magic == "DSM5")
     p = readAttachments(bytes, p, m)
     p = readPrims(bytes, p, m)
     p = readTextures(bytes, p, m)

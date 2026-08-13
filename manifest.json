@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
   "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.2.15",
+  "version": "0.2.22",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -20,7 +20,7 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.15 re-enables Lugia's real Stadium 2 3D model with a Dex-249 hierarchy-repair probe that tests normal, absolute-translation, and flat bind interpretations, recomputes repaired stance sizing, and forces Lugia body textures opaque; the 2D Lugia card is now last-resort only. Overworld capture is harder with a smaller strength-scaled hit zone, faster precision ring for strong Pokemon, stricter NICE/GREAT/EXCELLENT thresholds, and throws that visibly travel to the actual aimed miss point. Retains v0.2.14 first-map 3RD/1ST trainer animation, v0.2.12 L2/right-mouse aim and R2/left-click throw, connected-map streaming, cameras, battle FX, and crash-safe live battles.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.22 restores the original Stadium 2 Lugia model after Dex-249 diagnostics proved the skeleton/geometry were already coherent: Lugia's 647-vertex main body is an intentionally textureless lit primitive that older runtime code skipped entirely. The renderer now supplies Dex 249's textureless surfaces with an opaque white lit material, so the original body renders together with its textured eyes/fins/details. The procedural Lugia remains only as a last-resort fallback. No ROM re-import is required. Retains harder skill-based overworld Pok\u00e9 Ball throwing, 3RD/1ST trainer animation, connected-map streaming, cameras, battle FX, and crash-safe live battles.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,

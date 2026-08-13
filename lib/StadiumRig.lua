@@ -29,26 +29,23 @@
 --
 -- ------- the two matrix chains
 --
--- The game keeps bone scale OUT of the matrix chain (func_800143C0): scale
--- accumulates in its own stack, a bone's local translation is
--- pre-multiplied by its parent's accumulated scale, and a bone's own
--- accumulated scale is applied to the finished matrix only at draw time.
--- glTF cannot express that -- its node scale propagates to children -- and
--- the reference export works around it by splitting every bone into two
--- nodes.
+-- Stadium has TWO joint scale modes (func_800143C0), selected by the raw
+-- command-0x1D flags preserved in DSM5. Mode 0 keeps scale OUT of the matrix
+-- chain: a separate stack pre-scales child translations and the accumulated
+-- scale is applied only to the finished draw matrix. Mode 1 builds a normal
+-- local TRS matrix, so scale propagates through descendants. Modes 2/3 are
+-- camera-facing variants.
 --
--- Here it falls out naturally, as two arrays:
+-- The runtime therefore keeps two matrices per bone:
 --
---   pivot   rotation and translation only. This is what a CHILD inherits,
---           and it is a pure rotation, which is also why the normals are
---           transformed with it rather than with the draw matrix.
---   draw    the same matrix with the bone's accumulated scale applied on
---           the right, which is the one vertices go through.
+--   pivot   the unscaled combined transform a mode-0 child inherits when its
+--           immediate parent is also mode 0.
+--   draw    the actual matrix used to skin vertices, and the matrix inherited
+--           by mode-1 children.
 --
--- Folding the scale into the chain instead is the obvious mistake and it
--- applies every ancestor's scale once per generation. It is caught by the
--- suite: tools/stadium_pack.py measures the bind pose with this exact walk
--- and its answer matches the verified glTF export on all 151 species.
+-- DSM4 threw away the flag byte and forced every joint down the first path.
+-- That happened to look acceptable on most models but is the root cause of
+-- Stadium 2 Lugia's detached rigid pieces.
 
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
@@ -138,7 +135,10 @@ function StadiumRig.new(model)
   -- mismatch severe enough to scatter rigid body parts across the map.  Probe
   -- repair modes before the ordinary bind measurement so measureBind sees the
   -- repaired assembly, not the broken default hierarchy.
-  if tonumber(model.species) == 249 then
+  if tonumber(model.species) == 249 and not model.useExactNodeFlags then
+    -- Legacy/compatibility safety path. DSM5 stores the raw flags, but only
+    -- Lugia is allowed to opt into the experimental exact-flag transform.
+    -- A DSM4 cache still gets the older Lugia hierarchy recovery instead.
     pcall(self.selectLugiaHierarchy, self)
   end
 
@@ -366,72 +366,151 @@ function StadiumRig:pose(anim, frame, wrap)
     end
 
     local p = parent[b]
-    local hierarchyMode = model.hierarchyMode or "normal"
-    local inheritParent = p > 0 and hierarchyMode == "normal"
-    local inheritRotation = p > 0 and hierarchyMode ~= "flat"
-    local pax, pay, paz = 1, 1, 1
-    if inheritParent then pax, pay, paz = accX[p], accY[p], accZ[p] end
-    -- Normal Stadium hierarchy: the parent's accumulated scale applies to the
-    -- child's offset.  Lugia's repair probes can deliberately disable this
-    -- inheritance when its Stadium-2 bind translations behave as model-space
-    -- values rather than Stadium-1-style parent-local offsets.
-    tx, ty, tz = tx * pax, ty * pay, tz * paz
+    local nodeFlags = model.nodeFlags
 
-    -- Rx * Ry * Rz in the game's own row-vector form (src/F420.c
-    -- func_8000F730), written out as the rows of a 3x3
-    local ax, ay, az = rx * ANG, ry * ANG, rz * ANG
-    local sx, cx = sin(ax), cos(ax)
-    local sy, cy = sin(ay), cos(ay)
-    local sz, cz = sin(az), cos(az)
-    local m11, m12, m13 = cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz
-    local m21, m22, m23 = cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz
-    local m31, m32, m33 = -sy, sx * cy, cx * cy
+    if nodeFlags and model.useExactNodeFlags then
+      -- Exact Stadium geo-node transform mode, preserved by DSM5.
+      -- v0.2.17 deliberately restricts this path to Lugia until Stadium 2's
+      -- per-node semantics are verified across the complete 251-model set.  The source
+      -- game converts cmd 0x1D's flags like this before func_800143C0:
+      -- default=1, bit0 clears bit0, bit1 sets bit1.
+      local raw = tonumber(nodeFlags[b]) or 1
+      local mode = 1
+      if raw % 2 == 1 then mode = 0 end
+      if math.floor(raw / 2) % 2 == 1 then mode = mode + 2 end
 
-    local o = (b - 1) * 12
-    if inheritRotation then
-      local q = (p - 1) * 12
-      local a1, a2, a3, a4 = pivot[q + 1], pivot[q + 2], pivot[q + 3], pivot[q + 4]
-      local b1, b2, b3, b4 = pivot[q + 5], pivot[q + 6], pivot[q + 7], pivot[q + 8]
-      local c1, c2, c3, c4 = pivot[q + 9], pivot[q + 10], pivot[q + 11], pivot[q + 12]
-      pivot[o + 1] = a1 * m11 + a2 * m21 + a3 * m31
-      pivot[o + 2] = a1 * m12 + a2 * m22 + a3 * m32
-      pivot[o + 3] = a1 * m13 + a2 * m23 + a3 * m33
-      if hierarchyMode == "absolute_translation" then
-        -- Preserve parent orientation but do not add/rotate the parent offset.
-        -- This is the Stadium-2 repair candidate that assembles deep skeletons
-        -- whose bind translations are already model-space positions.
-        pivot[o + 4], pivot[o + 8], pivot[o + 12] = tx, ty, tz
+      local sepPX, sepPY, sepPZ = 1, 1, 1
+      if p > 0 then sepPX, sepPY, sepPZ = accX[p], accY[p], accZ[p] end
+
+      -- Rx*Ry*Rz transposed into the column-vector 3x4 form used by this rig.
+      local ax, ay, az = rx * ANG, ry * ANG, rz * ANG
+      local sx, cx = sin(ax), cos(ax)
+      local sy, cy = sin(ay), cos(ay)
+      local sz, cz = sin(az), cos(az)
+      local m11, m12, m13 = cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz
+      local m21, m22, m23 = cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz
+      local m31, m32, m33 = -sy, sx * cy, cx * cy
+      local o = (b - 1) * 12
+
+      if mode == 0 then
+        -- func_800143C0's separate-scale path. Only another mode-0 parent
+        -- supplies its unscaled pivot; every other parent supplies the current
+        -- draw matrix. Translation is pre-scaled by D_800AB970's current
+        -- scale-stack value, then this joint pushes its own scale onto it.
+        tx, ty, tz = tx * sepPX, ty * sepPY, tz * sepPZ
+        if p > 0 then
+          local pr = tonumber(nodeFlags[p]) or 1
+          local pm = 1
+          if pr % 2 == 1 then pm = 0 end
+          if math.floor(pr / 2) % 2 == 1 then pm = pm + 2 end
+          local base = (pm == 0) and pivot or drw
+          local q = (p - 1) * 12
+          local a1,a2,a3,a4 = base[q+1],base[q+2],base[q+3],base[q+4]
+          local b1,b2,b3,b4 = base[q+5],base[q+6],base[q+7],base[q+8]
+          local c1,c2,c3,c4 = base[q+9],base[q+10],base[q+11],base[q+12]
+          pivot[o+1] = a1*m11 + a2*m21 + a3*m31
+          pivot[o+2] = a1*m12 + a2*m22 + a3*m32
+          pivot[o+3] = a1*m13 + a2*m23 + a3*m33
+          pivot[o+4] = a1*tx + a2*ty + a3*tz + a4
+          pivot[o+5] = b1*m11 + b2*m21 + b3*m31
+          pivot[o+6] = b1*m12 + b2*m22 + b3*m32
+          pivot[o+7] = b1*m13 + b2*m23 + b3*m33
+          pivot[o+8] = b1*tx + b2*ty + b3*tz + b4
+          pivot[o+9] = c1*m11 + c2*m21 + c3*m31
+          pivot[o+10] = c1*m12 + c2*m22 + c3*m32
+          pivot[o+11] = c1*m13 + c2*m23 + c3*m33
+          pivot[o+12] = c1*tx + c2*ty + c3*tz + c4
+        else
+          pivot[o+1],pivot[o+2],pivot[o+3],pivot[o+4] = m11,m12,m13,tx
+          pivot[o+5],pivot[o+6],pivot[o+7],pivot[o+8] = m21,m22,m23,ty
+          pivot[o+9],pivot[o+10],pivot[o+11],pivot[o+12] = m31,m32,m33,tz
+        end
+
+        local ex, ey, ez = sepPX*kx, sepPY*ky, sepPZ*kz
+        accX[b],accY[b],accZ[b] = ex,ey,ez
+        drw[o+1],drw[o+2],drw[o+3],drw[o+4] = pivot[o+1]*ex,pivot[o+2]*ey,pivot[o+3]*ez,pivot[o+4]
+        drw[o+5],drw[o+6],drw[o+7],drw[o+8] = pivot[o+5]*ex,pivot[o+6]*ey,pivot[o+7]*ez,pivot[o+8]
+        drw[o+9],drw[o+10],drw[o+11],drw[o+12] = pivot[o+9]*ex,pivot[o+10]*ey,pivot[o+11]*ez,pivot[o+12]
       else
-        pivot[o + 4] = a1 * tx + a2 * ty + a3 * tz + a4
-        pivot[o + 8] = b1 * tx + b2 * ty + b3 * tz + b4
-        pivot[o + 12] = c1 * tx + c2 * ty + c3 * tz + c4
+        -- func_8000F5A8 + func_800122B4 path. Scale is part of the local
+        -- matrix, so it propagates through the draw chain. Camera-facing modes
+        -- 2/3 use a view-oriented basis in Stadium; for world rendering we keep
+        -- their position/scale attached with this finite parent-space basis.
+        local l11,l12,l13,l14 = m11*kx,m12*ky,m13*kz,tx
+        local l21,l22,l23,l24 = m21*kx,m22*ky,m23*kz,ty
+        local l31,l32,l33,l34 = m31*kx,m32*ky,m33*kz,tz
+        if p > 0 then
+          local q=(p-1)*12
+          local a1,a2,a3,a4=drw[q+1],drw[q+2],drw[q+3],drw[q+4]
+          local b1,b2,b3,b4=drw[q+5],drw[q+6],drw[q+7],drw[q+8]
+          local c1,c2,c3,c4=drw[q+9],drw[q+10],drw[q+11],drw[q+12]
+          drw[o+1]=a1*l11+a2*l21+a3*l31; drw[o+2]=a1*l12+a2*l22+a3*l32; drw[o+3]=a1*l13+a2*l23+a3*l33; drw[o+4]=a1*l14+a2*l24+a3*l34+a4
+          drw[o+5]=b1*l11+b2*l21+b3*l31; drw[o+6]=b1*l12+b2*l22+b3*l32; drw[o+7]=b1*l13+b2*l23+b3*l33; drw[o+8]=b1*l14+b2*l24+b3*l34+b4
+          drw[o+9]=c1*l11+c2*l21+c3*l31; drw[o+10]=c1*l12+c2*l22+c3*l32; drw[o+11]=c1*l13+c2*l23+c3*l33; drw[o+12]=c1*l14+c2*l24+c3*l34+c4
+        else
+          drw[o+1],drw[o+2],drw[o+3],drw[o+4]=l11,l12,l13,l14
+          drw[o+5],drw[o+6],drw[o+7],drw[o+8]=l21,l22,l23,l24
+          drw[o+9],drw[o+10],drw[o+11],drw[o+12]=l31,l32,l33,l34
+        end
+        for j=1,12 do pivot[o+j]=drw[o+j] end
+        -- Mode 1/2/3 does not push Stadium's separate scale stack.
+        accX[b],accY[b],accZ[b]=sepPX,sepPY,sepPZ
       end
-      pivot[o + 5] = b1 * m11 + b2 * m21 + b3 * m31
-      pivot[o + 6] = b1 * m12 + b2 * m22 + b3 * m32
-      pivot[o + 7] = b1 * m13 + b2 * m23 + b3 * m33
-      pivot[o + 9] = c1 * m11 + c2 * m21 + c3 * m31
-      pivot[o + 10] = c1 * m12 + c2 * m22 + c3 * m32
-      pivot[o + 11] = c1 * m13 + c2 * m23 + c3 * m33
     else
-      -- Flat candidate: each bone's authored transform is treated as a direct
-      -- model-space transform.  Only Dex 249's automatic repair probe can
-      -- select this mode; the verified Stadium-1/normal path is untouched.
-      pivot[o + 1], pivot[o + 2], pivot[o + 3], pivot[o + 4] = m11, m12, m13, tx
-      pivot[o + 5], pivot[o + 6], pivot[o + 7], pivot[o + 8] = m21, m22, m23, ty
-      pivot[o + 9], pivot[o + 10], pivot[o + 11], pivot[o + 12] = m31, m32, m33, tz
-    end
+      -- Legacy DSM4 fallback, retained only for developer/shipped packs that
+      -- predate v0.2.16. DSM5 non-Lugia compatibility intentionally reaches this branch in v0.2.17.
+      local hierarchyMode = model.hierarchyMode or "normal"
+      local inheritParent = p > 0 and hierarchyMode == "normal"
+      local inheritRotation = p > 0 and hierarchyMode ~= "flat"
+      local pax, pay, paz = 1, 1, 1
+      if inheritParent then pax, pay, paz = accX[p], accY[p], accZ[p] end
+      tx, ty, tz = tx * pax, ty * pay, tz * paz
 
-    local ex, ey, ez = pax * kx, pay * ky, paz * kz
-    accX[b], accY[b], accZ[b] = ex, ey, ez
-    -- the bone's own accumulated scale, on the right: it scales the axes of
-    -- THIS bone's space and cannot reach the children, which is exactly the
-    -- game's draw-time application
-    drw[o + 1], drw[o + 2] = pivot[o + 1] * ex, pivot[o + 2] * ey
-    drw[o + 3], drw[o + 4] = pivot[o + 3] * ez, pivot[o + 4]
-    drw[o + 5], drw[o + 6] = pivot[o + 5] * ex, pivot[o + 6] * ey
-    drw[o + 7], drw[o + 8] = pivot[o + 7] * ez, pivot[o + 8]
-    drw[o + 9], drw[o + 10] = pivot[o + 9] * ex, pivot[o + 10] * ey
-    drw[o + 11], drw[o + 12] = pivot[o + 11] * ez, pivot[o + 12]
+      local ax, ay, az = rx * ANG, ry * ANG, rz * ANG
+      local sx, cx = sin(ax), cos(ax)
+      local sy, cy = sin(ay), cos(ay)
+      local sz, cz = sin(az), cos(az)
+      local m11, m12, m13 = cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz
+      local m21, m22, m23 = cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz
+      local m31, m32, m33 = -sy, sx * cy, cx * cy
+
+      local o = (b - 1) * 12
+      if inheritRotation then
+        local q = (p - 1) * 12
+        local a1, a2, a3, a4 = pivot[q + 1], pivot[q + 2], pivot[q + 3], pivot[q + 4]
+        local b1, b2, b3, b4 = pivot[q + 5], pivot[q + 6], pivot[q + 7], pivot[q + 8]
+        local c1, c2, c3, c4 = pivot[q + 9], pivot[q + 10], pivot[q + 11], pivot[q + 12]
+        pivot[o + 1] = a1 * m11 + a2 * m21 + a3 * m31
+        pivot[o + 2] = a1 * m12 + a2 * m22 + a3 * m32
+        pivot[o + 3] = a1 * m13 + a2 * m23 + a3 * m33
+        if hierarchyMode == "absolute_translation" then
+          pivot[o + 4], pivot[o + 8], pivot[o + 12] = tx, ty, tz
+        else
+          pivot[o + 4] = a1 * tx + a2 * ty + a3 * tz + a4
+          pivot[o + 8] = b1 * tx + b2 * ty + b3 * tz + b4
+          pivot[o + 12] = c1 * tx + c2 * ty + c3 * tz + c4
+        end
+        pivot[o + 5] = b1 * m11 + b2 * m21 + b3 * m31
+        pivot[o + 6] = b1 * m12 + b2 * m22 + b3 * m32
+        pivot[o + 7] = b1 * m13 + b2 * m23 + b3 * m33
+        pivot[o + 9] = c1 * m11 + c2 * m21 + c3 * m31
+        pivot[o + 10] = c1 * m12 + c2 * m22 + c3 * m32
+        pivot[o + 11] = c1 * m13 + c2 * m23 + c3 * m33
+      else
+        pivot[o + 1], pivot[o + 2], pivot[o + 3], pivot[o + 4] = m11, m12, m13, tx
+        pivot[o + 5], pivot[o + 6], pivot[o + 7], pivot[o + 8] = m21, m22, m23, ty
+        pivot[o + 9], pivot[o + 10], pivot[o + 11], pivot[o + 12] = m31, m32, m33, tz
+      end
+
+      local ex, ey, ez = pax * kx, pay * ky, paz * kz
+      accX[b], accY[b], accZ[b] = ex, ey, ez
+      drw[o + 1], drw[o + 2] = pivot[o + 1] * ex, pivot[o + 2] * ey
+      drw[o + 3], drw[o + 4] = pivot[o + 3] * ez, pivot[o + 4]
+      drw[o + 5], drw[o + 6] = pivot[o + 5] * ex, pivot[o + 6] * ey
+      drw[o + 7], drw[o + 8] = pivot[o + 7] * ez, pivot[o + 8]
+      drw[o + 9], drw[o + 10] = pivot[o + 9] * ex, pivot[o + 10] * ey
+      drw[o + 11], drw[o + 12] = pivot[o + 11] * ez, pivot[o + 12]
+    end
   end
 end
 
@@ -626,7 +705,8 @@ end
 -- apart even in the bind pose.  Instead of banning Dex 249 outright, test the
 -- three transform interpretations that the raw node data can plausibly mean
 -- and keep the most compact finite assembly.  This operates on an already
--- cached DSM4 model, so users do not need to delete/reimport their ROM cache.
+-- legacy DSM4 model. DSM5 never reaches this compatibility path because it
+-- carries the original joint flags and rebuilds from the Stadium 2 ROM.
 --
 -- normal               = verified Stadium hierarchy
 -- absolute_translation = inherit parent rotation, translations are model-space
@@ -683,7 +763,7 @@ function StadiumRig:selectLugiaHierarchy()
   self:pose(nil, 0, false)
   local a,b,c,d,e,f = poseBounds(self)
   if a and finite(a) and finite(b) and finite(c) and finite(d) and finite(e) and finite(f) then
-    -- The DSM4 stance values were measured with the old hierarchy. Recompute
+    -- Legacy stance values were measured with the old hierarchy. Recompute
     -- them from the repaired bind so OverworldStadium does not scale the fixed
     -- Lugia as though it were still a map-wide exploded model.
     model.height = math.max(1e-4, e - b)
@@ -725,6 +805,17 @@ function StadiumRig:measureBind()
   if not bindBounds then
     model.bindBroken = true
     model.staticPose = true
+  elseif not model.useExactNodeFlags then
+    -- 0.2.16 may have packed stance extents using the experimental roster-wide
+    -- DSM5 transform path.  Re-measure them from the proven compatibility bind
+    -- so an already-built DSM5 cache is repaired immediately without another
+    -- ROM import. poseBounds is pre-root-scale; packed extents are post-scale.
+    local root = tonumber(model.rootScale) or 1
+    if root < 0 then root = -root end
+    if root == 0 then root = 1 end
+    model.height = math.max(1e-4, (b5 - b2) * root)
+    model.floor = b2 * root
+    model.radius = math.max(b4 - b1, b6 - b3) * 0.5 * root
   end
   local baseSpan = bindBounds and math.max(b4-b1, b5-b2, b6-b3) or 0
   local bindT = {}

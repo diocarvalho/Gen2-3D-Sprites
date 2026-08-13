@@ -10,6 +10,10 @@ return {
       "Stadium pack loading accepts National Dex 1-251",
     },
     added = {
+      "v0.2.22 restores the original Stadium 2 Lugia: diagnostics proved its 647-vertex main body is intentionally textureless, so Dex 249 now renders the 0xFFFF texture sentinel as an opaque white lit material instead of skipping the body",
+      "v0.2.20 bypasses the unstable Stadium 2 Dex-249 ROM hierarchy entirely and gives Lugia an isolated fully 3D procedural rescue model, so Lugia fixes can no longer break the other 250 Pokemon",
+      "v0.2.19 adds DSM4/DSM5 cache compatibility and isolates experimental Stadium 2 node-flag transforms to Lugia instead of applying them to the whole roster",
+      "v0.2.16 introduces DSM5 packs that preserve Stadium geo joint transform flags and replays the source mixed scale/TRS paths so Lugia can assemble from its real 3D model instead of hierarchy guesses",
       "v0.2.15 restores Lugia to a real Stadium 2 3D model with runtime hierarchy repair and opaque body textures, and makes overworld Poké Ball throws substantially harder with strength-scaled aim windows, faster precision timing, stricter throw grades, and visible off-target ball flight",
       "v0.2.13 gives Lugia a species-correct opaque world-card fallback instead of the translucent/wrong generic roaming sprite while corrupt Dex-249 Stadium 2 geometry remains rejected",
       "v0.2.13 bridges real continuous 3RD/1ST displacement into the 3D Character Selector walking pose only during rendering, so player animations work without spoofing Gold gameplay movement",
@@ -43,6 +47,9 @@ return {
       "v0.1.89 ships a lean Gen-2-only sprite payload: only National Dex 1-251 prebuilt runtime sheets are included and duplicate raw source atlases are omitted",
     },
     fixed = {
+      "v0.2.20 fixes Lugia without another shared importer/cache experiment: Dex 249 now uses a dedicated world-space 3D rescue rig with solid depth, shadows, species silhouette, and simple idle/attack/hit/faint motion",
+      "v0.2.19 fixes the v0.2.16 all-Pokémon flat Charmander-style fallback regression by restoring the proven legacy rig path for every non-Lugia species and re-measuring bad DSM5 stance extents at runtime",
+      "v0.2.16 fixes the root cause of Lugia's detached rigid pieces: DSM4 discarded command-0x1D transform flags, so the runtime could not reproduce the model's real joint matrix modes",
       "v0.2.11 rejects the known-bad Lugia Stadium 2 decode and uses Gold's texture-correct sprite fallback instead of detached blue geometry",
       "v0.2.11 frees right mouse from the Game Boy B mouse mapping and fixes the Poké Ball red/white vertical UV orientation",
       "v0.2.10 fixes the v0.2.06 capture wrapper being bypassable and fixes the documented left/right mouse capture controls that were not actually polled",

@@ -1,3 +1,38 @@
+# v0.2.22 — original Stadium 2 Lugia body restored
+
+- Re-analyzed the uploaded `249.dsm` and `249_geo_dump.txt` instead of changing the skeleton decoder again.
+- Found the actual failure: Lugia primitive 0 is the original 647-vertex / 1,758-index main body and deliberately has no texture (`tex=-1`). The runtime previously treated a missing texture as a missing primitive and skipped the whole body.
+- Dex 249 now renders textureless Stadium geometry with a 1x1 opaque white material, allowing Voxel3D lighting/shadows to shade the original untextured body just like Stadium's lit material path.
+- Switched Lugia back to the real Stadium 2 `249.dsm` model and its original animations.
+- Kept `LugiaRescue` only as a last-resort fallback if the real pack or GPU rig cannot load.
+- No Stadium 2 ROM re-import is required; the v0.2.21 diagnostic `249.dsm` is already sufficient.
+- The shared extractor, cache format, and skeleton transform code are unchanged, so this fix cannot repeat the previous all-Pokémon importer regressions.
+
+# v0.2.21
+
+- Added a **Dex-249-only Stadium 2 diagnostic exporter**. It is side-band and does not alter normal model extraction, DSM bytes, rigging, or rendering for any Pokemon.
+- Re-importing Stadium 2 now writes `cache/stadium/lugia_debug/249_geo_dump.txt`, containing Lugia's raw geo-layout command walk, graph/call depth, joint flags, static transform nodes, local display-list transforms, material references, attachment tags, display-list vertex/triangle summaries, extracted bone table, and primitive skin ownership/bounds.
+- The same import also copies the generated Lugia pack to `cache/stadium/lugia_debug/249.dsm` and writes `UPLOAD_THESE_TWO_FILES.txt` with the save-directory location.
+- The v0.2.20 procedural 3D Lugia remains the runtime safety model while the original Stadium 2 Dex-249 model is diagnosed. The shared Stadium importer/rig path is intentionally unchanged.
+
+## v0.2.16 — exact Stadium joint transform flags / Lugia rebuild
+
+## 0.2.20
+
+- Changed strategy for Lugia completely: Dex 249 no longer loads the repeatedly broken Stadium 2 `249.dsm` hierarchy.
+- Added `lib/LugiaRescue.lua`, an isolated procedural 3D Lugia with a pale body, broad hand-like wings/fingers, long tail, blue dorsal plates, eyes/irises, legs/feet, world-space depth and real shadow casting.
+- Added simple procedural Lugia idle, entrance, attack, hit and faint motion so the rescue model is not a frozen prop in battle.
+- Kept the entire v0.2.19 Stadium importer/cache/rig path unchanged for Dex 1-248 and 250-251. The Lugia rescue path never calls `StadiumPack.load(249)`, so future Dex-249 work cannot corrupt or invalidate the rest of the roster.
+- Kept the species-correct 2D Lugia card only as a final GPU/mesh-construction fallback if the procedural 3D rescue rig itself cannot be created.
+- No Stadium 2 ROM re-import is required for this release.
+
+- Replaced the Dex-249 compactness/hierarchy guessing with a format-level fix.
+- New `DSM5` packs preserve geo command `0x1D`'s raw joint flags for every bone.
+- Runtime pose code now follows the source renderer's mixed transform modes: the separate accumulated-scale stack for mode 0 and full local TRS matrix propagation for mode 1. Camera-facing mode bits remain attached and use a stable world-space fallback basis.
+- Offline bind/stance measurement uses the same flag-aware transform rules, so Lugia's height/floor/radius are measured from the same assembly that is rendered.
+- Old `DSM4` caches are intentionally invalidated. Re-import the user-supplied Stadium 2 ROM once to rebuild `DSM5`; this is required because DSM4 did not contain the missing flags and they cannot be recovered from that cache.
+- Retains v0.2.15's harder strength-scaled Poké Ball aiming and stricter throw grades.
+
 ## v0.2.15 — Lugia 3D hierarchy recovery and capture difficulty
 
 - Removed the unconditional Dex-249 2D fallback in `StadiumMon`.

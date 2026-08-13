@@ -1,3 +1,25 @@
+## v0.2.22 — original Stadium 2 Lugia fix
+
+Dex 249 now uses the real Stadium 2 model again. The v0.2.21 diagnostics showed the model was not actually missing a hierarchy transform: its largest primitive is an intentionally **untextured, lit white body**. Older runtime code only drew primitives with textures, so it hid the 647-vertex body and left the textured details floating. v0.2.22 gives Lugia's textureless surfaces an opaque white material and keeps the procedural rescue model only as an emergency fallback. **No ROM re-import is required.**
+
+## v0.2.16 — Lugia DSM5 joint-transform fix
+
+## v0.2.21 Lugia diagnostic build
+
+This build does **not** attempt another global Lugia decoder change. The stable v0.2.20 rendering path stays intact. To collect the data needed for the real Stadium 2 Lugia, re-select/re-import your Stadium 2 ROM once. After Dex 249 is built, look in `cache/stadium/lugia_debug/` inside the Gen1Recomp save directory and upload **both** `249_geo_dump.txt` and `249.dsm`. `UPLOAD_THESE_TWO_FILES.txt` in the same folder records the exact save-directory path.
+
+
+
+### v0.2.20 Lugia rescue path
+
+Lugia (National Dex 249) now intentionally bypasses the unstable ROM-derived Stadium 2 hierarchy. It is rendered by an isolated procedural 3D rescue rig instead, with world-space depth/shadows and simple battle motion. All other Pokémon continue to use the stable Stadium importer. No ROM re-import is required for 0.2.20.
+
+Lugia is no longer repaired by guessing a compact hierarchy. The actual Stadium geo-layout joint flags are now preserved in the local model pack and replayed at runtime. Those flags choose between Stadium's separate-scale matrix path and its normal full-TRS path; DSM4 discarded them, which is why Lugia's rigid body pieces could never assemble correctly even when the pose looked compact.
+
+**Important:** v0.2.16 changes the local Stadium model cache from `DSM4` to `DSM5`. Re-import/select your Pokemon Stadium 2 ROM once after installing this version so all 251 local packs are rebuilt with the missing joint flags. The mod still does not ship Stadium model data.
+
+The v0.2.15 harder Poké Ball aim/timing/miss-flight changes and all prior camera/open-world/battle work remain.
+
 ## v0.2.15 — Lugia 3D recovery + harder Poké Ball throws
 
 - Lugia (Dex 249) is no longer hard-forced to the 2D safety card.

@@ -30,10 +30,10 @@ local PokemonHeights = V.require("PokemonHeights")
 local PokemonLocomotion = V.require("PokemonLocomotion")
 local FirstPerson = V.require("FirstPerson")
 
--- Dex 249 now gets a real 3D hierarchy-repair probe in StadiumRig.  Keep the
--- species-correct Lugia card only as a LAST-RESORT safety path for a cache/host
--- where no finite 3D assembly can be produced.  In a normal v0.2.15 import the
--- Stadium model wins and this code is never reached.
+-- Dex 249 no longer touches the unstable Stadium-2 ROM hierarchy. v0.2.20
+-- gives Lugia a dedicated procedural 3D rescue rig through StadiumMon. Keep the
+-- species-correct card only as a LAST-RESORT safety path for a host/driver where
+-- even that isolated 3D mesh cannot be created.
 local lugiaFallbackRenderer = nil
 local LUGIA_FALLBACK_SCALE = 2.35
 local LUGIA_FALLBACK_NORMAL = "assets/enhanced_overworld/poke_followers/follower_249_normal.png"
@@ -886,6 +886,10 @@ function OverworldStadium.canRenderEntity(entity)
   local dex = resolveDex({ entity = entity, sprite = entity.sprite,
                            mapId = entity.mapId })
   if not dex then return false end
+  -- Lugia normally uses the real Stadium 2 pack in v0.2.22, but its
+  -- procedural rescue rig remains a last-resort fallback. Keep roaming/wild
+  -- claim logic permissive so Dex 249 can still render if the pack is absent.
+  if tonumber(dex) == 249 then return true, dex end
   local ok, available = pcall(StadiumPack.available, dex)
   return ok and available == true, dex
 end

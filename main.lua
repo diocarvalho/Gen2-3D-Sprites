@@ -32,7 +32,7 @@ if detectedGeneration == 2 then
   mod.log:info("Gold/Silver standalone build: Pokemon Generation 2 detected; Stadium 2 importer targets National Dex 1-251")
 else
   mod.log:warn("STADIUM2_OVERWORLD_MODELS requires Pokemon Gold or Silver. Active game reports Pokemon Generation %s; this Gen 2 port will stay inactive.", tostring(detectedGeneration))
-  mod.exports.version = "0.2.15"
+  mod.exports.version = "0.2.20"
   mod.exports.targetGeneration = 2
   mod.exports.generation = detectedGeneration
   mod.exports.gen2Compatible = true
@@ -89,7 +89,7 @@ local function bootEmbeddedWilds()
   return wilds
 end
 
--- Gold/Silver renderer bootstrap (v0.2.15: Lugia 3D hierarchy repair + harder aimed capture; prior battle/camera fixes retained)
+-- Gold/Silver renderer bootstrap (v0.2.20: DSM5 compatibility rollback + Lugia-isolated joint transforms + harder aimed capture; prior battle/camera fixes retained)
 --
 -- Current Gold exposes a supported whole-window `render.compose` hook.  The
 -- embedded voxel bridge is now a renderer PROVIDER only; it does not patch any
@@ -123,7 +123,7 @@ if GoldVoxelBridge and BaseV then
   mod.log:info("Gold/Silver voxel renderer provider loaded; official render.compose hook will own Gold world frames and redraw overlay UI above voxels")
 else
   mod.log:error("Gold/Silver voxel renderer provider failed: %s", tostring(bridgeErr))
-  mod.exports.version = "0.2.15"
+  mod.exports.version = "0.2.20"
   mod.exports.rendererInstalled = false
   mod.exports.rendererError = "Gold/Silver voxel renderer provider failed: " .. tostring(bridgeErr)
   mod.exports.hostDetected = false
@@ -461,7 +461,7 @@ if wildsExports and type(wildsExports.logic) == "table" then
 end
 
 -- Companion mods can tag a Pokemon entity explicitly through this mod.
-mod.exports.version = "0.2.15"
+mod.exports.version = "0.2.20"
 mod.exports.overworld = Stadium
 mod.exports.red3dPlayerCompat = true
 mod.exports.red3dPlayerCompatStatus = function()

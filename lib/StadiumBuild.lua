@@ -26,6 +26,7 @@ local V = ...
 local StadiumRom = V.require("StadiumRom")
 local StadiumFragment = V.require("StadiumFragment")
 local StadiumFx = V.require("StadiumFx")
+local LugiaGeoDump = V.require("LugiaGeoDump")
 
 local StadiumBuild = {}
 
@@ -124,18 +125,43 @@ local function restSample(bones)
   end
 end
 
--- Every bone's draw matrix at one instant, as 3x4 rows.
+-- Every bone's draw matrix at one instant, as 3x4 rows. DSM5 preserves each
+-- joint's command-0x1D flags because Stadium does not use one universal scale
+-- rule: mode 0 uses the separate accumulated-scale stack, while mode 1 uses a
+-- conventional full local TRS matrix. The bind measurement must replay the
+-- same mixed tree as runtime or the packed height/floor/radius are wrong even
+-- when the animated mesh itself is correct.
+-- Geo command 0x1D does NOT have one transform rule.  Its raw flags byte is
+-- converted by geo_layout.c::func_80018490 into a renderer mode:
+--   start at 1; bit0 clears bit0; bit1 sets bit1.
+-- func_800143C0 then has three paths: mode 0 keeps scale in the separate
+-- D_800AB970 stack, mode 1 builds a normal local TRS matrix (scale propagates
+-- through the matrix chain), and modes 2/3 are camera-facing variants.
 --
--- The game keeps bone scale OUT of the matrix chain: it accumulates in its own
--- stack, a bone's local translation is pre-multiplied by the PARENT's
--- accumulated scale, and the bone's own accumulated scale is applied to the
--- finished matrix at draw time.
---
--- Two chains, and the distinction is the whole point: `pivot` is the
--- rotation/translation a CHILD inherits, and the draw matrix is that with the
--- bone's own accumulated scale applied on the right. Folding the scale into
--- the chain instead applies every ancestor's scale twice -- which is exactly
--- the multiplicative propagation glTF has and the game does not.
+-- DSM4 discarded this byte entirely.  Stadium 1 happens to be dominated by
+-- the separate-scale path, but Stadium 2 Lugia uses a mixed joint tree; forcing
+-- every joint through mode 0 is what pulled its rigid mesh pieces apart.
+local function nodeMode(flags)
+  flags = tonumber(flags) or 1 -- legacy/default: the old verified mode-0 path
+  local mode = 1
+  if flags % 2 == 1 then mode = 0 end
+  if math.floor(flags / 2) % 2 == 1 then mode = mode + 2 end
+  return mode
+end
+StadiumBuild.nodeMode = nodeMode
+
+local function scaleColumns(m, sx, sy, sz)
+  return {
+    { m[1][1] * sx, m[1][2] * sy, m[1][3] * sz, m[1][4] },
+    { m[2][1] * sx, m[2][2] * sy, m[2][3] * sz, m[2][4] },
+    { m[3][1] * sx, m[3][2] * sy, m[3][3] * sz, m[3][4] },
+  }
+end
+
+-- v0.2.17: pack-wide stance/idle measurements intentionally use the proven
+-- legacy Stadium transform walk.  DSM5 still stores raw node flags for Lugia
+-- diagnostics/runtime, but an unverified Stadium-2 flag interpretation must
+-- never be allowed to invalidate the other 250 species again.
 local function bindMatrices(bones, sample)
   sample = sample or restSample(bones)
   local pivot, draw, acc = {}, {}, {}
@@ -272,8 +298,8 @@ local function idleIsBroken(data, idle)
          or worstDrift > 1.6 or worstSpan > 3.2
 end
 
--- Exposed for headless/ROM extraction QA.  Runtime has a second independent
--- copy in StadiumRig so already-built DSM4 caches are protected too.
+-- Exposed for headless/ROM extraction QA. StadiumRig repeats the posed-bounds
+-- guard after DSM5 load so a malformed animation can still fail safely at runtime.
 StadiumBuild.idleIsBroken = idleIsBroken
 
 -- ------- writing
@@ -534,7 +560,7 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   local idle = (idleIndex ~= NONE16) and anims[idleIndex + 1] or nil
   local static = idleIsBroken(data, idle)
 
-  w:raw("DSM4")
+  w:raw("DSM5")
   w:u16(species)
   w:u16(#bones)
   w:u16(#prims)
@@ -562,6 +588,9 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   for i = 1, #bones do
     local b = bones[i]
     w:i16(b.parent)
+    -- DSM5 preserves geo command 0x1D's raw transform flags.  Lugia is the
+    -- first Stadium-2 model that made dropping this byte visibly catastrophic.
+    w:u8(tonumber(b.flags) or 1)
     for k = 1, 3 do w:i16(roundHalfEven(b.t[k])) end
     for k = 1, 3 do w:i16(b.r[k]) end
     for k = 1, 3 do w:i32(fixed(b.s[k])) end
@@ -693,6 +722,21 @@ function StadiumBuild.species(rom, fileno)
   end
 
   local species = data.species
+
+  -- v0.2.21: Dex 249 diagnostics are deliberately SIDE-BAND.  The dump
+  -- reparses the original Lugia FRAGMENT into text, but does not feed a single
+  -- value back into the normal Stadium builder.  That isolation is the whole
+  -- point of this build: collecting the information needed to reconstruct the
+  -- original Lugia must not alter the other 250 Pokemon again.
+  if tonumber(species) == 249 then
+    local okDump, wroteDump, dumpErr = pcall(
+      LugiaGeoDump.write, blob, data, fileno, rom,
+      "cache/stadium/lugia_debug/249_geo_dump.txt")
+    if not okDump or not wroteDump then
+      data.warnings[#data.warnings + 1] =
+        "Lugia geo diagnostic could not be written: " .. tostring(okDump and dumpErr or wroteDump)
+    end
+  end
   local rows = rom:battleRows(species)
   labelAnimations(data, rows, #data.auxAnims)
   StadiumFx.attach(data, species)
