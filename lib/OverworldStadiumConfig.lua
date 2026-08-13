@@ -111,6 +111,15 @@ Config.largePokemonScaleOverrides = {
   [148] = 1.85, -- Dragonair
   [149] = 2.15, -- Dragonite
   [150] = 1.70, -- Mewtwo
+
+  -- Gen-2 legendary presence.  The original override table stopped at the
+  -- Gen-1 roster, so Stadium 2's large Johto legends were left at the generic
+  -- compressed battle-model scale.  Keep Celebi unboosted intentionally.
+  [243] = 1.65, -- Raikou
+  [244] = 1.75, -- Entei
+  [245] = 1.65, -- Suicune
+  [249] = 2.25, -- Lugia
+  [250] = 2.15, -- Ho-Oh
 }
 
 -- Human reference used to turn metres into overworld world-pixels. A Pokemon

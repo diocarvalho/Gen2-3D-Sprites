@@ -64,9 +64,12 @@ end
 
 local ChunkMesher = {}
 
--- Ring of border blocks meshed around the body, matching the width
--- TileRenderer draws so the two modes end at the same place.
-local RING = 3
+-- Ring of border blocks meshed around the body. v0.2.03 doubles the real
+-- outdoor scenery apron from four to eight blocks (32 tiles) so the free,
+-- battle and wide diorama cameras keep seeing forest instead of reaching the
+-- end of generated geometry. This is actual meshed scenery, not a draw-only
+-- backdrop, and connected-neighbour masking below still removes overlap.
+local RING = 8
 
 -- A sliver of a texel, to keep a quad's sampling inside its own tile.
 -- Without any inset the perspective rasteriser lands on a NEIGHBOURING

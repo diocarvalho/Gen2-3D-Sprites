@@ -4,7 +4,9 @@
 -- public Stadium.begin/update/draw/finish methods and draws additional
 -- procedural billboards through Dramatic Shape's own Voxel3D scene while the
 -- Stadium models are being drawn. Effects therefore occupy real arena (x,y,z)
--- positions and move correctly when the battle camera orbits.
+-- positions and move correctly when the battle camera orbits.  v0.2.08 also
+-- adapts Gold's Gen-2 BattleState/AnimRunner so these effects receive the real
+-- move id, attacker side and animation frame in live Gold voxel battles.
 --
 -- No Pokemon Stadium effect assets are included or extracted here. The shapes
 -- are original procedural stand-ins built from LÖVE canvases.
@@ -171,6 +173,33 @@ local function moveType(def)
 end
 local function power(def) return tonumber(def and def.power) or 0 end
 
+-- Gold does not expose the Gen-1 BattleState fields this module originally
+-- listened to (animName/animPlaying/animAttackerIsPlayer).  Its native
+-- AnimRunner does expose the same facts in a different shape: env.animId,
+-- env.battleTurn, frames and stopped.  Adapt only those presentation fields so
+-- every existing procedural effect below can stay generation-agnostic.
+local function goldBattleAdapter(screen)
+  if type(screen) ~= "table" then return nil end
+  local runner = screen.anim
+  local moveId = screen._stadium3DFxMove
+  local side = screen._stadium3DFxSide
+  local env = runner and runner.env
+  local animId = env and env.animId
+  if moveId == nil or side == nil or type(runner) ~= "table" then return nil end
+  if runner.stopped then return nil end
+  if tostring(animId or "") ~= tostring(moveId) then return nil end
+  local data = (screen.game and screen.game.data)
+    or (screen.battle and screen.battle.data) or {}
+  return {
+    animPlaying = true,
+    animName = moveId,
+    animAttackerIsPlayer = side == "player",
+    frame = tonumber(runner.frames) or 0,
+    data = data,
+    _goldScreen = screen,
+  }
+end
+
 local SPECIAL = {
   HYPERBEAM="beam", SOLARBEAM="solarbeam", ICEBEAM="icebeam",
   HYDROPUMP="hydro", FIREBLAST="fireblast", THUNDER="thunder",
@@ -193,9 +222,15 @@ local SPECIAL = {
   -- Generation 2 move aliases. These reuse proven Stadium-style primitives
   -- instead of inventing new renderer dependencies.
   SHADOWBALL="night", CRUNCH="body", IRONTAIL="body", STEELWING="windslash",
-  SACREDFIRE="fireblast", AEROBLAST="windslash", GIGADRAIN="drain",
+  -- Keep the two box-legendaries' signature moves distinct instead of routing
+  -- them through generic fire/wind aliases.  The assets remain procedural,
+  -- but the staging now reads as Sacred Fire / Aeroblast specifically.
+  SACREDFIRE="sacredfire", AEROBLAST="aeroblast", GIGADRAIN="drain",
   SPARK="thunderbolt", ZAPCANNON="thunder", OCTAZOOKA="watergun",
   POWDERSNOW="blizzard", DYNAMICPUNCH="body",
+  ICYWIND="blizzard", FLAMEWHEEL="flamethrower", WHIRLPOOL="surf",
+  MUDSLAP="quake", ROLLOUT="rocks", BONERUSH="rocks",
+  FURYCUTTER="windslash", COTTONSPORE="powder",
 }
 
 local FAMILY = {
@@ -426,13 +461,52 @@ local function drawWorldFx(pull)
   local name=moveName(battle,def)
   local special=SPECIAL[name]
   local family=FAMILY[moveType(def)]
-  if not special and not family then return end
+  -- Dedicated status effects (Thunder Wave, powders, etc.) opt in above.
+  -- Unknown zero-power moves should not fire a generic projectile at the foe.
+  if not special and (not family or power(def) <= 0) then return end
   local phase=phaseFor(battle,special)
   local a,b=points(); if not a then return end
   local strength=clamp(.8+power(def)/220,.8,1.5)
   local p=(pull or 0)-0.15 -- a tiny camera-ward bias keeps translucent cards off terrain
 
-  if special=="beam" then
+  if special=="aeroblast" then
+    -- Lugia: a compressed rotating air lance, followed by expanding pressure
+    -- rings at impact.  Two counter-rotating helices keep it volumetric from
+    -- the orbit camera instead of reading as one flat slash billboard.
+    local reach=clamp((phase-.08)/.62,0,1)
+    local segs=18
+    for i=1,segs do
+      local t=(i/segs)*reach
+      if t>0 then
+        local x,y,z=along(a,b,t,math.sin(t*PI)*1.3)
+        local r=(1-t)*2.8 + .6
+        local ang=t*TAU*3.5 + phase*TAU*5
+        drawCross(tex.wind,x+math.cos(ang)*r,y+math.sin(ang*1.7)*r*.45,
+          z+math.sin(ang)*r,3.8*strength,1.15*strength,p,ang)
+        drawCross(tex.wind,x+math.cos(ang+PI)*r,y+math.sin((ang+PI)*1.7)*r*.45,
+          z+math.sin(ang+PI)*r,3.1*strength,1.0*strength,p,ang+PI)
+      end
+    end
+    if phase>.48 then
+      targetBurst(tex.wind,b,phase,p,5.2*strength)
+      groundRing(tex.ring,b,clamp((phase-.48)/.45,0,1),p,14,9.5,2.8)
+    end
+  elseif special=="sacredfire" then
+    -- Ho-Oh: gather hot sparks around the user, then send a dense fire core
+    -- wrapped in a rotating corona.  The final ring makes the hit feel larger
+    -- than Flamethrower/Ember without copying Stadium textures.
+    if phase<.28 then
+      orbitCloud(tex.orb,a,phase,p,14,5.2,2.6,2.4)
+      orbitCloud(tex.spark,a,phase,p,7,3.3,1.7,1.4)
+    else
+      projectileTrail(tex.orb,a,b,phase,p,4.8*strength,10,3.4,phase*TAU*2)
+      beam(tex.orb,a,b,phase,p,1.35*strength)
+      if phase>.5 then
+        targetBurst(tex.orb,b,phase,p,5.8*strength)
+        groundRing(tex.spark,b,clamp((phase-.5)/.42,0,1),p,16,8.5,2.5)
+      end
+    end
+  elseif special=="beam" then
     if phase<.28 then
       for i=1,7 do
         local ang=i*TAU/7+phase*5; local r=4*(1-phase/.28)
@@ -593,7 +667,30 @@ function M.install()
     return false, "Dramatic Shape Stadium world hooks unavailable"
   end
 
-  local innerBegin, innerUpdate, innerDraw, innerFinish = Stadium.begin, Stadium.update, Stadium.draw, Stadium.finish
+  local innerBegin, innerUpdate, innerUpdateGen2, innerDraw, innerFinish =
+    Stadium.begin, Stadium.update, Stadium.updateGen2, Stadium.draw, Stadium.finish
+
+  -- Observe Gold's own move-animation entry point.  No battle logic is changed:
+  -- the wrapper only remembers which move the AnimRunner that immediately
+  -- follows belongs to, so the world-space renderer can select an effect.
+  local okGold, GoldBattleState = pcall(require, "src.ui.gen2.BattleState")
+  if okGold and type(GoldBattleState) == "table"
+      and type(GoldBattleState.animForMove) == "function"
+      and not GoldBattleState._stadium3DFxMoveHook then
+    local innerAnimForMove = GoldBattleState.animForMove
+    GoldBattleState.animForMove = function(self, moveId, side, ...)
+      local started = innerAnimForMove(self, moveId, side, ...)
+      if started then
+        self._stadium3DFxMove = moveId
+        self._stadium3DFxSide = side
+      else
+        self._stadium3DFxMove = nil
+        self._stadium3DFxSide = nil
+      end
+      return started
+    end
+    GoldBattleState._stadium3DFxMoveHook = true
+  end
 
   Stadium.begin = function(arena, ...)
     live.arena, live.battle, live.groundY = arena, nil, 0
@@ -605,6 +702,17 @@ function M.install()
     live.battle = battle or live.battle
     if groundY~=nil then live.groundY=groundY end
     return innerUpdate(dt, battle, groundY, ...)
+  end
+
+  if type(innerUpdateGen2) == "function" then
+    Stadium.updateGen2 = function(dt, screen, groundY, ...)
+      -- Replace, rather than retain, the adapter every frame: once Gold moves
+      -- from the move's AnimRunner to its damage/send-out animation, the 3D
+      -- effect must disappear immediately instead of looping on stale data.
+      live.battle = goldBattleAdapter(screen)
+      if groundY~=nil then live.groundY=groundY end
+      return innerUpdateGen2(dt, screen, groundY, ...)
+    end
   end
 
   Stadium.draw = function(pull, ...)

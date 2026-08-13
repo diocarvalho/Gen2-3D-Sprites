@@ -51,6 +51,15 @@ local ChunkMesher = V.require("ChunkMesher")
 
 local OverworldBattle = {}
 
+-- LuaJIT/Lua 5.1 compatibility: some LÖVE targets expose only global
+-- `unpack`, while desktop Lua 5.2+ exposes table.unpack. The v0.2.02 camera
+-- observer used table.unpack directly and could crash the first time Gold
+-- advanced its battle event queue on those targets.
+local unpackResults = (table and table.unpack) or unpack
+local function packResults(...)
+  return { n = select("#", ...), ... }
+end
+
 -- DS_BATTLE_DEBUG=1 logs what the HUD's brightness probe is reading, once a
 -- second, which is how the glyph flip is checked from a shot run. Read
 -- through pcall: the loader's sandbox does not hand a mod `os`, and a
@@ -582,6 +591,12 @@ local function exactGoldArena(state)
   local halfGap = 20
   local px, pz = cx - ux * halfGap, cz - uz * halfGap
   local enx, enz = cx + ux * halfGap, cz + uz * halfGap
+  -- Keep the trainer visibly attached to their Pokemon but out of the combat
+  -- line: one shoulder to the outside and a little farther back. This is a
+  -- presentation-only stand point; Gold's real player coordinates never move.
+  local sideX, sideZ = -uz, ux
+  local trainerX = px - ux * 10 + sideX * 20
+  local trainerZ = pz - uz * 10 + sideZ * 20
   local bearing = math.atan2(ux, -uz)
   local deg = math.deg(bearing)
   local turn = (math.floor((deg + 45) / 90) * 90) % 360
@@ -594,7 +609,7 @@ local function exactGoldArena(state)
     playerCell = { math.floor(px / 16), math.floor(pz / 16) },
     enemyCell = { math.floor(enx / 16), math.floor(enz / 16) },
     player = { px, pz }, enemy = { enx, enz }, mid = { cx, cz },
-    trainer = { tx, tz }, map = state.map,
+    trainer = { tx, tz }, trainerStand = { trainerX, trainerZ }, map = state.map,
     encounter = snap,
   }
 end
@@ -907,6 +922,21 @@ function OverworldBattle.update(dt)
     end
   end
   session.shot = shot
+end
+
+
+-- Camera-facing context for the Stadium-style live-world orbit. Kept narrow so
+-- the camera module does not reach into this file's private session table.
+function OverworldBattle.cameraContext()
+  if not (session and not session.broken and session.arena and session.battle) then return nil end
+  local host = (session.state and session.state.map) or nil
+  local groundY = host and BattleScene.groundY(host, session.arena) or 0
+  return {
+    arena = session.arena,
+    groundY = groundY,
+    screen = session.battle,
+    battle = session.logicBattle,
+  }
 end
 
 -- The finished shot for this frame, or nil when there is none and the battle
@@ -1387,6 +1417,43 @@ local function installGoldBattleState()
     GoldAnimView.stadiumLiveWorldBackgroundHook = true
   end
 
+  -- Record the side whose turn is currently being presented. This observes
+  -- Gold's existing queue only; it does not consume, reorder, or modify events.
+  -- BattleCinematic uses it to hold the camera on the acting Pokemon through
+  -- the move line, damage text and HP drain that make up one resolving turn.
+  if type(GoldBattleState.advanceQueue) == "function"
+      and not GoldBattleState.stadiumActiveTurnCameraHook then
+    local innerAdvance = GoldBattleState.advanceQueue
+    function GoldBattleState:advanceQueue(...)
+      local event = type(self.queue) == "table" and self.queue[1] or nil
+      if type(event) == "table" then
+        local side = nil
+        if event.kind == "move" and (event.side == "player" or event.side == "enemy") then
+          side = event.side
+        elseif event.kind == "damage" and (event.side == "player" or event.side == "enemy") then
+          side = event.animSide
+            or (event.side == "player" and "enemy" or "player")
+        elseif (event.kind == "heal" or event.kind == "send")
+            and (event.side == "player" or event.side == "enemy") then
+          side = event.side
+        end
+        if side then self._stadiumActiveSide = side end
+      end
+      local out = packResults(innerAdvance(self, ...))
+      if self.phase == "menu" or self.phase == "moves" then
+        self._stadiumActiveSide = nil
+      end
+      if unpackResults then
+        return unpackResults(out, 1, out.n)
+      end
+      -- No unpack function is an extremely old/nonstandard host. Gold's
+      -- current advanceQueue has no meaningful return contract, so returning
+      -- nil is safer than letting an optional camera observer crash gameplay.
+      return nil
+    end
+    GoldBattleState.stadiumActiveTurnCameraHook = true
+  end
+
   if type(GoldBattleState.drawPanel) == "function" then
     local innerPanel = GoldBattleState.drawPanel
     function GoldBattleState:drawPanel(...)
@@ -1410,16 +1477,32 @@ local function installGoldBattleState()
     local innerPic = GoldBattleState.drawPic
     function GoldBattleState:drawPic(mon, playerSide, ...)
       if goldShotFor(self) then
+        -- The live voxel scene already contains the actual 3D trainer beside
+        -- the player's battle position.  Gold's opening player back-pic is a
+        -- second flat trainer, so suppress it explicitly even though Stadium
+        -- correctly reports the PLAYER POKEMON as not visible until send-out.
+        if playerSide and self.showPlayerTrainer then return end
+
         local side = playerSide and "player" or "enemy"
+        local stadium = V.require("Stadium")
+        -- Gold can render the player's native Pokemon back-pic on the exact
+        -- send-out frame where showPlayerTrainer has just gone false but the
+        -- Stadium model has not yet been marked visible by updateGen2.  If a
+        -- real 3D model is already loaded, suppress that transitional sprite
+        -- too; species with no model still fall through to Gold's normal pic.
+        if playerSide and not self.showPlayerTrainer
+            and type(stadium.hasModel) == "function" then
+          local okModel, hasModel = pcall(stadium.hasModel, "player")
+          if okModel and hasModel then return end
+        end
         local okVisible, visible = pcall(function()
-          return V.require("Stadium").visible(side)
+          return stadium.visible(side)
         end)
         if okVisible and visible then
-          -- During the opening Gold intentionally shows the trainer's back
-          -- sprite in the player's slot.  That is not the Pokemon duplicate
-          -- we are replacing, so let it through until SendOutPlayerMon swaps
-          -- the slot to the party mon.
-          if not (playerSide and self.showPlayerTrainer) then return end
+          -- Once a Stadium subject is visible, its native 2D battle pic would
+          -- be another duplicate. Gold's battle state still advances normally;
+          -- only the covered flat artwork is omitted from the composite.
+          return
         end
       end
       return innerPic(self, mon, playerSide, ...)
@@ -1474,6 +1557,16 @@ function OverworldBattle.install()
           if okState and adapted then state = adapted end
         end
         pcall(OverworldBattle.begin, state, battle)
+        -- v0.1.92: when LIVE OVERWORLD BATTLES is active, this encounter no
+        -- longer transitions to a separate battle scene first. Gold's native
+        -- Gen2BattleTransition draws the expanding black circle / wipe that
+        -- made sense for a scene change, but this mode now keeps the player in
+        -- the same encounter-site voxel world. Returning false here tells
+        -- World:startBattle() to push Gen2BattleState immediately and skip the
+        -- transition screen entirely.
+        if goldWorldBattleEnabled() then
+          return false
+        end
       end
       return inner(self, battle, opts, onDone)
     end

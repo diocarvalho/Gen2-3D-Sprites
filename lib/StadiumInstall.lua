@@ -61,6 +61,13 @@ StadiumInstall.FORMAT = "DSM4"
 -- is the hermite-animation decode fix: the five keyframe species (Pidgeot,
 -- Dodrio, Exeggutor, Tangela, Magmar) come out garbled or bind-posed from
 -- any rev-1 build.
+--
+-- v0.2.09's full-3D standby detector intentionally does NOT bump this to 3:
+-- StadiumRig repeats the new validation from the already-packed DSM data and
+-- marks unstable clips static in memory.  Keeping REV=2 means a player who
+-- originally imported their Stadium 2 ROM through the file picker does not lose
+-- every 3D model merely because that ROM is not still mounted; old caches get
+-- the repair automatically.  Fresh builds also bake the stronger static bit.
 StadiumInstall.REV = 2
 
 local function gameGeneration()

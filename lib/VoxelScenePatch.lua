@@ -130,16 +130,44 @@ local POSES = [====[local function posesOf(state, spriteColors)
 
       local px = vx or e.px or 0
       local py = e.py or vy or 0
+      local lift = py - (vy or py)
       local cellX, cellY = e.cellX, e.cellY
       if type(cellX) ~= "number" then cellX = math.floor(px / 16) end
       if type(cellY) ~= "number" then cellY = math.floor(py / 16) end
       local okGround, gh = pcall(groundAt, state.map, cellX, cellY)
       if not okGround then gh = 0 end
 
+      -- During a live-world battle, render the trainer beside and slightly
+      -- behind their Pokemon instead of leaving the overworld body directly in
+      -- the combat line. The underlying Gold player remains at the encounter
+      -- coordinate; only this captured visual pose is displaced.
+      if e == state.player and state._stadiumLiveBattle then
+        local okBattle, OB = pcall(V.require, "OverworldBattle")
+        local arena = okBattle and OB and type(OB.arena) == "function" and OB.arena() or nil
+        local stand = arena and arena.trainerStand
+        if stand then
+          px, py = stand[1], stand[2]
+          cellX, cellY = math.floor(px / 16), math.floor(py / 16)
+          local okStandGround, standGh = pcall(groundAt, state.map, cellX, cellY)
+          if okStandGround then gh = standGh end
+          -- Face the battle line rather than the trainer's stale overworld facing.
+          local mon = arena.player
+          local foe = arena.enemy
+          if mon and foe then
+            local dx, dz = foe[1] - mon[1], foe[2] - mon[2]
+            if math.abs(dx) > math.abs(dz) then
+              facing = dx > 0 and "right" or "left"
+            else
+              facing = dz > 0 and "down" or "up"
+            end
+          end
+        end
+      end
+
       posed[#posed + 1] = {
         sprite = sprite, px = px, py = py,
         facing = facing, phase = phase, flip = flip,
-        gh = gh, lift = py - (vy or py), colors = colors,
+        gh = gh, lift = lift, colors = colors,
         entity = e, entityIndex = ei,
         mapId = state.map and state.map.id,
       }

@@ -169,6 +169,13 @@ local function drawGoldVoxelFrame(canvas, game, world, ctx)
     end
 
     local okOverlay, count, err = drawGoldOverlayStack(game, world, ctx)
+    if okOverlay and VoxelBridge and type(VoxelBridge.drawCameraSlider) == "function" then
+      -- Android-only camera-mode slider. Drawn after Gold's stack so the
+      -- control remains visible over the voxel world, but the slider itself
+      -- hides whenever a menu/overlay is on top (its visibility gate lives in
+      -- GoldVoxelBridge). Desktop never draws it and keeps F6 instead.
+      pcall(VoxelBridge.drawCameraSlider, ctx)
+    end
     G.pop()
     if not okOverlay then return false, 0, err end
     return true, count, nil

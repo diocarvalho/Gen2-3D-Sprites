@@ -30,6 +30,15 @@ local PokemonHeights = V.require("PokemonHeights")
 local PokemonLocomotion = V.require("PokemonLocomotion")
 local FirstPerson = V.require("FirstPerson")
 
+-- Dex 249 now gets a real 3D hierarchy-repair probe in StadiumRig.  Keep the
+-- species-correct Lugia card only as a LAST-RESORT safety path for a cache/host
+-- where no finite 3D assembly can be produced.  In a normal v0.2.15 import the
+-- Stadium model wins and this code is never reached.
+local lugiaFallbackRenderer = nil
+local LUGIA_FALLBACK_SCALE = 2.35
+local LUGIA_FALLBACK_NORMAL = "assets/enhanced_overworld/poke_followers/follower_249_normal.png"
+local LUGIA_FALLBACK_SHINY = "assets/enhanced_overworld/poke_followers/follower_249_shiny.png"
+
 -- Optional 3D Character Selector bridge (red_3d_player).  The selector installs
 -- its live ActiveRenderer on src.world.gen2.Player.red3dPlayerRenderer.  Gold's
 -- standalone voxel renderer never calls Player:draw(), so without this bridge
@@ -50,9 +59,18 @@ local function gen2PlayerClass()
 end
 
 local function liveGoldWorld()
-  -- Prefer Gen2Compat's supported Gen-1 spelling.  Under a Gold boot this is a
-  -- live facade over Game2.world; the state-stack fallback keeps the bridge
-  -- tolerant of host revisions that do not serve that facade to this chunk.
+  -- The standalone Gold bridge already owns the exact live Game2 instance.
+  -- Prefer it before any compatibility facade: Game.overworld/StateStack can
+  -- lag during the first map and only refresh after a map connection, which
+  -- previously made third-person skin animation appear to "wake up" only
+  -- after transitioning.
+  if type(V.game) == "table" then
+    local direct = V.game.world or V.game.overworld
+    if type(direct) == "table" then return direct end
+  end
+
+  -- Gen2Compat's supported Gen-1 spelling is still a fallback for host builds
+  -- that do not expose the Game2 instance through the bridge.
   local okGame, Game = pcall(require, "src.core.Game")
   if okGame and type(Game) == "table" then
     local okWorld, world = pcall(function() return Game.overworld end)
@@ -688,6 +706,15 @@ end
 -- matrix after the Stadium skeleton is posed.
 local function locomotionFor(slot, p, dex, targetHeight, dt, mon)
   local x, z = tonumber(p.px) or 0, tonumber(p.py) or 0
+  -- A model that the full-3D pose guard marked static must stay on its known
+  -- good bind pose.  Do not let overworld locomotion select idle_alt/struggle
+  -- and accidentally reintroduce the exact broken skeletal data we rejected.
+  if mon and mon.staticPose then
+    stopWalkClip(slot, mon)
+    slot.walkX, slot.walkZ = x, z
+    slot.walkPhase, slot.walkBlend = 0, 0
+    return 0, 0, false
+  end
   local eligible = Config.walkingAnimations ~= false
       and PokemonLocomotion
       and PokemonLocomotion.isGroundedBiped(dex, Config.walkSpeciesOverrides)
@@ -1126,6 +1153,10 @@ function OverworldStadium.prepare(posed)
     local playerPokemon = isPokemonPlayerPose(p, dexForPose[i])
     if (not p.isPlayer or playerPokemon) and p.entity and dexForPose[i] then
       local dex = dexForPose[i]
+      -- Keep the resolved identity even when the 3D rig deliberately rejects
+      -- this species. Dedicated species fallbacks (notably Lugia) need the
+      -- exact Dex number instead of falling through to an unrelated NPC card.
+      p.stadiumDex = dex
       local ok, did = pcall(prepareOne, p, dex, dt)
       if not ok or not did then
         logOnce("prepare:" .. tostring(dex),
@@ -1164,7 +1195,118 @@ function OverworldStadium.safeClaimWilds(state)
   return result ~= false
 end
 
+local function entityIsShiny(entity)
+  if type(entity) ~= "table" then return false end
+  if entity.shiny == true or entity.isShiny == true then return true end
+  local mon = entity.pokemon or entity.mon or entity.partyMon
+  return type(mon) == "table" and (mon.shiny == true or mon.isShiny == true)
+end
+
+local function lugiaFallbackDef(entity)
+  return {
+    image = entityIsShiny(entity) and LUGIA_FALLBACK_SHINY or LUGIA_FALLBACK_NORMAL,
+    frames = 6, walker = true, trueColor = true,
+  }
+end
+
+local function drawLugiaFallback(p)
+  if not (p and p.stadiumDex == 249) then return false end
+
+  local okVoxel, Voxel3D = pcall(V.require, "Voxel3D")
+  local okCards, SpriteBillboards = pcall(V.require, "SpriteBillboards")
+  local okState, VoxelState = pcall(V.require, "VoxelState")
+  local okSR, SpriteRenderer = pcall(require, "src.render.SpriteRenderer")
+  if not (okVoxel and type(Voxel3D) == "table"
+      and okCards and type(SpriteBillboards) == "table"
+      and okState and type(VoxelState) == "table"
+      and okSR and type(SpriteRenderer) == "table") then
+    return false
+  end
+
+  local def = lugiaFallbackDef(p.entity)
+  if not lugiaFallbackRenderer or lugiaFallbackRenderer.def.image ~= def.image then
+    local okNew, made = pcall(SpriteRenderer.new, def, "stadium-lugia-fallback")
+    if not okNew or not made then return false end
+    lugiaFallbackRenderer = made
+  end
+
+  local facing = p.facing or "down"
+  local phase = tonumber(p.phase) or 0
+  local flip = p.flip == true
+  local geometry
+  if type(lugiaFallbackRenderer.getPoseGeometry) == "function" then
+    local okGeo, got = pcall(lugiaFallbackRenderer.getPoseGeometry,
+      lugiaFallbackRenderer, facing, phase, flip)
+    if okGeo then geometry = got end
+  end
+  local frame = geometry and geometry.frame or 0
+  local mirror = geometry and geometry.mirror or (facing == "right")
+  local mesh = SpriteBillboards.mesh(def, frame)
+  if not mesh then return false end
+
+  local okTex, tex = pcall(lugiaFallbackRenderer.resolveImage, lugiaFallbackRenderer)
+  if not okTex or not tex then return false end
+
+  local px, py = tonumber(p.px) or 0, tonumber(p.py) or 0
+  local y = (tonumber(p.gh) or 0) + (tonumber(p.lift) or 0)
+  local b = type(FirstPerson.cardBlend) == "function" and FirstPerson.cardBlend() or 0
+  local m = Mat4.translate(px + 8, y, py + 8)
+  if b > 0 and type(FirstPerson.cardYaw) == "function" then
+    m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(px + 8, py + 8) * b))
+  end
+  local angle = tonumber(VoxelState.angle) or (math.pi / 2)
+  m = Mat4.mul(m, Mat4.rotateX((angle - math.pi / 2) * (1 - b)))
+  m = Mat4.mul(m, Mat4.scale(LUGIA_FALLBACK_SCALE, LUGIA_FALLBACK_SCALE, LUGIA_FALLBACK_SCALE))
+  if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
+  m = Mat4.mul(m, Mat4.translate(-8, 0, 0))
+
+  -- Stadium effect renderers can leave additive/no-depth-write state active.
+  -- Explicitly restore solid alpha/depth state so Lugia cannot inherit a
+  -- translucent pass. The sprite shader still discards only the transparent
+  -- background pixels.
+  if type(Voxel3D.blend) == "function" then pcall(Voxel3D.blend, nil) end
+  if love and love.graphics and love.graphics.setColor then
+    pcall(love.graphics.setColor, 1, 1, 1, 1)
+  end
+  local okDraw = pcall(Voxel3D.draw, mesh, tex, m, nil)
+  return okDraw
+end
+
+local function withFreeVisualWalk(p, fn)
+  if not (p and type(p.entity) == "table" and type(fn) == "function") then
+    return false, nil
+  end
+  -- Prefer the animation bit captured with this exact VoxelScene pose.  This
+  -- is frame-local and cannot be stale across boot/map transitions.  Keep the
+  -- live-world lookup only as a compatibility fallback for older callers that
+  -- construct a player pose without VoxelScene.
+  local visual = p.stadiumVisualMoving == true
+  if not visual and p.stadiumVisualMoving == nil then
+    local world = liveGoldWorld()
+    visual = type(world) == "table"
+      and world._stadiumFreeMoveActive == true
+      and world._stadiumFreeVisualMoving == true
+  end
+  if not visual then return pcall(fn) end
+
+  -- Visual-only bridge: true camera-relative free movement advances px/py and
+  -- animClock without owning Gold's grid-step Player.moving flag. Temporarily
+  -- expose a walking pose ONLY while the external 3D skin is being rendered,
+  -- then restore every gameplay field immediately.
+  local entity = p.entity
+  local oldMoving, oldPhase, oldFlip = entity.moving, p.phase, p.flip
+  entity.moving = true
+  p.phase = 1
+  p.flip = entity.stepFlip == true
+  local ok, result = pcall(fn)
+  entity.moving, p.phase, p.flip = oldMoving, oldPhase, oldFlip
+  return ok, result
+end
+
 function OverworldStadium.draw(p)
+  if p and p.stadiumDex == 249 and not (p.stadiumMon and p.stadiumMon.rig) then
+    return drawLugiaFallback(p)
+  end
   local mon = p and p.stadiumMon
   local matrix = p and p.stadiumMatrix
   if not (mon and mon.rig and matrix) then return false end
@@ -1196,8 +1338,9 @@ function OverworldStadium.drawPlayerSkin(p)
     return false
   end
 
-  local ok, result = pcall(renderer.drawVoxel, renderer, p.entity, p,
-                           Voxel3D, Mat4, FirstPerson)
+  local ok, result = withFreeVisualWalk(p, function()
+    return renderer:drawVoxel(p.entity, p, Voxel3D, Mat4, FirstPerson)
+  end)
   if not ok then
     logOnce("red3d-draw",
       "3D Character Selector player draw failed in Gold voxel mode; using the stock trainer card: %s",
@@ -1232,8 +1375,9 @@ function OverworldStadium.castPlayerSkin(p, shadowMap)
   if not okVoxel or type(Voxel3D) ~= "table" or not okFP or type(FirstPerson) ~= "table" then
     return false
   end
-  local ok, result = pcall(renderer.drawVoxelShadow, renderer, p.entity, p,
-                           Voxel3D, Mat4, shadowMap, FirstPerson)
+  local ok, result = withFreeVisualWalk(p, function()
+    return renderer:drawVoxelShadow(p.entity, p, Voxel3D, Mat4, shadowMap, FirstPerson)
+  end)
   if not ok then
     logOnce("red3d-shadow",
       "3D Character Selector player shadow failed in Gold voxel mode: %s", tostring(result))

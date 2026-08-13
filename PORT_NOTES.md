@@ -1,3 +1,139 @@
+## v0.2.15 Lugia hierarchy probe / capture skill pass
+
+Dex 249 is no longer rejected before `StadiumPack.load`. `StadiumRig.new` probes the bind pose before `measureBind`, selecting a hierarchy interpretation only for Lugia. The preferred repair keeps parent rotation while treating translations as model-space; the flat mode is used only when it is dramatically more compact. Repaired stance metrics overwrite the stale DSM4 measurements in memory, so existing caches are usable without deletion. Lugia remains `staticPose=true` because Stadium 2 move/context routing still maps all contexts to animation 0; this prevents a provisional clip from tearing the repaired mesh apart.
+
+Capture difficulty now affects both retention and player skill. `strengthResistance` is computed when aim begins, its normalized strength shrinks the on-screen hit radius and speeds the ring, and `throwQuality` has stricter grade cutoffs. `startThrow` stores screen aim error as a lateral/vertical world-space endpoint; `drawWorld` follows that endpoint so a MISS is physically visible.
+
+## v0.2.14 first-map free-camera animation lifecycle fix
+
+The v0.2.13 walking bridge correctly spoofed `Player.moving` only during the external Character Selector draw, but it discovered whether free movement was active through `Game.overworld` / `StateStack`. On the initial Gold map that compatibility facade can lag the live `Game2.world`; crossing a map connection refreshes it, which explains why the trainer animation only began working after a transition.
+
+`GoldVoxelBridge.makeState()` now copies `_stadiumFreeMoveActive`, `_stadiumFreeVisualMoving`, and the animation distance from the exact world being rendered. `VoxelScene.posesOf()` carries the visual-moving bit on the player's captured pose. `OverworldStadium.withFreeVisualWalk()` consumes that pose-local state first, with the old world lookup only as an older-call-site fallback.
+
+## v0.2.13 Lugia fallback and free-camera character animation
+
+Dex 249 remains rejected by `StadiumMon` because the current local Stadium 2 hierarchy decode is known to explode the body into separated parts. The fallback no longer delegates to the roaming entity's generic sprite. `OverworldStadium` retains the resolved Dex id even after rig preparation fails and draws `follower_249_normal.png` / shiny directly through the voxel billboard pipeline with a fixed presentation scale and explicit solid alpha/depth state.
+
+Gold true free-camera movement deliberately advances continuous `px/py` without setting the engine's grid-step `Player.moving` flag. That is correct for gameplay but left external character skins idle because their walk pose can key from the engine flag. `GoldCameraControls` now records `_stadiumFreeVisualMoving` from actual displacement. `OverworldStadium` consumes that bit only around the 3D Character Selector's `drawVoxel` / `drawVoxelShadow` calls: it temporarily exposes moving + walk phase, calls the renderer, and restores the real fields immediately. No collision/script state observes the spoof.
+
+## v0.2.11 manual capture input, Ball material and Lugia safety
+
+The capture trigger now wraps the documented `input.step` mod hook. Gold raises this once per fixed logic tick before `Input:step`, so raw R3/right-mouse edges are visible even if the player has not crossed a cell. `world.stepped` remains useful for spawn updates, but it cannot be the activation clock for a stationary aiming mechanic. The contact handler is intentionally left unset, so Wilds' `_startBattleNative` remains authoritative when the player physically touches a roaming Pokémon.
+
+The supplied Poké Ball COLLADA mesh uses an atlas-oriented material/UV layout that did not map consistently through this renderer's single diffuse texture path. v0.2.11 therefore uses a tiny generated UV sphere at runtime and a dedicated equirectangular Poké Ball texture. The sphere's V coordinate is inverted relative to its latitude so LOVE's image-top V=0 maps red to the north/top hemisphere rather than the bottom.
+
+Lugia's failure is not treated as a mere scale or idle-animation problem anymore. The user's local Stadium 2 decode is visibly separated at the model/bind level, so Dex 249 is a species-specific 3D rejection for now: `StadiumMon:setSpecies(249)` returns false and the existing voxel entity path draws Gold's ordinary sprite billboard. This is intentionally preferable to claiming the 3D mesh is repaired when the local ROM-derived hierarchy cannot be validated in this environment.
+
+## v0.2.07 live-battle trainer presentation
+
+`lib/OverworldBattle.lua` already filters Gold's native `BattleState:drawPic` whenever the corresponding Stadium subject is visible. Earlier builds deliberately exempted `playerSide + showPlayerTrainer`, allowing Gold's 2D trainer back-pic through during the opening. In the live voxel presentation that is now redundant because `VoxelScenePatch` keeps and repositions the actual 3D player trainer beside the player's combatant.
+
+v0.2.07 removes that exemption. During `goldShotFor(self)` live-world battles, a covered player pic is suppressed even while `showPlayerTrainer` is true. The battle state itself is untouched, so Gold still performs the normal trainer-to-Pokémon send-out sequence logically; only the duplicate 2D render is skipped. Non-live/fallback Gold battles still call the native draw path unchanged.
+
+## v0.2.06 overworld capture integration
+
+The visible-Wilds contact seam is wrapped rather than replaced. `OverworldCapture.begin()` only claims ordinary battleable visible encounters when a regular POKé BALL, voxel renderer, empty stack and party/current-box capacity are available; all other cases execute the original `_startBattle` function.
+
+A transparent `_stadiumCaptureOverlay` state freezes `Game2` overworld logic through the engine's existing StateStack update priority while `render.compose` continues to render the live world. `FirstPerson.onTop()` treats only this tagged state as camera-driving, so the existing relative mouse and polled mapped right-stick inputs keep steering aim without making normal menus camera-active.
+
+The user-supplied COLLADA ball was converted to the renderer's Position/TexCoord/Shade mesh format at packaging time. Its diffuse V coordinate is flipped to match the supplied atlas. The runtime ball is transformed directly in Voxel3D and therefore participates in normal world depth/occlusion.
+
+Catch success uses `src.battle.gen2.Catching.attempt`; the caught record is built with `src.battle.gen2.Mon.new`, then stored in the same party/box/Pokédex table shapes used by Gold. The minigame consumes a regular Poké Ball with `Bag.remove` at throw time. Quality modifies the synthetic overworld HP/catch-rate inputs, but the species catch rate remains authoritative.
+
+## v0.2.05 camera input reliability
+
+`lib/GoldVoxelBridge.lua` now treats desktop F6 as an edge-triggered state as well as an event. `Game2:keypressed` still handles the normal low-latency path, but `renderFrame()` calls `pollCameraHotkey()` before resolving `cameraMode`; this protects camera cycling from later callback replacement while a shared `f6Down` latch prevents duplicate cycles.
+
+`lib/FirstPerson.lua` keeps the existing `Game2:gamepadaxis` / raw joystick wrappers and adds `pollMappedRightStick()`. Each update samples connected mapped gamepads' `rightx/righty` axes and chooses the strongest active right-stick vector. That state is processed by the existing squared stick response in `FirstPerson.update`, alongside the existing mouse-delta accumulator, so both devices continue to control one yaw/pitch pair.
+
+## v0.2.04 connected-map voxel streaming
+
+The important Gold compatibility change is in `lib/GoldVoxelBridge.lua`. Upstream Gold already computes connected-map image records (`id/ox/oy/image`) and can look multiple hops outward, but earlier Stadium2 builds intentionally converted that list to `neighbors = {}` because `VoxelScene` requires real Map objects. v0.2.04 adapts the current map's direct cardinal connections back into `src.world.gen2.Map` instances, attaches the same Gold atlas/color renderer used by the current map, and passes those maps to `VoxelScene`.
+
+Only direct connections are rendered as voxel neighbours in this release. That guarantees at least one whole map of look-ahead in every available direction while bounding mobile GPU/memory cost. Gold remains authoritative for actual connection crossing, NPC scripts, collision and warps. Neighbor bodies are async-preloaded; an edge-proximity flag promotes the approached destination to the urgent build slice. A warm body mesh is accepted as the new current-map bootstrap after a seam, while a cold boot still synchronously primes the full map with connected-neighbour masks.
+
+The adapter also adds `map` to matching native Gold neighbour records. This activates existing third-person/follower compatibility code that already expected `nb.map` but previously received only image records.
+
+## v0.2.03 forest apron and battle-camera safety
+
+`ChunkMesher.RING` is now eight Gen-2 blocks, and `Structures.RING/ROUND_RING` match it at 32 tiles. The synthetic outdoor border therefore remains real meshed round-tree geometry for twice the previous distance on all four sides; connected-neighbour masking remains unchanged.
+
+`BattleCinematic.frame` is now an error boundary around the optional camera. It validates battle animation/arena values and returns no placed camera on an unexpected engine shape, allowing the normal overworld camera to render the battle. `OverworldBattle` also uses `(table.unpack or unpack)` with explicit result counts for the `advanceQueue` observer, fixing LuaJIT/LÖVE hosts that do not expose `table.unpack`.
+
+## v0.2.02 active-turn battle framing and trainer sideline
+
+Gold's Gen-2 `BattleState` exposes the real move attacker through `anim.hudSide`, and each queued `move` event also carries its acting `side`. The live battle shim now observes (without consuming or changing) `advanceQueue()` and stores `_stadiumActiveSide` for the current resolving turn. `BattleCinematic` uses the animation's `hudSide` first, then that resolving-turn latch, and clears back to a two-subject frame once the menu/move-selection phase returns. This avoids the v0.2.01 sine-wave guess about which Pokemon should lead the shot.
+
+The cinematic camera now solves an eased shoulder angle behind the acting Pokemon and uses an active-subject-weighted focus point (strongest during a move animation). Between turns it returns to midpoint and resumes the slow orbit.
+
+`exactGoldArena()` now also computes `trainerStand`, offset outward and backward from the player's combatant. The VoxelScene Stadium patch applies that stand point only to the captured **visual pose** of the player when `_stadiumLiveBattle` is set; the engine Player object, collision cell, scripts, post-battle location, and save coordinates are untouched.
+
+DIORAMA's continuous distance clamp is widened from 0.55–2.20 to **0.24–2.20**.
+
+## v0.2.01 continuous diorama lens and live battle orbit
+
+`DioramaZoom.lua` owns a continuous distance multiplier (0.55x–2.20x). `Voxel3D` applies it only to the classic orbit camera distance, so 1ST/3RD placed cameras are unaffected. `CamControl` routes desktop wheel/trackpad events directly to that value on the FULL/DIORAMA rung. `GoldVoxelBridge` also polls `love.touch` directly for two free Android contacts and applies the pinch ratio to the same value, avoiding the late Game2 callback seam that previously made Android pinch unreliable.
+
+`BattleCinematic.lua` builds a placed camera from `OverworldBattle.cameraContext()`: midpoint of the live arena pair, encounter ground height, and current Gen2 BattleState. `VoxelScene` gives that camera final authority only while a live-world battle exists. The orbit radius/height ease rather than cut; `screen.anim ~= nil` tightens the shot during attack animation. Manual right-thumb/mouse deltas are routed to `BattleCinematic.manualLook`, which holds automatic orbit for 2.5 seconds and then resumes smoothly. No battle logic, damage, menus, or world coordinates are altered.
+
+## v0.2.00 Android touch and perimeter runtime paths
+
+The v0.1.99 right-thumb path still lived exclusively inside `Game2:touchpressed/touchmoved` wrappers. On Android builds where the overlay/input chain bypasses a late instance wrapper, those methods never see the free finger; the already-working camera slider had solved the same class of failure by polling `love.touch` each render frame. `GoldVoxelBridge.updateRightLookTouches` now does the same for camera look, rejects overlay/slider contacts, suspends itself when two free right-side contacts indicate pinch, and writes directly through `FirstPerson.lookBy`. It is serviced from both free-roam `renderFrame` and battle `updateBattle`.
+
+For live-world Gold battles, `CamControl.battleLive` now treats `shot.liveWorld` as steerable without consulting `BattleCam.steerable`; that flag belongs to the legacy staged arena and is not initialised by the normal voxel camera used by Gold live-world fights.
+
+The perimeter fix now changes the generated geometry rather than only its class cutoff: `ChunkMesher.RING` is four blocks and `Structures.RING/ROUND_RING` are 16 tiles, so the new outer block is physically present and carved with the same cylinder/canopy tree shapes.
+
+## v0.1.99 Android right-thumb look and perimeter forest depth
+
+`FirstPerson.install(game)` now treats only the right 55% of open Android screen as a free-look touchpad; `TouchControls:hitTest()` still wins for the virtual D-pad/buttons. `CamControl` uses the same right-side gate during battles. For Gold live-world battles, `OverworldBattle.shot().liveWorld` routes drag deltas into `FirstPerson.lookBy()` because that battle background is rendered by `VoxelScene` with the normal placed first/third-person rig; the legacy staged `BattleCam` is retained only for non-live-world battle scenes.
+
+`Structures.ROUND_RING` increases from 4 to 8 tiles while `ChunkMesher`'s full 12-tile ring is unchanged. The extra near belt is still carved through the established profile-driven cylinder/canopy path, so the Johto tree normalization and anti-rectangular-wall safeguards remain authoritative.
+
+## v0.1.98 true-directional Gold walk
+
+`lib/GoldCameraControls.lua` now consumes the unquantised camera-space vector only during ordinary on-foot free roam in the 1ST/3RD voxel rungs. It rotates that vector through `FirstPerson.moveWorld`, updates a continuous world-pixel body with axis-separated collision/wall sliding, and suppresses Gold's cardinal `heldDir` only for those normal walking frames.
+
+The logical Gold cell changes when the body's centre crosses a 16px cell boundary. At that boundary the adapter runs the same gameplay-facing landing chain used by `World:stepBody` (trainer sight, `world.stepped`, warp, coord script, step count, encounter). Forced/special states are not reimplemented: bike/surf, currents, ice, forced doors, ledges, connections and boulder pushes transfer back to native Gold movement.
+
+There is intentionally no `Player.moving` or `Player:walkPhase` spoof. `FirstPerson.bodyYaw` follows the actual travel bearing and external character renderers can infer animation from `player.px/player.py` displacement.
+
+## v0.1.98 camera-mode latch and Gold movement ownership
+
+The v0.1.96 slider could enter 1ST/3RD but AUTO camera ownership then re-read `red_3d_player`'s prior public `voxel` pipeline rung and overwrite a requested DIORAMA on the next frame. `GoldVoxelBridge` now treats direct slider/F6 input as an explicit local camera choice in AUTO/STADIUM control and keeps a runtime `cameraOverride` latch. The choice is mirrored to the selector pipeline when available, but the local Gold camera no longer depends on that mirror sticking. Explicit **CAMERA CONTROL = CHARACTER SELECTOR** ignores the latch and restores external ownership.
+
+`GoldCameraControls` no longer stands down merely because `red_3d_player` is installed/owning camera presentation. The adapter only rotates the requested input vector by the live 1ST/3RD yaw and quantizes it to Gold's native four cardinals before writing `World.heldDir`; it never touches continuous position or animation flags. This restores view-relative walking without reviving the removed v0.1.84 free-movement controller.
+
+## v0.1.96 Android slider input fallback
+
+The slider remains drawn in LOVE window units. v0.1.96 adds a direct `love.touch.getTouches()` / `love.touch.getPosition()` poll inside the Gold voxel render path. It captures only contacts whose current press begins inside the slider and applies the selected camera mode before `Voxel.setLevel()` for that frame. The existing Game2 wrappers remain as a low-latency path, while polling guarantees Android delivery if another input layer bypasses those wrappers.
+
+## v0.1.94 Gold touch-host correction
+
+The standalone Gold bridge passes its live `Game2` owner to `FirstPerson.install(game)`, but v0.1.93 called `CamControl.install()` with no host. `CamControl` therefore required `src.core.Game` and wrapped Gen-1 touch callbacks that never run during a Gold boot. The gesture recognizer itself was correct but unreachable.
+
+`CamControl.install(game)` now follows the same host-injection contract as `FirstPerson.install(game)`. `GoldVoxelBridge.bindGame(game)` passes the current Gold owner into it. `surveyStep()` also detects `game.world:zoomStep()` and uses that for Gold, falling back to Gen-1 only when no Gold world exists.
+
+## v0.1.93 Gold pinch-zoom activation
+
+The embedded `lib/CamControl.lua` already implemented the intended shared zoom input layer, including a two-finger touch recognizer, pinch slack, ThirdPerson continuous boom scaling, survey-zoom accumulation, and coordination with `FirstPerson.dropLook/reseatLook`. The standalone Gold bridge previously loaded `FirstPerson` and `GoldCameraControls` but never loaded/installed `CamControl`, so none of those pinch paths were reachable in Gold/Silver.
+
+`lib/GoldVoxelBridge.lua` now loads `CamControl` and installs it immediately after `FirstPerson.install()`. That ordering is intentional: CamControl becomes the outer touch wrapper, recognizes two open-screen fingers, claims pinch movement before it reaches the look-drag wrapper, and forwards unrelated touches to the normal engine/Character Selector handlers. The bridge exposes `pinchZoomInstalled` / `pinchZoomError` in its diagnostics status.
+
+## v0.1.92 seamless live-world battle start
+
+Current Gold always enters a wild battle through `World:pushBattleTransition()`, which pushes `Gen2BattleTransition` and draws the native expanding black-circle wipe before the battle state appears. In this mod's **LIVE OVERWORLD BATTLES** mode, that wipe no longer matches the presentation because the player is not actually leaving the encounter-site world.
+
+`lib/OverworldBattle.lua` now short-circuits the wrapped `src.world.gen2.World:pushBattleTransition()` path for ordinary wild encounters when `battle3dWorld` is enabled. The mod still snapshots/begins the live-world battle session first, but then returns `false` instead of pushing `Gen2BattleTransition`. Gold's own `World:startBattle()` already interprets a falsey transition result as "push `Gen2BattleState` immediately", so the battle UI/logic stays native while the transition screen is skipped cleanly.
+
+Trainer battles, Safari/contest/tutorial paths, and the classic presentation used when **LIVE OVERWORLD BATTLES** is OFF still use Gold's normal transition behavior.
+
+## v0.1.91 red_3d_player camera bridge
+
+The Character Selector changes Gen1Recomp's public `src.render.Pipelines` level for the `voxel` pipeline. This standalone Gen-2 renderer intentionally does not register a normal drawWorld pipeline, so its private `VoxelState` previously ignored that public level and reapplied `cameraMode` every frame. `GoldVoxelBridge` now reads `Pipelines.levelLabel("voxel")` while `red_3d_player` owns camera control and maps labels containing `1ST`/`FIRST` to the private first-person rung and `3RD`/`THIRD` to the private third-person rung; every ordinary orbit/ZOOM label maps to the diorama rung. Using labels rather than fixed rung integers keeps the bridge compatible with upstream voxel ladder changes.
+
+`FirstPerson.install` still mirrors look input into the private renderer so its placed camera remains visually synchronized, but mouse/touch look events are forwarded to the previously installed handler while external camera ownership is active. `GoldCameraControls` also checks the same ownership function after calling its inner `World:pollInput`: when Character Selector owns the camera, the adapter returns without quantizing or rewriting `heldDir`, preserving whichever Gen-2 movement layer the selector installed regardless of mod load order.
+
 ## v0.1.90 battle toggle
 
 Gold reads the `battle3dWorld` option lazily through `OverworldBattle.enabled()`. The option now appears as **LIVE OVERWORLD BATTLES**, defaults to `true`, and cleanly returns `false` before any live-world battle compositor/model staging when disabled, so Gold's normal `BattleState` presentation remains authoritative.

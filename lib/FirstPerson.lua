@@ -210,6 +210,11 @@ function FirstPerson.onTop()
   -- overworld state on the stack instead.
   local world = Game.world
   if type(world) == "table" and world.map ~= nil then
+    -- The overworld capture minigame is deliberately a transparent stack
+    -- state: Game2 freezes world simulation while the voxel world remains
+    -- visible.  It still belongs to this camera, so mouse/right-stick look
+    -- must stay live rather than being released like a normal menu/dialog.
+    if top and top._stadiumCaptureOverlay == true then return true end
     return top == nil
   end
   if Game.overworld then
@@ -237,6 +242,52 @@ end
 function FirstPerson.stickY()
   return stick.y or 0
 end
+
+-- Some controller stacks deliver mapped right-stick events inconsistently once
+-- several mods have wrapped Game2:gamepadaxis.  Poll the mapped SDL gamepad
+-- axes as a frame-level fallback.  Event-driven values are still kept for raw
+-- joysticks, and mouse/touch continue to feed the same yaw/pitch accumulator.
+-- If several mapped pads are connected, use the one with the strongest current
+-- right-stick deflection so an idle second controller cannot zero the active one.
+local function pollMappedRightStick()
+  if not (love and love.joystick and type(love.joystick.getJoysticks) == "function") then
+    return false
+  end
+  local okList, list = pcall(love.joystick.getJoysticks)
+  if not okList or type(list) ~= "table" then return false end
+
+  local found = false
+  local bestX, bestY, bestMag = 0, 0, -1
+  for _, js in ipairs(list) do
+    local okPad, mapped = pcall(function()
+      return js and type(js.isGamepad) == "function" and js:isGamepad()
+    end)
+    if okPad and mapped and type(js.getGamepadAxis) == "function" then
+      local okX, x = pcall(js.getGamepadAxis, js, "rightx")
+      local okY, y = pcall(js.getGamepadAxis, js, "righty")
+      if okX and okY and tonumber(x) and tonumber(y) then
+        x, y = tonumber(x), tonumber(y)
+        local mag = x * x + y * y
+        if mag > bestMag then
+          bestX, bestY, bestMag = x, y, mag
+        end
+        found = true
+      end
+    end
+  end
+
+  if found then
+    stick.x, stick.y = bestX, bestY
+    return true
+  end
+  if #list == 0 then
+    -- Do not let a disconnected mapped controller leave a stale look rate.
+    stick.x, stick.y = 0, 0
+  end
+  return false
+end
+
+FirstPerson.pollMappedRightStick = pollMappedRightStick
 
 -- ------- lending the look finger out
 --
@@ -510,6 +561,12 @@ end
 function FirstPerson.update(dt)
   local engagedNow = FirstPerson.engaged()
 
+  -- Always sample mapped right-stick state while the camera module is alive.
+  -- This supplements (rather than replaces) the Game2 event wrappers below,
+  -- so mouse-look and controller-look can be used interchangeably in the same
+  -- 1ST/3RD session and raw non-gamepad joystick support remains event-driven.
+  pollMappedRightStick()
+
   -- entering the rung: the head starts looking the way the sprite faces,
   -- pitched gently down -- the reading pose of the flat game
   if engagedNow and not wasEngaged then
@@ -729,6 +786,13 @@ end
 -- person is actually driving -- so with the rung off, every byte flows
 -- exactly where it always did.
 
+local function externalCameraPassthrough()
+  local fn = V and V.externalCameraPassthrough
+  if type(fn) ~= "function" then return false end
+  local ok, pass = pcall(fn)
+  return ok and pass and true or false
+end
+
 local installed = false
 local installedGame = nil
 
@@ -806,14 +870,22 @@ function FirstPerson.install(game)
       if captured and not istouch then
         mouseDX = mouseDX + (dx or 0)
         mouseDY = mouseDY + (dy or 0)
+        -- When Character Selector owns the public camera, mirror the same
+        -- relative counts into this private Gold rig but never swallow them:
+        -- its voxel camera must receive the event too.
+        if externalCameraPassthrough() and inner then
+          return inner(x, y, dx, dy, istouch)
+        end
         return
       end
       if inner then return inner(x, y, dx, dy, istouch) end
     end
   end
-  -- While the mouse is captured there is no cursor to click UI with, so
-  -- the buttons become GB buttons: left is A, right is B -- through the
-  -- overlay's own press path, which a rebind can never detach. What WE
+  -- While the mouse is captured there is no cursor to click UI with. Left
+  -- remains GB A. v0.2.12 deliberately leaves RIGHT MOUSE unclaimed because
+  -- OverworldCapture owns it as the hold-to-aim Poké Ball shoulder button. LEFT
+  -- still becomes A here, but the transparent capture state consumes its raw
+  -- mouse edge as THROW before overworld input can run. What WE
   -- pressed is remembered per button, so the release always reaches the
   -- overlay even if the capture ended while the button was down --
   -- otherwise a click that outlives the rung strands A held forever.
@@ -824,7 +896,7 @@ function FirstPerson.install(game)
   -- GB button -- otherwise the A that ends the GAME OVER card would be
   -- spent by the shot that ended the run.
   local mouseHeld = {}
-  local MOUSE_BTN = { [1] = "a", [2] = "b" }
+  local MOUSE_BTN = { [1] = "a" }
   do
     local inner = love.mousepressed
     love.mousepressed = function(x, y, button, istouch, presses)
@@ -875,14 +947,31 @@ function FirstPerson.install(game)
     return ok and v or nil
   end
 
+  -- Android uses a split-thumb layout: the left side belongs to movement and
+  -- the right half of open screen is the camera touchpad. This keeps a stray
+  -- left-thumb press from stealing movement while still leaving the physical
+  -- overlay buttons authoritative through TouchControls:hitTest(). Desktop
+  -- touch/mouse behaviour is unchanged.
+  local function rightLookZone(x)
+    local osName = nil
+    pcall(function() osName = love.system.getOS() end)
+    if osName ~= "Android" then return true end
+    local w = 1280
+    pcall(function() w = love.graphics.getWidth() end)
+    return (tonumber(x) or 0) >= w * 0.45
+  end
+
   do
     local inner = Game.touchpressed
     function Game:touchpressed(id, x, y, ...)
       if FirstPerson.driving() then
         local onControl = nil
         pcall(function() onControl = TouchControls:hitTest(x, y) end)
-        if not onControl and not lookTouch then
+        if not onControl and rightLookZone(x) and not lookTouch then
           lookTouch = { id = id, x = x, y = y }
+          if externalCameraPassthrough() and inner then
+            inner(self, id, x, y, ...)
+          end
           return
         end
         if inner then inner(self, id, x, y, ...) end
@@ -908,6 +997,9 @@ function FirstPerson.install(game)
                              (y - lookTouch.y) * per)
         end
         lookTouch.x, lookTouch.y = x, y
+        if externalCameraPassthrough() and inner then
+          inner(self, id, x, y, ...)
+        end
         return
       end
       if touchMove and TouchControls.dpadTouch == id then
@@ -921,6 +1013,9 @@ function FirstPerson.install(game)
     function Game:touchreleased(id, x, y, ...)
       if lookTouch and lookTouch.id == id then
         lookTouch = nil
+        if externalCameraPassthrough() and inner then
+          inner(self, id, x, y, ...)
+        end
         return
       end
       if TouchControls.dpadTouch == id then touchMove = nil end

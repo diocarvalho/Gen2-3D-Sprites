@@ -232,30 +232,49 @@ StadiumBuild.stance = stance
 -- size blow-up and real drift, or an enormous amount of one. Dewgong is what
 -- calibrates it: its idle is 2.4x its own bind pose because the BIND is the
 -- collapsed one, and it drifts barely at all, so it must not be caught.
+-- Full-3D standby sanity check.  The original guard measured Y only.  That
+-- catches an animation that fires a head or tail vertically, but it completely
+-- misses the equally broken case where a wing/body chain is flung sideways or
+-- into depth while its floor and ceiling stay plausible.  Stadium 2 Lugia is
+-- the concrete failure that exposed that hole: its bad provisional standby can
+-- scatter parts across X/Z while barely changing the Y span.
+--
+-- Normalize against the bind pose's LARGEST dimension rather than one axis.
+-- This keeps thin models (or a folded wing) from tripping merely because one
+-- small bind dimension expands naturally.  The thresholds deliberately retain
+-- the old detector's shape: a huge span alone, huge edge drift alone, or a
+-- moderately huge span plus meaningful drift.
 local function idleIsBroken(data, idle)
   if idle == nil then return false end
   local bones = data.bones
-  local _, lo2, _, _, hi2 = poseBox(data, bindMatrices(bones))
-  local span = hi2 - lo2
-  if span <= 0 then return false end
-  local worstH, worstDrift = 1.0, 0.0
+  local lo1, lo2, lo3, hi1, hi2, hi3 = poseBox(data, bindMatrices(bones))
+  local sx, sy, sz = hi1 - lo1, hi2 - lo2, hi3 - lo3
+  local span = math.max(sx, sy, sz)
+  if not (span > 0) then return false end
+
+  local worstSpan, worstDrift = 1.0, 0.0
   local frame = 0
   while frame < idle.frames do
-    local _, flo2, _, _, fhi2 = poseBox(data,
+    local f1, f2, f3, g1, g2, g3 = poseBox(data,
       bindMatrices(bones, animSample(bones, idle, frame)))
-    local h = (fhi2 - flo2) / span
-    if h > worstH then worstH = h end
-    local d1 = (flo2 - lo2) / span
-    local d2 = (fhi2 - hi2) / span
-    if d1 < 0 then d1 = -d1 end
-    if d2 < 0 then d2 = -d2 end
-    if d1 > worstDrift then worstDrift = d1 end
-    if d2 > worstDrift then worstDrift = d2 end
+    local fs = math.max(g1 - f1, g2 - f2, g3 - f3) / span
+    if fs > worstSpan then worstSpan = fs end
+
+    local drift = math.max(
+      math.abs(f1 - lo1), math.abs(g1 - hi1),
+      math.abs(f2 - lo2), math.abs(g2 - hi2),
+      math.abs(f3 - lo3), math.abs(g3 - hi3)) / span
+    if drift > worstDrift then worstDrift = drift end
     frame = frame + 3
   end
-  return (worstH > 2.5 and worstDrift > 1.5)
-         or worstDrift > 2.0 or worstH > 3.4
+
+  return (worstSpan > 2.6 and worstDrift > 0.8)
+         or worstDrift > 1.6 or worstSpan > 3.2
 end
+
+-- Exposed for headless/ROM extraction QA.  Runtime has a second independent
+-- copy in StadiumRig so already-built DSM4 caches are protected too.
+StadiumBuild.idleIsBroken = idleIsBroken
 
 -- ------- writing
 

@@ -9,6 +9,18 @@ return {
     description = "Enables the Gold Gen-2 voxel renderer through render.compose. v0.1.72 primes the current Gold map into a real voxel mesh immediately and reports mesh failures instead of silently staying flat. v0.1.74 keeps that voxel world active and redraws Gold START/textbox overlays visibly above it. Stadium 2 ROM selection is not required for the terrain itself.",
   },
   {
+    key = "cameraControl",
+    type = "choice",
+    label = "CAMERA CONTROL",
+    default = "auto",
+    choices = {
+      { "AUTO", "auto" },
+      { "THIS MOD", "stadium" },
+      { "CHARACTER SELECTOR", "selector" },
+    },
+    description = "AUTO gives red_3d_player / 3D Character Selector control of ZOOM, 1ST and 3RD camera modes when that mod is installed; otherwise this mod controls the camera. THIS MOD always uses the 3D CAMERA MODE option below. CHARACTER SELECTOR explicitly follows the engine voxel camera level and leaves the selector's Gen-2 movement controls untouched.",
+  },
+  {
     key = "cameraMode",
     type = "choice",
     label = "3D CAMERA MODE",
@@ -18,7 +30,7 @@ return {
       { "THIRD PERSON", "third" },
       { "FIRST PERSON", "first" },
     },
-    description = "Select the Gold voxel-world camera. DIORAMA keeps the existing view, THIRD PERSON follows behind the player, and FIRST PERSON places the camera at the player's head. F6 cycles modes. In THIRD/FIRST PERSON, Gold keeps its native grid movement but the controls are camera-relative: UP/W is forward, DOWN/S is back, and LEFT/RIGHT strafe relative to the view.",
+    description = "Camera used by the voxel world. On Android, a 3-position in-game touch slider switches DIORAMA / THIRD PERSON / FIRST PERSON. On desktop, F6 cycles the same three modes. In THIRD/FIRST PERSON, mouse-look and a controller right stick both rotate the camera. When Character Selector owns the camera, the Android slider/F6 changes its public ZOOM / 3RD / 1ST voxel rung instead of overriding the selector.",
   },
   {
     key = "partyFollower",
@@ -33,6 +45,13 @@ return {
     label = "LIVE OVERWORLD BATTLES",
     default = true,
     description = "ON (default): ordinary wild battles stay in the exact voxel overworld view where the encounter began, using the same map, camera, weather and terrain while Gold keeps its native battle UI and logic. OFF: use Gold's classic battle scene. This can be changed without uninstalling the mod.",
+  },
+  {
+    key = "battleSmartCamera",
+    type = "toggle",
+    label = "STADIUM BATTLE CAMERA",
+    default = true,
+    description = "ON (default): LIVE OVERWORLD BATTLES use a cinematic Pokemon Stadium-style camera that smoothly orbits both Pokemon, pushes in during attack animations, and temporarily yields to manual right-thumb/mouse camera control before resuming. OFF keeps the encounter-world camera static/manual.",
   },
   {
     key = "weatherMode",

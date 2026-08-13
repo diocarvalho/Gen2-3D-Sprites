@@ -26,6 +26,7 @@ local Water = V.require("Water")
 local VoxelGrid = V.require("VoxelGrid")
 local DayNight = V.require("DayNight")
 local FirstPerson = V.require("FirstPerson")
+local BattleCinematic = V.require("BattleCinematic")
 local BattleBillboard = V.require("BattleBillboard")
 local Pokedex = V.require("Pokedex")
 local PaletteFX = require("src.render.PaletteFX")
@@ -501,7 +502,11 @@ function VoxelScene.prefetch(state)
   end
   local nbMesh, nbWater = {}, {}
   for i, nb in ipairs(state.neighbors or {}) do
-    ChunkMesher.request(nb.map, true)
+    -- Gold v0.2.04 streams one real connected map ahead in every cardinal
+    -- direction.  All neighbour jobs begin in the background; the destination
+    -- nearest an approached edge is promoted to the current-map time slice so
+    -- the player is much less likely to outrun its body mesh.
+    ChunkMesher.request(nb.map, true, nil, nb.urgent == true)
     nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
     if not nbMesh[i] then
       nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, false)
@@ -538,7 +543,8 @@ local function posesOf(state, spriteColors)
     }
   end
   for _, e in ipairs(state.entities or {}) do
-    if not (state.flyAnim and e == state.player) then
+    if not (state.flyAnim and e == state.player)
+       and not e._stadiumCaptureHidden then
       local sprite, vx, vy, facing, phase, flip = e:pose()
       posed[#posed + 1] = {
         sprite = sprite, px = vx, py = e.py,
@@ -552,6 +558,13 @@ local function posesOf(state, spriteColors)
         -- person, where it would fill the lens from inside; the SUN pass
         -- reads the same list and deliberately does not check the mark
         me.isPlayer = true
+        -- v0.2.14: the free-camera walking bit belongs to THIS rendered world
+        -- frame.  Carry it on the captured pose so the external 3D trainer
+        -- renderer never has to rediscover Game2.world through a facade that
+        -- may still refer to the pre-transition/boot state.
+        me.stadiumVisualMoving = state._stadiumFreeMoveActive == true
+          and state._stadiumFreeVisualMoving == true
+        me.stadiumVisualAnimDist = tonumber(state._stadiumFreeAnimDist) or 0
       end
     end
   end
@@ -964,6 +977,15 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   if not eyes then
     local fpRig, fpCx, fpCy = FirstPerson.frame(me, cx, cy, vw, vh)
     if fpRig then cx, cy = fpCx, fpCy end
+    -- Gold live-overworld battles get a real Stadium-style orbit around both
+    -- combatants. It deliberately overrides the free-roam placed camera only
+    -- while a live battle session exists; menus/ordinary overworld remain on
+    -- FirstPerson/ThirdPerson or the diorama orbit exactly as before.
+    local battleRig, battleCx, battleCy = BattleCinematic.frame(1 / 60)
+    if battleRig then
+      Voxel3D.camera = battleRig
+      cx, cy = battleCx, battleCy
+    end
   elseif eyes.cx then
     cx, cy = eyes.cx, eyes.cy
   end
@@ -1128,6 +1150,22 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.glass(true)
     end
   end
+  -- The overworld capture minigame's user-supplied 3D Poké Ball.  It is
+  -- a world-space prop, so terrain/buildings can occlude it honestly.  The
+  -- target itself remains an ordinary roaming entity until ball impact; on
+  -- impact OverworldCapture marks only that entity hidden while the ball
+  -- shakes, then restores it on breakout or removes it on a successful catch.
+  do
+    local okCapture, Capture = pcall(V.require, "OverworldCapture")
+    if okCapture and Capture and Capture.active and Capture.active() then
+      Voxel3D.glass(false)
+      Voxel3D.seams(false)
+      pcall(Capture.drawWorld, state)
+      Voxel3D.seams(true)
+      Voxel3D.glass(true)
+    end
+  end
+
   -- tall grass last, pulled camera-ward exactly as far as the characters
   -- were (same per-vertex shader bias, so grass never drifts either):
   -- relative depth between a walker and the tuft row south of their feet
@@ -1202,6 +1240,15 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       return nil
     end
     drawScene()
+    -- Paint the capture reticle/ring directly into the still-bound scene
+    -- canvas after all 3D geometry.  Do not call Voxel3D.endOverlay here:
+    -- endScene still owns the active pass and will unbind it after weather.
+    local okCapture, Capture = pcall(V.require, "OverworldCapture")
+    if okCapture and Capture and Capture.active and Capture.active() then
+      love.graphics.setShader()
+      love.graphics.setDepthMode()
+      pcall(Capture.drawOverlay, w, h)
+    end
     return Voxel3D.endScene()
   end
 

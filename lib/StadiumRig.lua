@@ -134,9 +134,21 @@ function StadiumRig.new(model)
     pcall(mesh.setVertexMap, mesh, prim.index)
     self.parts[i] = { mesh = mesh, rows = rows, prim = prim }
   end
+  -- Lugia is the one Stadium-2 model that exposed a hierarchy interpretation
+  -- mismatch severe enough to scatter rigid body parts across the map.  Probe
+  -- repair modes before the ordinary bind measurement so measureBind sees the
+  -- repaired assembly, not the broken default hierarchy.
+  if tonumber(model.species) == 249 then
+    pcall(self.selectLugiaHierarchy, self)
+  end
+
   -- the spot the animations are measured against, taken while there is no
   -- pose to overwrite (see measureBind)
-  pcall(self.measureBind, self)
+  local okMeasure = pcall(self.measureBind, self)
+  if not okMeasure or model.bindBroken then
+    self:release()
+    return nil
+  end
   return self
 end
 
@@ -354,10 +366,15 @@ function StadiumRig:pose(anim, frame, wrap)
     end
 
     local p = parent[b]
+    local hierarchyMode = model.hierarchyMode or "normal"
+    local inheritParent = p > 0 and hierarchyMode == "normal"
+    local inheritRotation = p > 0 and hierarchyMode ~= "flat"
     local pax, pay, paz = 1, 1, 1
-    if p > 0 then pax, pay, paz = accX[p], accY[p], accZ[p] end
-    -- the parent's accumulated scale, applied to the CHILD's offset. This
-    -- is the whole of what the game does instead of propagating scale.
+    if inheritParent then pax, pay, paz = accX[p], accY[p], accZ[p] end
+    -- Normal Stadium hierarchy: the parent's accumulated scale applies to the
+    -- child's offset.  Lugia's repair probes can deliberately disable this
+    -- inheritance when its Stadium-2 bind translations behave as model-space
+    -- values rather than Stadium-1-style parent-local offsets.
     tx, ty, tz = tx * pax, ty * pay, tz * paz
 
     -- Rx * Ry * Rz in the game's own row-vector form (src/F420.c
@@ -371,7 +388,7 @@ function StadiumRig:pose(anim, frame, wrap)
     local m31, m32, m33 = -sy, sx * cy, cx * cy
 
     local o = (b - 1) * 12
-    if p > 0 then
+    if inheritRotation then
       local q = (p - 1) * 12
       local a1, a2, a3, a4 = pivot[q + 1], pivot[q + 2], pivot[q + 3], pivot[q + 4]
       local b1, b2, b3, b4 = pivot[q + 5], pivot[q + 6], pivot[q + 7], pivot[q + 8]
@@ -379,16 +396,26 @@ function StadiumRig:pose(anim, frame, wrap)
       pivot[o + 1] = a1 * m11 + a2 * m21 + a3 * m31
       pivot[o + 2] = a1 * m12 + a2 * m22 + a3 * m32
       pivot[o + 3] = a1 * m13 + a2 * m23 + a3 * m33
-      pivot[o + 4] = a1 * tx + a2 * ty + a3 * tz + a4
+      if hierarchyMode == "absolute_translation" then
+        -- Preserve parent orientation but do not add/rotate the parent offset.
+        -- This is the Stadium-2 repair candidate that assembles deep skeletons
+        -- whose bind translations are already model-space positions.
+        pivot[o + 4], pivot[o + 8], pivot[o + 12] = tx, ty, tz
+      else
+        pivot[o + 4] = a1 * tx + a2 * ty + a3 * tz + a4
+        pivot[o + 8] = b1 * tx + b2 * ty + b3 * tz + b4
+        pivot[o + 12] = c1 * tx + c2 * ty + c3 * tz + c4
+      end
       pivot[o + 5] = b1 * m11 + b2 * m21 + b3 * m31
       pivot[o + 6] = b1 * m12 + b2 * m22 + b3 * m32
       pivot[o + 7] = b1 * m13 + b2 * m23 + b3 * m33
-      pivot[o + 8] = b1 * tx + b2 * ty + b3 * tz + b4
       pivot[o + 9] = c1 * m11 + c2 * m21 + c3 * m31
       pivot[o + 10] = c1 * m12 + c2 * m22 + c3 * m32
       pivot[o + 11] = c1 * m13 + c2 * m23 + c3 * m33
-      pivot[o + 12] = c1 * tx + c2 * ty + c3 * tz + c4
     else
+      -- Flat candidate: each bone's authored transform is treated as a direct
+      -- model-space transform.  Only Dex 249's automatic repair probe can
+      -- select this mode; the verified Stadium-1/normal path is untouched.
       pivot[o + 1], pivot[o + 2], pivot[o + 3], pivot[o + 4] = m11, m12, m13, tx
       pivot[o + 5], pivot[o + 6], pivot[o + 7], pivot[o + 8] = m21, m22, m23, ty
       pivot[o + 9], pivot[o + 10], pivot[o + 11], pivot[o + 12] = m31, m32, m33, tz
@@ -513,6 +540,173 @@ local function centre(self, n)
   return x / total, y / total, z / total
 end
 
+-- Bounds of the POSED mesh in raw model units, without touching GPU meshes.
+-- Used only when a model is first constructed to reject an obviously exploded
+-- standby animation.  Measuring the actual vertices matters: a bad wing chain
+-- can move several body lengths while the weighted body centre barely moves.
+local function poseBounds(self)
+  local model, d = self.model, self.drawM
+  local lo1, lo2, lo3 = math.huge, math.huge, math.huge
+  local hi1, hi2, hi3 = -math.huge, -math.huge, -math.huge
+  for _, prim in ipairs(model.prims or {}) do
+    local px, py, pz, bone = prim.px, prim.py, prim.pz, prim.bone
+    for k = 1, prim.vertCount do
+      local b = bone[k]
+      local o = b and (b - 1) * 12 or -12
+      if b and b >= 1 and b <= model.boneCount and d[o + 12] ~= nil then
+        local x, y, z = px[k], py[k], pz[k]
+        local a = d[o + 1] * x + d[o + 2] * y + d[o + 3] * z + d[o + 4]
+        local c = d[o + 5] * x + d[o + 6] * y + d[o + 7] * z + d[o + 8]
+        local e = d[o + 9] * x + d[o + 10] * y + d[o + 11] * z + d[o + 12]
+        if a < lo1 then lo1 = a end; if a > hi1 then hi1 = a end
+        if c < lo2 then lo2 = c end; if c > hi2 then hi2 = c end
+        if e < lo3 then lo3 = e end; if e > hi3 then hi3 = e end
+      end
+    end
+  end
+  if lo1 == math.huge then return nil end
+  return lo1, lo2, lo3, hi1, hi2, hi3
+end
+
+local function finite(v)
+  return type(v) == "number" and v == v and v > -1e12 and v < 1e12
+end
+
+-- Conservative full-3D version of StadiumBuild.idleIsBroken.  This one runs
+-- from the already-packed DSM data, so users keep protection even when their
+-- cache predates the extractor fix and no Stadium 2 ROM is currently mounted.
+local function explodedBounds(bind, posed)
+  if not (bind and posed) then return true, math.huge, math.huge end
+  for i = 1, 6 do
+    if not finite(bind[i]) or not finite(posed[i]) then
+      return true, math.huge, math.huge
+    end
+  end
+  local sx, sy, sz = bind[4]-bind[1], bind[5]-bind[2], bind[6]-bind[3]
+  local base = math.max(sx, sy, sz)
+  if not (base > 1e-6) then return true, math.huge, math.huge end
+  local ps = math.max(posed[4]-posed[1], posed[5]-posed[2], posed[6]-posed[3]) / base
+  local drift = math.max(
+    math.abs(posed[1]-bind[1]), math.abs(posed[4]-bind[4]),
+    math.abs(posed[2]-bind[2]), math.abs(posed[5]-bind[5]),
+    math.abs(posed[3]-bind[3]), math.abs(posed[6]-bind[6])) / base
+  local bad = (ps > 2.6 and drift > 0.8) or drift > 1.6 or ps > 3.2
+  return bad, ps, drift
+end
+
+-- A substantial mesh-bearing bone should not teleport multiple body lengths
+-- during a standby loop.  This catches detached pieces even when the overall
+-- AABB stays deceptively close to the bind size because another part moved the
+-- opposite way.  Tiny effect/eye bones are excluded by vertex weight.
+local function worstMajorBoneTravel(self, bindT, base)
+  if not (bindT and base and base > 0) then return 0 end
+  local model, d = self.model, self.drawM
+  local w, total = boneWeights(model)
+  if not (total and total > 0) then return 0 end
+  local worst = 0
+  for b = 1, model.boneCount do
+    local q = w[b] or 0
+    if q / total >= 0.02 then
+      local o, t = (b-1)*12, (b-1)*3
+      local dx = (d[o+4] or 0) - (bindT[t+1] or 0)
+      local dy = (d[o+8] or 0) - (bindT[t+2] or 0)
+      local dz = (d[o+12] or 0) - (bindT[t+3] or 0)
+      local dist = math.sqrt(dx*dx + dy*dy + dz*dz) / base
+      if dist > worst then worst = dist end
+    end
+  end
+  return worst
+end
+
+-- Stadium 2 Lugia hierarchy recovery.
+--
+-- The same FRAGMENT parser is correct for the normal Stadium model set, but
+-- Lugia's GS resource is a useful edge case: under the ordinary parent-local
+-- interpretation its rigidly skinned wings/neck can land multiple body lengths
+-- apart even in the bind pose.  Instead of banning Dex 249 outright, test the
+-- three transform interpretations that the raw node data can plausibly mean
+-- and keep the most compact finite assembly.  This operates on an already
+-- cached DSM4 model, so users do not need to delete/reimport their ROM cache.
+--
+-- normal               = verified Stadium hierarchy
+-- absolute_translation = inherit parent rotation, translations are model-space
+-- flat                  = each bone transform is model-space
+--
+-- The probe is deliberately species-specific until Stadium 2's node semantics
+-- are fully mapped. No other Pokemon changes behavior.
+function StadiumRig:selectLugiaHierarchy()
+  local model = self.model
+  if tonumber(model and model.species) ~= 249 then return false end
+  if model.lugiaHierarchyProbed then return model.lugiaHierarchyRepaired == true end
+  model.lugiaHierarchyProbed = true
+
+  local modes = { "normal", "absolute_translation", "flat" }
+  local scores = {}
+  for _, mode in ipairs(modes) do
+    model.hierarchyMode = mode
+    local ok = pcall(self.pose, self, nil, 0, false)
+    local a,b,c,d,e,f
+    if ok then a,b,c,d,e,f = poseBounds(self) end
+    local finiteBounds = a and finite(a) and finite(b) and finite(c)
+      and finite(d) and finite(e) and finite(f)
+    if finiteBounds then
+      local sx, sy, sz = math.max(0, d-a), math.max(0, e-b), math.max(0, f-c)
+      local span = math.max(sx, sy, sz)
+      local minSpan = math.min(sx, sy, sz)
+      -- Reject a totally collapsed candidate. The epsilon is relative to the
+      -- candidate itself, so a naturally thin wing can still pass.
+      if span > 1e-4 and minSpan > span * 0.003 then scores[mode] = span end
+    end
+  end
+
+  -- Prefer the least invasive repair.  Absolute translations retain the full
+  -- authored parent rotation chain and are selected as soon as they remove a
+  -- clear (>18%) hierarchy blow-up.  Flat transforms are a deeper recovery
+  -- mode and only win when they are dramatically better than BOTH normal and
+  -- abs-translation.  This prevents a merely compact-but-collapsed skeleton
+  -- from beating an already plausible assembled Lugia.
+  local normal, absT, flat = scores.normal, scores.absolute_translation, scores.flat
+  local bestMode = normal and "normal" or (absT and "absolute_translation") or (flat and "flat")
+  if normal and absT and absT < normal * 0.82 then bestMode = "absolute_translation" end
+  local baseline = (bestMode == "absolute_translation") and absT or normal
+  if flat and baseline and flat < baseline * 0.72 and (not normal or flat < normal * 0.58) then
+    bestMode = "flat"
+  end
+
+  if not bestMode then
+    model.hierarchyMode = "normal"
+    model.lugiaHierarchyRepaired = false
+    return false
+  end
+
+  model.hierarchyMode = bestMode
+  self:pose(nil, 0, false)
+  local a,b,c,d,e,f = poseBounds(self)
+  if a and finite(a) and finite(b) and finite(c) and finite(d) and finite(e) and finite(f) then
+    -- The DSM4 stance values were measured with the old hierarchy. Recompute
+    -- them from the repaired bind so OverworldStadium does not scale the fixed
+    -- Lugia as though it were still a map-wide exploded model.
+    model.height = math.max(1e-4, e - b)
+    model.floor = b
+    model.radius = math.max(d - a, f - c) * 0.5
+  end
+  model.bindCX, model.bindCY, model.bindCZ = nil, nil, nil
+  model.lugiaHierarchyRepaired = true
+  -- Animation slot 0 is still only a provisional Stadium-2 routing fallback.
+  -- Keep the repaired REAL 3D model in its bind pose rather than letting an
+  -- unrelated clip tear the newly assembled hierarchy apart.
+  model.staticPose = true
+  model.bindBroken = false
+  model.anchorOk = false
+  if V.mod and V.mod.log and V.mod.log.info then
+    pcall(V.mod.log.info, V.mod.log,
+      "stadium2: Lugia 3D hierarchy repair selected %s (normal %.1f, absT %.1f, flat %.1f)",
+      tostring(bestMode), tonumber(scores.normal) or -1,
+      tonumber(scores.absolute_translation) or -1, tonumber(scores.flat) or -1)
+  end
+  return true
+end
+
 -- Where the BIND pose puts it -- the spot every animation is measured
 -- against. Cached on the shared MODEL, because it is a fact about the model
 -- and not about this instance of it.
@@ -526,6 +720,31 @@ function StadiumRig:measureBind()
   if model.bindCX then return end
   self:pose(nil, 0, false)
   model.bindCX, model.bindCY, model.bindCZ = centre(self, model.boneCount)
+  local b1,b2,b3,b4,b5,b6 = poseBounds(self)
+  local bindBounds = b1 and {b1,b2,b3,b4,b5,b6} or nil
+  if not bindBounds then
+    model.bindBroken = true
+    model.staticPose = true
+  end
+  local baseSpan = bindBounds and math.max(b4-b1, b5-b2, b6-b3) or 0
+  local bindT = {}
+  if bindBounds then
+    for b = 1, model.boneCount do
+      local o, t = (b-1)*12, (b-1)*3
+      bindT[t+1], bindT[t+2], bindT[t+3] =
+        self.drawM[o+4], self.drawM[o+8], self.drawM[o+12]
+    end
+  end
+
+  -- A pack already marked static (or a species-specific safety override)
+  -- has explicitly rejected its standby animation.  The bind pose has just
+  -- been measured successfully, so do not sample the very clip we promised
+  -- not to trust merely to diagnose it a second time.
+  if model.staticPose then
+    model.anchorOk = false
+    self:pose(nil, 0, false)
+    return
+  end
 
   -- ------- and whether this species can be anchored at all
   --
@@ -560,6 +779,7 @@ function StadiumRig:measureBind()
     local h = (model.height or 0) / root
     if h > 0 then
       local px, py, pz, worst = nil, nil, nil, 0
+      local worstSpan, worstDrift, worstBone = 1, 0, 0
       for f = 0, rec.frames - 1 do
         self:pose(anim, f, true)
         local x, y, z = centre(self, model.boneCount)
@@ -568,8 +788,31 @@ function StadiumRig:measureBind()
           if d > worst then worst = d end
         end
         px, py, pz = x, y, z
+
+        -- Full-mesh validation every third authored frame, matching the pack
+        -- builder's sampling cadence.  This is what catches Lugia's sideways
+        -- shard explosion that the old Y-only detector could not see.
+        if bindBounds and f % 3 == 0 then
+          local p1,p2,p3,p4,p5,p6 = poseBounds(self)
+          local posed = p1 and {p1,p2,p3,p4,p5,p6} or nil
+          local bad, spanRatio, drift = explodedBounds(bindBounds, posed)
+          if spanRatio > worstSpan then worstSpan = spanRatio end
+          if drift > worstDrift then worstDrift = drift end
+          local boneTravel = worstMajorBoneTravel(self, bindT, baseSpan)
+          if boneTravel > worstBone then worstBone = boneTravel end
+          if bad or boneTravel > 1.5 then
+            model.staticPose = true
+          end
+        end
       end
-      if worst > StadiumRig.ANCHOR_STEADY then
+      if model.staticPose then
+        model.anchorOk = false
+        V.mod.log:warn("stadium: species %s has an unstable 3D standby "
+                       .. "(span %.2fx, edge drift %.2fx, major-bone travel %.2fx) "
+                       .. "-- holding the intact bind pose instead of drawing "
+                       .. "detached model pieces", tostring(model.species),
+                       worstSpan, worstDrift, worstBone)
+      elseif worst > StadiumRig.ANCHOR_STEADY then
         model.anchorOk = false
         V.mod.log:info("stadium: species %s moves its own body %.1f "
                        .. "body-heights in one frame of its standby loop -- "
@@ -809,6 +1052,11 @@ end
 function StadiumRig:draw(matrix, pull)
   Voxel3D.seams(false)
   Voxel3D.glass(false)
+  -- Start every Pokemon body from ordinary opaque/alpha state. Attack FX and
+  -- additive material parts use the same shared voxel renderer; explicitly
+  -- clearing their blend state here prevents a later body (notably Lugia)
+  -- from inheriting a ghost/additive draw mode.
+  Voxel3D.blend(nil)
   local additive = nil
   for _, part in ipairs(self.parts) do
     if part.prim.additive then

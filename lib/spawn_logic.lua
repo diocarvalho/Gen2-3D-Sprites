@@ -2789,6 +2789,23 @@ function SpawnLogic:_spawnAt(x, y)
 end
 
 function SpawnLogic:_startBattle(record)
+  -- STADIUM2 v0.2.12 compatibility seam: the battle-start hook remains available for older capture
+  -- callers, but v0.2.12's default capture interaction does not install it.
+  -- Normal contact therefore reaches _startBattleNative unchanged; manual
+  -- L2/right-click hold-to-aim capture starts before contact from input.step; R2/left-click throws.
+  local capture = rawget(self, "_stadiumCaptureHandler")
+  if type(capture) == "function" then
+    local ok, handled = pcall(capture, self, record, SpawnLogic._startBattleNative)
+    if ok and handled then return true end
+    if not ok then
+      self:_warn("overworld capture hook failed; using normal battle: %s",
+                 tostring(handled))
+    end
+  end
+  return self:_startBattleNative(record)
+end
+
+function SpawnLogic:_startBattleNative(record)
   if not record or record.state ~= Config.STATE.AVAILABLE then
     return false
   end

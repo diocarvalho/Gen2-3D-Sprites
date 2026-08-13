@@ -422,6 +422,18 @@ function Stadium.visible(side)
   return (mon and mon.rig and mon.visible and mon.model_matrix) and true or false
 end
 
+-- Whether this side already has a usable Stadium model loaded for the current
+-- battle, even if the model is between visibility states this exact frame.
+-- Gold's SendOutPlayerMon can draw its native back-pic one render tick before
+-- updateGen2 marks the just-summoned 3D model visible; callers use this narrower
+-- query to suppress that one-frame duplicate without hiding the fallback sprite
+-- for species whose Stadium pack genuinely failed to load.
+function Stadium.hasModel(side)
+  if side ~= "player" and side ~= "enemy" then return false end
+  local mon = session and session[side]
+  return (mon and mon.rig) and true or false
+end
+
 function Stadium.update(dt, battle, groundY)
   if not session then return end
   session.groundY = groundY or session.groundY or 0

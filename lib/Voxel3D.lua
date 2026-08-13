@@ -34,6 +34,7 @@ local Sky = V.require("Sky")
 local DayNight = V.require("DayNight")
 local GlassMask = V.require("GlassMask")
 local PixelCanvas = V.require("PixelCanvas")
+local DioramaZoom = V.require("DioramaZoom")
 
 local Voxel3D = {}
 
@@ -563,7 +564,7 @@ function Voxel3D.viewProjection(cx, cy, vw, vh)
 
   local a = Voxel.angle
   local focal = Voxel.FOCAL
-  local dist = focal * vh
+  local dist = focal * vh * DioramaZoom.get()
   -- the FOV that makes a straight-down camera at `dist` frame exactly `vh`
   -- world pixels, which is the framing the flat view already has
   local fov = 2 * math.atan(1 / (2 * focal))

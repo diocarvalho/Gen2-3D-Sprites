@@ -16,16 +16,16 @@
     "swimming": {
       "source": "assets/generated/water_runtime/swimming",
       "output": "assets/generated/swimming_silhouette_runtime",
-      "written": 2093,
+      "written": 541,
       "skippedExisting": 0,
-      "totalSource": 2093
+      "totalSource": 541
     },
     "levitates": {
       "source": "assets/generated/water_runtime/levitates",
       "output": "assets/generated/levitates_silhouette_runtime",
-      "written": 523,
+      "written": 137,
       "skippedExisting": 0,
-      "totalSource": 523
+      "totalSource": 137
     }
   }
 }

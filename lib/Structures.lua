@@ -52,16 +52,13 @@ local Budget = V.require("BuildBudget")
 
 local Structures = {}
 
--- must match ChunkMesher's ring (3 border blocks, in tiles)
-local RING = 12
+-- must match ChunkMesher's ring (8 border blocks x 4 tiles)
+local RING = 32
 
--- how far past the map body cells still get the hull. A route's ring is
--- nearly as big as its body; modelling all of it costs hundreds of
--- thousands of quads of border trees nobody walks near. Beyond this,
--- pinned cells simply are not claimed and fall through to the mesher's
--- plain box -- cheap distant scenery. (Declared up here rather than
--- beside buildCylinders because forMap's grid resolve reads it too.)
-local ROUND_RING = 4
+-- v0.2.03 keeps the ENTIRE expanded outdoor apron on the round-tree path.
+-- There is no inner carve cutoff followed by bare/void scenery: all 32 tiles
+-- on every side are eligible for the same Johto cylinder/canopy hulls.
+local ROUND_RING = 32
 
 -- object-mode gates
 local OBJECT_MAX_ROWS = 6          -- a prop is at most 48px of drawing

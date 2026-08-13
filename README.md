@@ -1,3 +1,139 @@
+## v0.2.15 — Lugia 3D recovery + harder Poké Ball throws
+
+- Lugia (Dex 249) is no longer hard-forced to the 2D safety card.
+- StadiumRig now probes three bind-hierarchy interpretations for Lugia: the normal Stadium chain, parent-rotation with absolute translations, and a flat model-space recovery mode. It chooses the least-invasive valid repair that removes the exploded-body span.
+- Repaired Lugia stance height/floor/radius are recomputed from the selected 3D bind so the old exploded bounds cannot make the fixed model tiny or enormous.
+- Lugia texture uploads force solid alpha to avoid the ghost/translucent body caused by the Stadium-2 material-alpha mismatch. The existing 2D Lugia card remains only if every 3D repair path fails.
+- Poké Ball aiming is more demanding: the base hit radius is reduced, strong/high-level Pokémon shrink it further, and strong targets cycle the precision ring faster.
+- NICE/GREAT/EXCELLENT thresholds are stricter. A missed throw now actually flies to the off-target world-space point instead of visually homing into the Pokémon before reporting MISS.
+- L2/right-click still only aims; R2/left-click still performs the throw. Aiming alone never spends a Ball.
+
+## v0.2.14 — 3RD/1ST trainer animation no longer needs a map transition
+
+The 3D Character Selector trainer now starts/stops its walking animation from the exact live voxel render state on the very first map. You no longer need to cross into another map section before third-person/first-person movement animates the trainer. The movement signal remains render-only and does not alter Gold collision, scripts, warps, or native step state.
+
+## v0.2.13 — Lugia visibility + animated 3RD/1ST trainer
+
+Lugia/Dex 249 still refuses the corrupt ROM-derived Stadium 2 hierarchy that produced detached body pieces. The safety path is now species-specific: the voxel world draws the packaged Lugia follower art as a correctly sized, **opaque alpha-cutout world card** instead of reusing a generic roaming-NPC sprite or model scale. The renderer also resets normal blend/depth state before that card, so Lugia cannot inherit translucent attack-effect state.
+
+The 3D Character Selector trainer now receives a render-only walking signal during true camera-relative 3RD/1ST movement. Gold's gameplay `Player.moving` state remains untouched outside the actual skin draw/shadow call, but the external character renderer sees the same walking cadence it already receives in Diorama.
+
+## v0.2.11 — pre-contact R3/right-click Poké Ball throw + safe Lugia fallback
+
+Overworld capture no longer waits for you to touch the roaming Pokémon. While free-roaming, **aim the camera at a visible wild Pokémon and press R3 (right-stick click) on controller or right-click on PC**. The target is chosen from the camera-facing cone and the same press starts the throw, so you can stand back and throw before contact. Normal physical contact now goes straight to Gold's ordinary wild battle. After a miss/breakout, press R3/right-click again to retry; **B** abandons capture and starts the normal battle.
+
+The trigger is polled on Gold's fixed-step `input.step` seam rather than `world.stepped`, so it works while the player is standing still. Right-click is no longer translated to Game Boy B by the 1ST/3RD-person mouse adapter.
+
+The Poké Ball runtime prop now uses a deterministic UV sphere with a dedicated red/white/black/button texture and corrected vertical UV orientation. This avoids the scrambled atlas/material result from feeding the supplied COLLADA UV layout through the voxel renderer's single-texture path. The supplied model files remain bundled as reference/source assets.
+
+**Lugia (Dex 249) now fails closed to Gold's normal texture-correct sprite billboard.** The Stadium 2 import shown in the broken screenshots has displaced wing/body parts even in the decoded bind data, so merely freezing the animation preserved corrupted geometry. Until that Stadium 2 hierarchy/material decode is verified against the user's local ROM, the mod will not show the exploded blue 3D Lugia. Other species keep the normal 3D model path and runtime corruption checks.
+
+## v0.2.08 — clean 3D send-out + Gold-powered Stadium-style attack FX
+
+Live voxel battles no longer flash Gold's native **2D player-Pokémon battle sprite** during the first send-out when that species already has a loaded Stadium 3D model. The existing fallback remains intact: if a species has no usable 3D model, Gold's normal battle pic is still allowed to render.
+
+The existing world-space Stadium-style attack-effects renderer is now connected to **Gold's real Gen-2 `BattleState` / `AnimRunner`**. The renderer receives the live move ID, attacker side, and animation frame, so elemental/projectile/impact effects are drawn between the two actual 3D battlers in world space and follow the battle camera. This includes beams, fire, water, electric bolts, ice, psychic/shadow energy, wind, grass, poison, rock/ground impacts and dedicated treatments for many signature moves, with extra Gen-2 aliases such as Icy Wind, Flame Wheel, Whirlpool, Mud-Slap, Rollout, Bone Rush, Fury Cutter and Cotton Spore. Zero-power moves only use a generic attack effect when they have an explicit status-specific treatment.
+
+No proprietary Stadium effect textures are bundled; these are procedural world-space effects designed to reproduce the Stadium-style presentation while using the live Gold move data.
+
+## v0.2.07 — no duplicate trainer sprite before live battles
+
+When a live overworld Stadium battle begins, the **3D trainer already present in the voxel world is now the only trainer shown**. Gold's original 2D battle back-sprite is suppressed for the live voxel battle compositor, eliminating the oversized duplicate trainer artwork during the opening/send-out sequence.
+
+This does not remove or alter the player's 3D model, battle state, send-out timing, normal Gold fallback battles, or the v0.2.06 overworld Poké Ball capture minigame.
+
+## v0.2.06 — overworld Poké Ball capture
+
+Visible roaming wild Pokémon can now be caught directly in the 3D overworld. Touch a battleable wild while carrying a regular **POKé BALL** to enter the capture minigame. Aim with the **mouse or controller right stick**, then throw with **A / left click / controller A / right trigger**. Press **B / right click** to skip the minigame and start the normal Gold wild battle.
+
+The supplied `RegularPokeBall.dae` and `pokeball_DIF.png` are used for the actual world-space throw. The target ring shrinks while you aim: more accurate, better-timed throws receive NICE/GREAT/EXCELLENT quality, while a miss spends the ball without deleting the wild Pokémon. Hits use Gold's species catch-rate logic, play a 3D ball shake sequence, and successful captures go into the normal Gold party/current-box save structures.
+
+If the selected camera is DIORAMA, capture temporarily uses the 3RD-person aiming rig and returns to DIORAMA afterward without changing your saved camera setting. 1ST/3RD capture keeps the existing selected mode.
+
+## v0.2.05 — F6 camera switching + controller right-stick look
+
+Desktop **F6** now reliably cycles **DIORAMA -> THIRD PERSON -> FIRST PERSON -> DIORAMA**. The mod keeps its normal Game2 key hook but also checks the physical F6 key state once per rendered voxel frame, so the camera switch still works if another wrapper consumes the key event. The two paths share one press latch and cannot double-advance.
+
+In **THIRD PERSON** and **FIRST PERSON**, a mapped controller's **right stick** now rotates the same camera yaw/pitch used by mouse-look. The stick is sampled every frame through LÖVE's mapped `rightx/righty` axes with the existing deadzone/response curve. **Mouse-look remains enabled at the same time**; whichever device you move simply adds camera input to the same rig.
+
+## v0.2.04 — connected maps / open-world-style route streaming
+
+This build changes the Gold voxel renderer from **current-map-only** to a connected-world presentation. Every directly connected north/south/east/west destination is adapted into a real Gen-2 `Map` and streamed as 3D terrain while you are still standing in the current area. Walking down a route connection should therefore show the actual next route/town ahead instead of forest/void followed by a map replacement.
+
+Neighbour maps preload in the background and are prioritized when you approach their edge. When you cross, the already-built neighbour mesh becomes the current terrain immediately and the map behind you remains visible as the new neighbour. The expanded round-tree apron is still used on genuinely unconnected edges, but is masked away underneath real connected map bodies. Adjacent Gold NPC ghosts and third-person camera collision also use the same map offsets for a more continuous handoff.
+
+## v0.2.03 — fuller forest edge + battle camera crash fix
+
+Outdoor maps now build **eight full border blocks / 32 tiles of round Johto trees on every side**, double the previous physical forest apron. This is real voxel geometry and keeps the free cameras from reaching the old black/empty edge nearly as soon.
+
+The **STADIUM BATTLE CAMERA** is now guarded as an optional presentation layer. Its active-turn queue observer works on LuaJIT/LÖVE builds that only provide global `unpack`, and unexpected battle-state/animation data now falls back to the normal live-world camera instead of crashing the game.
+
+## v0.2.02 — closer Diorama and turn-focused battle shots
+
+**DIORAMA** can now zoom much closer. Its nearest camera-distance limit is reduced from 0.55× to **0.24×**, so Android pinch and desktop wheel/trackpad can push into a much tighter view.
+
+The **STADIUM BATTLE CAMERA** now follows the Pokemon whose turn is actually being presented. During a move it favors the attacker heavily while keeping the opponent as the secondary subject; through the rest of that resolving turn it stays biased toward the acting side, then widens toward both Pokemon when menu control returns. Manual right-thumb/mouse camera control still temporarily overrides the automatic shot.
+
+During live-overworld battles the player trainer is now rendered **beside and slightly behind their Pokemon**, instead of remaining on the original encounter tile where they could stand between the camera and the fight. This is visual-only and does not move Gold's real player position.
+
+## v0.2.01 — smooth Diorama zoom + Pokemon Stadium battle camera
+
+**DIORAMA** now has a real continuous camera-distance zoom. On Android, pinch two free fingers to move the camera smoothly in/out. On desktop, the mouse wheel or trackpad changes the same distance instead of stepping Gold's coarse survey ladder.
+
+**STADIUM BATTLE CAMERA** defaults ON for LIVE OVERWORLD BATTLES. The camera circles the two battling Stadium models in the actual encounter world, gently moves closer during attack animations, and keeps both Pokemon framed. Drag with the Android right thumb or move the mouse during battle to take over manually; after about 2.5 seconds without camera input, the automatic orbit eases back in. The setting can be turned OFF if a fully manual/static live-world battle view is preferred.
+
+## v0.2.00 — Android right-thumb camera and denser forest edge
+
+Android 1ST/3RD camera look now reads the physical LOVE touch table directly instead of depending only on wrapped Game2 callbacks. Keep your left thumb on the movement pad and drag one free right-side finger to turn the camera. The same control remains active in LIVE OVERWORLD BATTLES.
+
+The outdoor perimeter now contains an actual additional meshed border block of trees: four blocks / 16 tiles around the map instead of three blocks / 12 tiles, all using the working round Johto tree geometry.
+
+## v0.1.99 — Android two-thumb free camera + denser perimeter trees
+
+On Android, use the **left touch D-pad** to move and drag the **right side of the screen** with your right thumb to look around in 3RD or 1ST person. The same right-thumb camera control remains active during **LIVE OVERWORLD BATTLES**, so the encounter camera can be rotated without leaving the overworld battle presentation.
+
+The outdoor synthetic border also now carries a deeper belt of the existing round Johto tree geometry. This fills more of the outer perimeter in wide/tall mobile views without bringing back the old rectangular tree-wall bug.
+
+## v0.1.98 — free camera + true directional movement
+
+In **3RD** and **1ST** camera modes, movement is now fully camera-relative and continuous: move at any angle, use diagonals, preserve analog stick/touch-dpad strength, and slide naturally along walls. **DIORAMA** keeps Gold's original four-direction grid movement.
+
+The mod still hands special movement back to Gold: bike/surf, ice and currents, doors, ledges, boulders, map connections, scripts, warps, encounters and trainer checks stay on the native Gen-2 gameplay path. This implementation does not fake `Player.moving` or take ownership of Character Selector animation state; external character models can animate from the player's actual world displacement.
+
+## v0.1.98 — camera slider return + correct 1ST/3RD walking
+
+The Android camera slider can now move freely in both directions: **DIORAMA <-> 3RD <-> 1ST**. In AUTO camera control, a mode selected directly with the slider (or F6 on desktop) stays selected instead of being immediately replaced by the Character Selector's previous camera rung. Set **CAMERA CONTROL = CHARACTER SELECTOR** if you intentionally want that mod to own camera mode again.
+
+Walking in **1ST** and **3RD** is camera-relative again even when the Character Selector model is active: forward follows the camera, back reverses, and left/right strafe. Gold still receives only its normal four grid directions, so collision, doors, ledges, warps, encounters, and scripts remain native. No continuous 360 movement or fake animation state was reintroduced.
+
+## v0.1.96 — Android slider touch fix
+
+The on-screen **DIORAMA / 3RD / 1ST** camera slider now reads the live Android touch contacts directly every voxel frame. This fixes the v0.1.95 case where the slider drew correctly but the Android callback chain did not deliver the drag/tap to the mod. Touches outside the slider still belong to the normal game controls, camera look, and pinch zoom.
+
+## v0.1.94 — pinch zoom actually works on Gold
+
+v0.1.93 had the pinch recognizer but attached it to the wrong game object. Gold/Silver uses `Game2`, not the Gen-1 `Game` singleton, so two-finger events never reached it. v0.1.94 installs the controller on the live Gold host.
+
+**Third Person:** pinch in/out changes camera boom distance smoothly. **Diorama:** pinch changes Gold's survey zoom. **First Person:** pinch remains disabled because the camera is fixed at eye position.
+
+## v0.1.93 — pinch-to-zoom
+
+On phones/tablets, use **two fingers on open world space** to zoom the voxel camera. In **THIRD PERSON**, spreading the fingers pulls the camera closer and pinching pulls it farther away. In **DIORAMA / orbit** mode, the same gesture changes the voxel/survey zoom level.
+
+The gesture does not steal touches that begin on the on-screen D-pad or buttons, and while a pinch is active it suppresses look-drag rotation so the camera does not spin while you zoom. **FIRST PERSON** keeps its fixed eye-position camera rather than applying a distance zoom. Character Selector camera ownership remains supported.
+
+## v0.1.92 — seamless battle entry
+
+When **LIVE OVERWORLD BATTLES** is **ON**, ordinary wild encounters no longer play Gold's black-circle battle transition. The encounter now stays in the same live voxel overworld view and pushes straight into the native Gold battle UI, so the start of battle is fully seamless instead of pretending it is changing to a separate battle scene.
+
+If you turn **LIVE OVERWORLD BATTLES** **OFF**, Gold's classic battle transition and normal battle scene still return exactly as before.
+
+## v0.1.91 — Character Selector camera compatibility
+
+**CAMERA CONTROL** now defaults to **AUTO**. When `red_3d_player` / 3D Character Selector is installed, this mod follows the engine's public voxel camera state instead of forcing its own camera selection every frame. Character Selector ZOOM/orbit maps to DIORAMA, its 1ST mode maps to FIRST PERSON, and its 3RD mode maps to THIRD PERSON.
+
+While Character Selector owns the camera, this mod also passes look input through instead of swallowing it and disables its own Gold camera-relative cardinal remapper, leaving the selector's Gen-2 movement/animation logic authoritative. Choose **THIS MOD** under CAMERA CONTROL if you want the Stadium mod's own camera option/F6 behavior instead.
+
 ## v0.1.90 — optional live overworld battle mode
 
 The live in-world battle presentation is now a normal user-facing setting: **LIVE OVERWORLD BATTLES** defaults **ON**. Turn it **OFF** to use Gold's classic battle scene while keeping the voxel overworld, followers, weather, cameras, Stadium models, and the rest of the mod enabled.

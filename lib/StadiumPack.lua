@@ -471,12 +471,32 @@ function StadiumPack.tracks(model, index)
 end
 
 -- One texture as a LOVE image, decoded on first ask.
+local function opaqueRgba(bytes)
+  if type(bytes) ~= "string" then return bytes end
+  local out = {}
+  local n = 0
+  for i = 1, #bytes, 4 do
+    local r, g, b = bytes:byte(i, i + 2)
+    if not b then break end
+    n = n + 1
+    out[n] = string.char(r, g, b, 255)
+  end
+  return table.concat(out)
+end
+
 function StadiumPack.image(model, index)
   local slot = model.textures and model.textures[index]
   if not slot then return nil end
   if slot.image ~= nil then return slot.image or nil end
   local ok, img = pcall(function()
-    local data = love.image.newImageData(slot.w, slot.h, "rgba8", slot.rgba)
+    -- Lugia exposed a Stadium-2 material-alpha mismatch: otherwise-correct
+    -- body texels could arrive with N64 1-bit alpha cleared and then become
+    -- ghostlike in LOVE's ordinary alpha path.  The model is closed geometry,
+    -- so Dex 249's body textures are made fully opaque at upload time.  This
+    -- changes no ROM/cache bytes and leaves every other species untouched.
+    local rgba = slot.rgba
+    if tonumber(model.species) == 249 then rgba = opaqueRgba(rgba) end
+    local data = love.image.newImageData(slot.w, slot.h, "rgba8", rgba)
     local image = love.graphics.newImage(data)
     -- N64 art at N64 resolution: nearest keeps the texels the size the
     -- artist drew them, exactly as every other texture in this mode

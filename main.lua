@@ -32,7 +32,7 @@ if detectedGeneration == 2 then
   mod.log:info("Gold/Silver standalone build: Pokemon Generation 2 detected; Stadium 2 importer targets National Dex 1-251")
 else
   mod.log:warn("STADIUM2_OVERWORLD_MODELS requires Pokemon Gold or Silver. Active game reports Pokemon Generation %s; this Gen 2 port will stay inactive.", tostring(detectedGeneration))
-  mod.exports.version = "0.1.90"
+  mod.exports.version = "0.2.15"
   mod.exports.targetGeneration = 2
   mod.exports.generation = detectedGeneration
   mod.exports.gen2Compatible = true
@@ -89,7 +89,7 @@ local function bootEmbeddedWilds()
   return wilds
 end
 
--- Gold/Silver renderer bootstrap (v0.1.90)
+-- Gold/Silver renderer bootstrap (v0.2.15: Lugia 3D hierarchy repair + harder aimed capture; prior battle/camera fixes retained)
 --
 -- Current Gold exposes a supported whole-window `render.compose` hook.  The
 -- embedded voxel bridge is now a renderer PROVIDER only; it does not patch any
@@ -123,7 +123,7 @@ if GoldVoxelBridge and BaseV then
   mod.log:info("Gold/Silver voxel renderer provider loaded; official render.compose hook will own Gold world frames and redraw overlay UI above voxels")
 else
   mod.log:error("Gold/Silver voxel renderer provider failed: %s", tostring(bridgeErr))
-  mod.exports.version = "0.1.90"
+  mod.exports.version = "0.2.15"
   mod.exports.rendererInstalled = false
   mod.exports.rendererError = "Gold/Silver voxel renderer provider failed: " .. tostring(bridgeErr)
   mod.exports.hostDetected = false
@@ -283,6 +283,44 @@ else
                tostring(wildsErr))
 end
 
+-- v0.2.12: hold-to-aim overworld Poké Ball throw. Normal roaming-Pokemon
+-- contact keeps Wilds' ordinary Gold battle path. While free-roaming the
+-- capture module polls Gold's fixed-step input seam, so L2 / right mouse can
+-- target a visible Pokemon in the camera cone and immediately throw before
+-- contact. Any supported Gold Ball can be used; if prerequisites are missing,
+-- the original Gold battle path remains unchanged.
+local OverworldCapture, overworldCaptureInstalled, overworldCaptureErr
+do
+  local okCapture, captureOrErr = pcall(BaseV.require, "OverworldCapture")
+  if okCapture and type(captureOrErr) == "table" then
+    OverworldCapture = captureOrErr
+    if wildsExports and type(wildsExports.logic) == "table"
+       and type(OverworldCapture.install) == "function" then
+      local okInstall, installed, err = pcall(OverworldCapture.install, wildsExports.logic)
+      overworldCaptureInstalled = okInstall and installed ~= false
+      if not overworldCaptureInstalled then
+        overworldCaptureErr = tostring(okInstall and err or installed)
+      end
+    else
+      overworldCaptureInstalled = false
+      overworldCaptureErr = "visible Wilds runtime unavailable"
+    end
+  else
+    overworldCaptureInstalled = false
+    overworldCaptureErr = tostring(captureOrErr)
+  end
+end
+if overworldCaptureInstalled then
+  do
+  local st = OverworldCapture and OverworldCapture.status and OverworldCapture.status() or {}
+  mod.log:info("Overworld capture enabled (direct=%s manual=%s)",
+               tostring(st.directHookInstalled), tostring(st.manualHookInstalled))
+end
+else
+  mod.log:warn("Overworld capture minigame unavailable; normal battles preserved: %s",
+               tostring(overworldCaptureErr))
+end
+
 -- Visible roaming Pokemon provider/fallback drawer.  This no longer patches
 -- World:drawPeople; it stays independent from voxel and is consumed by the
 -- supported Gold render.compose bridge below.
@@ -423,17 +461,21 @@ if wildsExports and type(wildsExports.logic) == "table" then
 end
 
 -- Companion mods can tag a Pokemon entity explicitly through this mod.
-mod.exports.version = "0.1.90"
+mod.exports.version = "0.2.15"
 mod.exports.overworld = Stadium
 mod.exports.red3dPlayerCompat = true
 mod.exports.red3dPlayerCompatStatus = function()
   local selector = mod.find and mod.find("red_3d_player") or nil
   local okPlayer, Player = pcall(require, "src.world.gen2.Player")
   local renderer = okPlayer and type(Player) == "table" and Player.red3dPlayerRenderer or nil
+  local camera = GoldVoxelBridge and GoldVoxelBridge.status and GoldVoxelBridge.status() or nil
   return {
     selectorDetected = selector ~= nil,
     rendererReady = type(renderer) == "table" and type(renderer.drawVoxel) == "function",
     activeId = type(renderer) == "table" and renderer.activeId or nil,
+    cameraProvider = camera and camera.cameraProvider or nil,
+    externalCameraLabel = camera and camera.externalCameraLabel or nil,
+    externalCameraLevel = camera and camera.externalCameraLevel or nil,
   }
 end
 mod.exports.romMenu = StadiumRomMenu
@@ -514,6 +556,13 @@ mod.exports.battle3DInstalled = battle3DInstalled
 mod.exports.battle3DError = battle3DErr
 mod.exports.lib = BaseV
 mod.exports.wilds = wildsExports
+mod.exports.overworldCaptureInstalled = overworldCaptureInstalled
+mod.exports.overworldCaptureError = overworldCaptureErr
+mod.exports.overworldCaptureStatus = function()
+  return OverworldCapture and OverworldCapture.status and OverworldCapture.status() or {
+    installed = false, error = overworldCaptureErr,
+  }
+end
 mod.exports.wildSpawnsInstalled = wildsExports ~= nil
 mod.exports.wildSpawnsSource = wildsSource
 mod.exports.wildSpawnsError = wildsErr

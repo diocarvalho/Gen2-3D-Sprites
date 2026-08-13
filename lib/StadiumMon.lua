@@ -106,6 +106,14 @@ StadiumMon.HOVER_CAP = 0.5
 -- same rate.
 StadiumMon.FPS = StadiumPack.FPS
 
+-- Stadium 2 Lugia used to be hard-disabled here after its hierarchy exploded
+-- into detached pieces.  v0.2.15 removes that blanket 2D fallback: StadiumRig
+-- now probes multiple bind-hierarchy interpretations for Dex 249 and keeps the
+-- most compact valid 3D assembly.  If every repair probe fails, setSpecies
+-- still returns false naturally and the existing sprite fallback remains the
+-- last-resort safety net.
+local FORCE_SPRITE_FALLBACK = {}
+
 -- ------- coming out of the ball
 --
 -- The engine grows its flat pic in the Game Boy's own three steps -- 0, then
@@ -227,6 +235,7 @@ function StadiumMon:setSpecies(dex, allowStatic)
   self.staticPose = nil
   self.grow, self.grewOwn = nil, nil
   if not dex then return false end
+  if FORCE_SPRITE_FALLBACK[dex] then return false end
   local model = StadiumPack.load(dex)
   if not model then return false end
 
@@ -240,6 +249,14 @@ function StadiumMon:setSpecies(dex, allowStatic)
 
   local rig = StadiumRig.new(model)
   if not rig then return false end
+  -- StadiumRig performs a second, cache-safe full-3D validation and may mark
+  -- an old DSM model static only after the rig exists.  Re-apply this method's
+  -- allowStatic contract here so callers that require animation still get the
+  -- normal 2D fallback instead of silently accepting a newly rejected clip.
+  if model.staticPose and not allowStatic then
+    rig:release()
+    return false
+  end
   self.model, self.rig = model, rig
   self.staticPose = model.staticPose and true or false
   -- A static-safe overworld model intentionally has no animation selected:

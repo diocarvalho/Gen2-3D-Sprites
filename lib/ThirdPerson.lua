@@ -230,8 +230,21 @@ local function cellAt(ow, wx, wz)
   local map = ow.map
   local cx, cy = math.floor(wx / 16), math.floor(wz / 16)
   if map:inBounds(cx, cy) then return map, cx, cy end
+  local seen = {}
   for _, nb in ipairs(ow.neighbors or {}) do
     if nb.map then
+      seen[nb.map] = true
+      local nx = math.floor((wx - (nb.ox or 0)) / 16)
+      local ny = math.floor((wz - (nb.oy or 0)) / 16)
+      if nb.map:inBounds(nx, ny) then return nb.map, nx, ny end
+    end
+  end
+  -- Gold's native neighbour rows historically had only {id, ox, oy, image}.
+  -- The voxel bridge now publishes the adapted Map records too; consult that
+  -- list as a fallback so the 3RD-person boom can extend naturally across a
+  -- route seam instead of colliding with an imaginary map edge.
+  for _, nb in ipairs((V and V.goldNeighbors) or {}) do
+    if nb.map and not seen[nb.map] then
       local nx = math.floor((wx - (nb.ox or 0)) / 16)
       local ny = math.floor((wz - (nb.oy or 0)) / 16)
       if nb.map:inBounds(nx, ny) then return nb.map, nx, ny end
