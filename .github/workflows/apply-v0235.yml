@@ -1,0 +1,97 @@
+name: Apply uploaded v0.2.35
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-v0235.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install uploaded v0.2.35 repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="Gen2-3D-Sprites-v0.2.35-repo.zip"
+          test -f "$ZIP"
+
+          TMP="$(mktemp -d)"
+          unzip -q "$ZIP" -d "$TMP"
+
+          SRC="$TMP/Gen2-3D-Sprites-v0.2.35"
+
+          test -f "$SRC/manifest.json"
+          test -f "$SRC/main.lua"
+          test -f "$SRC/lib/BattleControllerUI.lua"
+          test -f "$SRC/lib/BattlePokemonControl.lua"
+
+          python3 - "$SRC/manifest.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as f:
+              manifest = json.load(f)
+
+          assert manifest["version"] == "0.2.35"
+          assert manifest["github"] == "randyadr/Gen2-3D-Sprites"
+
+          print("ZIP validated as v0.2.35")
+          PY
+
+          # Preserve GitHub configuration and history.
+          # Replace everything else with the exact project from the ZIP.
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name ".git" \
+            ! -name ".github" \
+            -exec rm -rf {} +
+
+          cp -a "$SRC"/. .
+
+          test -f manifest.json
+          test -f main.lua
+          test -f lib/BattleControllerUI.lua
+          test -f lib/BattlePokemonControl.lua
+
+          python3 - <<'PY'
+          import json
+
+          with open("manifest.json", encoding="utf-8") as f:
+              manifest = json.load(f)
+
+          assert manifest["version"] == "0.2.35"
+          assert manifest["github"] == "randyadr/Gen2-3D-Sprites"
+
+          print("Installed repository validated as v0.2.35")
+          PY
+
+      - name: Commit v0.2.35
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+
+          git commit -m "Update Gen2 3D Sprites to v0.2.35"
+          git push origin HEAD:main
