@@ -20,7 +20,7 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.35 replaces the live-battle PACK and PKMN full-screen Gold menus with Stadium-style four-row glass selectors that stay on the 3D battlefield. Pokémon switching, item use, party-target healing/status items and single-move PP restoration still call current Gen1Recomp battle routines underneath. FIGHT/RUN remain native-dispatched. The full 3D battle HUD, scenery clearing, movement/camera controls and Lugia safeguards remain.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.35 replaces the live-battle PACK and PKMN full-screen Gold menus with Stadium-style four-row glass selectors that stay on the 3D battlefield. Pokémon switching, item use, party-target healing/status items and single-move PP restoration still call current Gen1Recomp battle routines underneath. FIGHT/RUN remain native-dispatched. Includes the full 3D battle HUD, scenery clearing, movement/camera controls and Lugia safeguards.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,
