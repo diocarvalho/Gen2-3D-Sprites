@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
   "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.1.90",
+  "version": "0.2.11",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -20,7 +20,7 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.1.90 keeps the lean Gen-2-only package and makes the live overworld battle presentation explicitly optional in Mod Settings: LIVE OVERWORLD BATTLES defaults ON, while OFF returns ordinary wild battles to Gold's classic battle scene. Retains the v0.1.89 live encounter-world compositor, v0.1.88 Gold GBC voxel color, lead-party follower, weather, camera modes, Johto tree geometry, Stadium 2 overworld models, Skin Selector compatibility, and visible START/pause overlays.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.11 makes overworld capture a pre-contact aim-and-throw action: press controller R3 or right mouse while aiming at a visible wild Pokemon, with Gold input.step polling so it works while standing still. It also replaces the scrambled Poké Ball atlas mapping with a corrected UV sphere/material and makes Lugia fail safely to Gold's texture-correct sprite instead of broken Stadium 2 chunks. Retains world-space Stadium-style move FX, clean 3D send-out, connected-map streaming, F6/right-stick cameras, 32-tile round-tree apron, and crash-safe live battles.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,
