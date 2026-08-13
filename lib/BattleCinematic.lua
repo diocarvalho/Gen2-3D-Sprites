@@ -122,8 +122,40 @@ local function frameImpl(dt)
   local attack = screen and screen.anim ~= nil
   local resolving = screen and screen.phase == "resolving"
   local activeSide = eventActiveSide(screen)
+  -- While the player is directly steering the Stadium actor, keep the camera
+  -- in the same shoulder/follow family used for an active attack turn. The
+  -- controller moves arena.player itself, so this naturally follows the model.
+  local manualControl, manualAttack = false, false
+  local okControl, Control = pcall(V.require, "BattlePokemonControl")
+  if okControl and Control then
+    local okA, a = pcall(Control.active)
+    manualControl = okA and a and true or false
+    local okAtk, atk = pcall(Control.attacking)
+    manualAttack = okAtk and atk and true or false
+  end
+  if manualControl then activeSide = "player" end
+  if manualAttack then attack = true end
 
   dt = math.max(0, math.min(0.1, tonumber(dt) or 1/60))
+
+  -- Controller camera input is sampled INSIDE the camera that actually renders
+  -- the Gold live-world battle. Earlier builds routed the right stick through
+  -- CamControl.tick, but Gold's OverworldBattle intentionally skipped that
+  -- tick; the values could therefore be correct without ever changing this
+  -- camera. Polling SDL here removes that unreachable seam entirely.
+  if type(FirstPerson.pollMappedRightStick) == "function" then
+    pcall(FirstPerson.pollMappedRightStick)
+  end
+  local rx = type(FirstPerson.stickX) == "function" and FirstPerson.stickX() or 0
+  local ry = type(FirstPerson.stickY) == "function" and FirstPerson.stickY() or 0
+  rx, ry = tonumber(rx) or 0, tonumber(ry) or 0
+  local rdead = 0.10
+  if math.abs(rx) <= rdead then rx = 0 end
+  if math.abs(ry) <= rdead then ry = 0 end
+  if rx ~= 0 or ry ~= 0 then
+    BattleCinematic.manualLook(rx * dt * 2.9, -ry * dt * 2.25)
+  end
+
   BattleCinematic.t = BattleCinematic.t + dt
   if not BattleCinematic.angle then
     -- Start behind the player's side, offset enough to read both models.

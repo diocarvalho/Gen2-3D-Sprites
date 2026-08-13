@@ -1484,6 +1484,14 @@ function Bridge.battleShot()
   return ok and shot or nil
 end
 
+function Bridge.battleScreen()
+  if not (OverworldBattle and type(OverworldBattle.battle) == "function") then
+    return nil
+  end
+  local ok, battle = pcall(OverworldBattle.battle)
+  return ok and battle or nil
+end
+
 function Bridge.battleStage()
   if not (OverworldBattle and type(OverworldBattle.stage) == "function") then
     return nil

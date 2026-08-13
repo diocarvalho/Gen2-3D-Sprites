@@ -990,6 +990,21 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     cx, cy = eyes.cx, eyes.cy
   end
 
+  -- Live Gold battles render through THIS VoxelScene, not BattleScene. Keep the
+  -- arena/ground context here so the terrain and late grass passes can open a
+  -- real visibility clearing around the fight. v0.2.28 only enabled the shader
+  -- in BattleScene, which is why live Gold trees/bushes were never affected.
+  local liveBattleArena, liveBattleGround = nil, nil
+  if state and state._stadiumLiveBattle then
+    local okCtx, ctx = pcall(function()
+      return V.require("OverworldBattle").cameraContext()
+    end)
+    if okCtx and type(ctx) == "table" and type(ctx.arena) == "table" then
+      liveBattleArena = ctx.arena
+      liveBattleGround = tonumber(ctx.groundY) or 0
+    end
+  end
+
   -- A staged fight, seen by the VR eyes: the flat screen draws the battle
   -- SCREEN while one is up (this pass never runs), but the headset keeps
   -- looking at the world, so the world had better have the fight on it.
@@ -1019,11 +1034,13 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- about anything but their viewpoint.
   local function drawScene()
 
+  if liveBattleArena then Voxel3D.battleOcclusion(liveBattleArena, liveBattleGround) end
   Voxel3D.draw(terrain, atlasFor(state.map), nil)
   for i, nb in ipairs(state.neighbors or {}) do
     Voxel3D.draw(nbMesh[i], atlasFor(nb.map),
                  Mat4.translate(nb.ox, 0, nb.oy))
   end
+  if liveBattleArena then Voxel3D.battleOcclusion(nil) end
 
   -- Without a shadow map (headless, or a driver that could not make the
   -- canvas) the old flat decals stand in: ground-only, characters only,
@@ -1176,6 +1193,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- so the tuft rows keep exactly the characters' own depth handicap
   local lean = math.max(leanAngle(), 0.05)
   local pull = VoxelScene.pull(lean)
+  if liveBattleArena then Voxel3D.battleOcclusion(liveBattleArena, liveBattleGround) end
   Voxel3D.draw(ChunkMesher.grass(state.map), atlasFor(state.map), nil, pull)
   for _, nb in ipairs(state.neighbors or {}) do
     Voxel3D.draw(ChunkMesher.grass(nb.map), atlasFor(nb.map),
@@ -1201,6 +1219,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
                  Mat4.translate(nb.ox, 0, nb.oy), fpull,
                  ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
   end
+  if liveBattleArena then Voxel3D.battleOcclusion(nil) end
 
   -- The VR pokedex in the player's left hand, last of all: a prop over
   -- the world drawn with real depth, so leaning it into a wall still
@@ -1216,22 +1235,6 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     Voxel3D.glass(true)
   end
 
-  -- HORDE MODE's handgun, in the same slot and for the same reasons: a
-  -- prop over the world with real depth, no wireframe and no glass. In VR
-  -- it rides the tracked right hand (lib/VR placed it this frame); on the
-  -- flat screen it is carried by the camera, which is why it draws here
-  -- rather than in the overlay -- a view model that is 2D cannot be
-  -- occluded by the wall the player just backed into.
-  do
-    local HordeGun = V.require("HordeGun")
-    if HordeGun.visible() then
-      Voxel3D.glass(false)
-      Voxel3D.seams(false)
-      HordeGun.draw()
-      Voxel3D.seams(true)
-      Voxel3D.glass(true)
-    end
-  end
 
   end   -- drawScene
 
@@ -1249,7 +1252,41 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       love.graphics.setDepthMode()
       pcall(Capture.drawOverlay, w, h)
     end
-    return Voxel3D.endScene()
+
+    -- Finalize the 3D pass first. endScene() paints weather and then returns
+    -- the same window-sized canvas seen by GoldComposeBridge. The controller
+    -- HUD is composited AFTER that into the returned canvas, guaranteeing it
+    -- cannot be hidden by weather or lost at the later Game2 UI seam.
+    local out = Voxel3D.endScene()
+    if out and state and state._stadiumLiveBattle then
+      local G = love.graphics
+      local previous = G.getCanvas()
+      local okHud = pcall(function()
+        G.setCanvas(out)
+        G.push("all")
+        G.origin()
+        G.setShader()
+        G.setDepthMode()
+        G.setBlendMode("alpha")
+        local battle = V.require("OverworldBattle").battle()
+        local ui = V.BattleControllerUI or V.require("BattleControllerUI")
+        if battle and ui and type(ui.drawIntoScene) == "function" then
+          ui.drawIntoScene(battle, w, h)
+        elseif ui and type(ui.clearSceneHudFlag) == "function" then
+          ui.clearSceneHudFlag()
+        end
+        G.pop()
+      end)
+      if not okHud then
+        pcall(G.pop)
+        pcall(function()
+          local ui = V.BattleControllerUI or V.require("BattleControllerUI")
+          if ui and type(ui.clearSceneHudFlag) == "function" then ui.clearSceneHudFlag() end
+        end)
+      end
+      if previous then pcall(G.setCanvas, previous) else pcall(G.setCanvas) end
+    end
+    return out
   end
 
   -- The VR frame: the same scene once per eye, each into its own named

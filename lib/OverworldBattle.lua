@@ -1545,12 +1545,17 @@ function OverworldBattle.install()
      and not GoldWorld.stadiumInWorldBattleHook then
     local inner = GoldWorld.pushBattleTransition
     function GoldWorld:pushBattleTransition(battle, opts, onDone)
-      -- v0.1.87 intentionally scopes the new live-world presentation to the
-      -- encounter case it is designed for.  Trainer/tutorial/contest/safari
-      -- battles keep Gold's native staging until they have purpose-built 3D
-      -- choreography of their own.
-      local ordinaryWild = battle and battle.wild == true
-      if ordinaryWild and not (opts and (opts.tutorial or opts.contest or opts.safari)) then
+      -- v0.2.23: the live-world renderer is battle-object based, not wild-only.
+      -- Trainer battles use the same two active battlers, HUD and Stadium actor
+      -- lifecycle, and exactGoldArena already has a no-encounter-snapshot path
+      -- that stages the foe in front of the player.  Keeping this gated on
+      -- `battle.wild` was the reason 3D/live mode worked for encounters but
+      -- silently fell back to the native flat scene for trainer fights.
+      -- Tutorial/contest/safari remain native because their send-out/capture
+      -- choreography is intentionally special.
+      local specialBattle = opts and (opts.tutorial or opts.contest or opts.safari)
+      local ordinaryBattle = battle ~= nil and not specialBattle
+      if ordinaryBattle then
         local state = self
         if type(V.goldStateForWorld) == "function" then
           local okState, adapted = pcall(V.goldStateForWorld, self)

@@ -188,7 +188,7 @@ local function drawGoldVoxelFrame(canvas, game, world, ctx)
   return result, overlayCount or 0, overlayErr
 end
 
-local function drawGoldBattleFrame(shot, ctx)
+local function drawGoldBattleFrame(shot, ctx, game)
   local canvas = shot and shot.canvas
   local ui = ctx and ctx.sceneCanvas
   if not (canvas and ui) then return false end
@@ -198,10 +198,63 @@ local function drawGoldBattleFrame(shot, ctx)
     G.origin()
     G.setBlendMode("alpha")
     if not drawCanvasFull(canvas, ctx) then error("unusable 3D battle canvas") end
-    -- Game2's sceneCanvas is window-sized. Once BattleState has a 3D shot it
-    -- clears the old white field to transparent and leaves only Gold's native
-    -- battle UI/panels/animations in this texture.
-    if not drawCanvasFull(ui, ctx) then error("unusable Gold battle UI canvas") end
+
+    -- v0.2.31: normal live 3D battles no longer composite Gold's 160x144
+    -- battle screen at all. BattleControllerUI owns the complete battle HUD
+    -- (names/HP/message/commands/move list) directly on the window-sized 3D
+    -- frame. Gold still runs underneath and owns every rule/timer/action.
+    --
+    -- Separate pushed screens such as PACK/PARTY are not BattleState objects,
+    -- so they deliberately fall through to the native UI canvas below.
+    local controllerUI = mod.exports and mod.exports.battleControllerUI
+    if controllerUI and not controllerUI.installed
+        and type(controllerUI.install) == "function" then
+      pcall(controllerUI.install, game)
+    end
+    local top = stackTop(game)
+    local screen = top
+    if VoxelBridge and type(VoxelBridge.battleScreen) == "function" then
+      local okLive, live = pcall(VoxelBridge.battleScreen)
+      if okLive and type(live) == "table" then screen = live end
+    end
+    -- Only replace the battle canvas while the live BattleState itself is the
+    -- visible top state. PACK/PARTY and other pushed screens remain native.
+    -- Compare the underlying logic-battle too because some engine revisions
+    -- wrap the BattleState for presentation while retaining the same battle.
+    local visibleBattle = (top == screen)
+      or (type(top) == "table" and type(screen) == "table"
+          and top.battle ~= nil and top.battle == screen.battle)
+    local owned = false
+    if visibleBattle and controllerUI and type(controllerUI.owns) == "function" then
+      local okOwn, yes = pcall(controllerUI.owns, screen)
+      owned = okOwn and yes and true or false
+    end
+
+    local customDrawn = false
+    local sceneOwnsHud = false
+    if controllerUI and type(controllerUI.sceneHasHud) == "function" then
+      local okScene, yes = pcall(controllerUI.sceneHasHud)
+      sceneOwnsHud = okScene and yes and true or false
+    end
+    if sceneOwnsHud then
+      -- The HUD is already baked into shot.canvas by VoxelScene.render().
+      customDrawn = true
+    elseif owned and controllerUI then
+      -- Compatibility/fail-open path for an engine revision that bypasses the
+      -- live VoxelScene insertion point.
+      if type(controllerUI.update) == "function" then pcall(controllerUI.update, game) end
+      local draw = controllerUI.drawFull or controllerUI.draw
+      if type(draw) == "function" then
+        local okDraw, yes = pcall(draw, screen, ctx)
+        customDrawn = okDraw and yes and true or false
+      end
+    end
+
+    -- Fail open. If the replacement HUD cannot draw on a future engine build,
+    -- put Gold's own canvas back instead of leaving a playable but invisible UI.
+    if not customDrawn then
+      if not drawCanvasFull(ui, ctx) then error("unusable Gold battle UI canvas") end
+    end
     G.pop()
   end)
   if not ok then
@@ -230,7 +283,7 @@ local function compose(nextFn, host, ctx)
      and type(VoxelBridge.battleShot) == "function" then
     local okShot, shot = pcall(VoxelBridge.battleShot)
     if okShot and shot and shot.canvas then
-      if drawGoldBattleFrame(shot, ctx) then
+      if drawGoldBattleFrame(shot, ctx, game) then
         Bridge.battleFrames = Bridge.battleFrames + 1
         return true
       end

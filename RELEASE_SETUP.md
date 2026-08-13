@@ -1,8 +1,10 @@
+**Current release: v0.2.35**
+
 # Release / updater setup
 
 Repository: `randyadr/Gen2-3D-Sprites`
 Mod ID: `STADIUM2_OVERWORLD_MODELS`
-Current version: `0.2.16`
+Current version: `0.2.35`
 
 ## One-time / manual upload
 

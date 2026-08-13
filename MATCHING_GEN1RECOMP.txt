@@ -1,0 +1,9 @@
+STADIUM2_OVERWORLD_MODELS v0.2.35 matching engine snapshot
+
+Repository: bryanthaboi/gen1recomp
+Branch: dev
+Commit: f6a035947f7593baad6a9afca3b1157bfc76004a
+Commit date: 2026-08-13
+
+This mod release was built and checked against that exact Gen1Recomp commit.
+Use the separately supplied matching source ZIP so later dev-branch changes do not alter behavior underneath this release.

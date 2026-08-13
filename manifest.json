@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
   "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.2.22",
+  "version": "0.2.35",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -20,7 +20,7 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.22 restores the original Stadium 2 Lugia model after Dex-249 diagnostics proved the skeleton/geometry were already coherent: Lugia's 647-vertex main body is an intentionally textureless lit primitive that older runtime code skipped entirely. The renderer now supplies Dex 249's textureless surfaces with an opaque white lit material, so the original body renders together with its textured eyes/fins/details. The procedural Lugia remains only as a last-resort fallback. No ROM re-import is required. Retains harder skill-based overworld Pok\u00e9 Ball throwing, 3RD/1ST trainer animation, connected-map streaming, cameras, battle FX, and crash-safe live battles.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.35 replaces the live-battle PACK and PKMN full-screen Gold menus with Stadium-style four-row glass selectors that stay on the 3D battlefield. Pokémon switching, item use, party-target healing/status items and single-move PP restoration still call current Gen1Recomp battle routines underneath. FIGHT/RUN remain native-dispatched. The full 3D battle HUD, scenery clearing, movement/camera controls and Lugia safeguards remain.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,

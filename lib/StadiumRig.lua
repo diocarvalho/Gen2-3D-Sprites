@@ -825,6 +825,12 @@ function StadiumRig:measureBind()
       bindT[t+1], bindT[t+2], bindT[t+3] =
         self.drawM[o+4], self.drawM[o+8], self.drawM[o+12]
     end
+    -- Keep the bind translations on the shared model.  v0.2.26 uses this for
+    -- a Dex-249-only world-space attack anchor: Stadium's Lugia performances
+    -- contain stage/camera travel, but the torso's bind location is the stable
+    -- place the overworld battle camera expects it to occupy.  This is runtime
+    -- metadata only; it does not change DSM/cache bytes.
+    model.bindBoneT = bindT
   end
 
   -- A pack already marked static (or a species-specific safety override)
@@ -1029,6 +1035,47 @@ end
 -- 0x24 records the current matrix translation, and pivotM and drawM share
 -- exactly that translation; pivotM is used because it describes the graph
 -- node itself rather than its draw-only accumulated scale.
+-- Pin one posed bone back to the location that same bone occupied in the bind
+-- pose, translating the WHOLE skeleton by the same delta.  This preserves every
+-- local rotation/scale/child motion in the animation; it removes only the bulk
+-- stage travel inherited by the actor.  It is intentionally a separate helper
+-- rather than a change to anchor(): normal Pokemon still use the measured,
+-- filtered excursion limiter above.
+function StadiumRig:pinBoneToBind(bone)
+  local model = self.model
+  local bindT = model and model.bindBoneT
+  bone = tonumber(bone)
+  if not (bindT and bone and bone >= 1 and bone <= (model.boneCount or 0)) then
+    return false
+  end
+  local o, t = (bone - 1) * 12, (bone - 1) * 3
+  local px, py, pz = self.pivotM[o + 4], self.pivotM[o + 8], self.pivotM[o + 12]
+  local bx, by, bz = bindT[t + 1], bindT[t + 2], bindT[t + 3]
+  if not (finite(px) and finite(py) and finite(pz)
+      and finite(bx) and finite(by) and finite(bz)) then
+    return false
+  end
+  local dx, dy, dz = px - bx, py - by, pz - bz
+  if dx == 0 and dy == 0 and dz == 0 then
+    self.anchorX, self.anchorY, self.anchorZ = nil, nil, nil
+    return true
+  end
+  local pivot, drw = self.pivotM, self.drawM
+  for b = 1, model.boneCount do
+    local q = (b - 1) * 12
+    pivot[q + 4] = pivot[q + 4] - dx
+    pivot[q + 8] = pivot[q + 8] - dy
+    pivot[q + 12] = pivot[q + 12] - dz
+    drw[q + 4] = drw[q + 4] - dx
+    drw[q + 8] = drw[q + 8] - dy
+    drw[q + 12] = drw[q + 12] - dz
+  end
+  -- Do not carry the ordinary anchor filter's previous correction out of an
+  -- attack once this exact torso pin is released.
+  self.anchorX, self.anchorY, self.anchorZ = nil, nil, nil
+  return true
+end
+
 function StadiumRig:attachment(bone)
   if type(bone) ~= "number" or bone < 1 or bone > self.model.boneCount then
     return nil

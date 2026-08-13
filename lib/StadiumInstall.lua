@@ -267,7 +267,7 @@ local function writePack(species, bytes)
       if okSave and got then saveDir = tostring(got) end
     end
     local note = table.concat({
-      "STADIUM2_OVERWORLD_MODELS v0.2.22 - Lugia diagnostic files",
+      "STADIUM2_OVERWORLD_MODELS v0.2.23 - Lugia diagnostic files",
       "",
       "Upload BOTH of these files back to ChatGPT:",
       "  1) 249_geo_dump.txt",

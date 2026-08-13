@@ -157,8 +157,30 @@ local function buildTextures()
 end
 
 local function moveDef(battle)
-  if not (battle and battle.animName and battle.data and battle.data.moves) then return nil end
-  return battle.data.moves[battle.animName]
+  if not battle then return nil end
+  -- Gold's adapter resolves the move through Battle:moveDef once, because the
+  -- live move id may be a symbolic key ("TACKLE") rather than a numeric table
+  -- index.  Prefer that resolved definition so the 3D effect layer never
+  -- depends on how a particular engine build keys game.data.moves.
+  if type(battle.def) == "table" then return battle.def end
+  local key = battle.animName
+  local moves = battle.data and battle.data.moves
+  if key ~= nil and type(moves) == "table" then
+    local direct = moves[key]
+    if type(direct) == "table" then return direct end
+    local want = tonumber(key)
+    for _, def in pairs(moves) do
+      if type(def) == "table" then
+        local index = tonumber(def.index or def.moveIndex or def.number)
+        if want and index == want then return def end
+        if type(key) == "string" then
+          local id = tostring(def.id or def.name or "")
+          if id == key then return def end
+        end
+      end
+    end
+  end
+  return nil
 end
 local function norm(s) return type(s)=="string" and string.upper(s):gsub("[^A-Z0-9]","") or "" end
 local function moveName(battle, def)
@@ -180,23 +202,29 @@ local function power(def) return tonumber(def and def.power) or 0 end
 -- every existing procedural effect below can stay generation-agnostic.
 local function goldBattleAdapter(screen)
   if type(screen) ~= "table" then return nil end
-  local runner = screen.anim
   local moveId = screen._stadium3DFxMove
   local side = screen._stadium3DFxSide
-  local env = runner and runner.env
-  local animId = env and env.animId
-  if moveId == nil or side == nil or type(runner) ~= "table" then return nil end
-  if runner.stopped then return nil end
-  if tostring(animId or "") ~= tostring(moveId) then return nil end
+  local token = screen._stadium3DFxToken
+  local elapsed = tonumber(screen._stadium3DFxElapsed)
+  if moveId == nil or side == nil or token == nil or elapsed == nil then return nil end
+  if elapsed < 0 or elapsed > 1.10 then return nil end
+
   local data = (screen.game and screen.game.data)
     or (screen.battle and screen.battle.data) or {}
+  local def = screen._stadium3DFxDef
   return {
     animPlaying = true,
     animName = moveId,
     animAttackerIsPlayer = side == "player",
-    frame = tonumber(runner.frames) or 0,
+    -- Keep the procedural effects on a deterministic ~60 Hz clock even when
+    -- Gold swaps its native AnimRunner to the post-hit animation between
+    -- update and render.  This was the v0.2.23 "sprites gone, 3D effect gone
+    -- too" race.
+    frame = math.floor(elapsed * 60 + 0.5),
     data = data,
+    def = def,
     _goldScreen = screen,
+    _goldToken = token,
   }
 end
 
@@ -281,6 +309,7 @@ local function drawCard(texture,x,y,z,w,h,pull,yaw,roll)
   if not texture then return end
   local m=cardMatrix(x,y,z,w,h,yaw,roll)
   Voxel3D.draw(BattleBillboard.mesh(), texture, m, pull or 0)
+  live.drawSerial = (tonumber(live.drawSerial) or 0) + 1
 end
 
 local function drawCross(texture,x,y,z,w,h,pull,spin)
@@ -455,19 +484,39 @@ end
 
 local function drawWorldFx(pull)
   local battle=live.battle
-  if not (battle and battle.animPlaying and battle.animName and live.arena) then return end
-  if not buildTextures() then return end
-  local def=moveDef(battle); if not def then return end
+  if not (battle and battle.animPlaying and battle.animName and live.arena) then return false end
+  if not buildTextures() then return false end
+  local def=moveDef(battle); if not def then return false end
   local name=moveName(battle,def)
   local special=SPECIAL[name]
   local family=FAMILY[moveType(def)]
-  -- Dedicated status effects (Thunder Wave, powders, etc.) opt in above.
-  -- Unknown zero-power moves should not fire a generic projectile at the foe.
-  if not special and (not family or power(def) <= 0) then return end
+  local movePower=power(def)
+  -- v0.2.23 takes ownership of Gold's visible OBJ move layer while Stadium
+  -- presentation is active, so EVERY move needs a world-space answer. Named
+  -- status moves keep their dedicated effects; other zero-power moves get a
+  -- restrained type-coloured aura instead of falling back to the old 2D OBJ
+  -- sprites. Damaging unknowns get a generic impact below.
   local phase=phaseFor(battle,special)
-  local a,b=points(); if not a then return end
-  local strength=clamp(.8+power(def)/220,.8,1.5)
+  local a,b=points(); if not a then return false end
+  local strength=clamp(.8+movePower/220,.8,1.5)
   local p=(pull or 0)-0.15 -- a tiny camera-ward bias keeps translucent cards off terrain
+  local drawBefore = tonumber(live.drawSerial) or 0
+
+  if not special and movePower <= 0 then
+    local aura = tex.ring
+    if family=="fire" then aura=tex.orb
+    elseif family=="water" then aura=tex.water
+    elseif family=="electric" then aura=tex.electric
+    elseif family=="ice" then aura=tex.ice
+    elseif family=="psychic" then aura=tex.psychic
+    elseif family=="poison" or family=="ghost" then aura=tex.poison
+    elseif family=="grass" or family=="bug" then aura=tex.leaf
+    elseif family=="wind" then aura=tex.wind
+    elseif family=="ground" or family=="rock" then aura=tex.dust end
+    orbitCloud(aura,b,phase,p,10,5,2.0,2.0)
+    groundRing(tex.ring,b,phase,p,7,5,1.7)
+    return (tonumber(live.drawSerial) or 0) > drawBefore
+  end
 
   if special=="aeroblast" then
     -- Lugia: a compressed rotating air lance, followed by expanding pressure
@@ -656,9 +705,15 @@ local function drawWorldFx(pull)
     targetBurst(tex.dust,b,phase,p,3.2*strength); groundRing(tex.dust,b,phase,p,8,5,2.2)
   elseif family=="bug" then
     projectileTrail(tex.leaf,a,b,phase,p,2.3*strength,7,3.0,phase*5); targetBurst(tex.ring,b,phase,p,2.6)
-  elseif family=="impact" and power(def)>0 then
+  elseif family=="impact" and movePower>0 then
     targetBurst(tex.ring,b,phase,p,3.4*strength)
+  else
+    -- A move whose type/name is not in the current family table still gets a
+    -- real 3D hit cue, so Gold never has to resurrect its sprite OBJ layer.
+    projectileTrail(tex.ring,a,b,phase,p,2.2*strength,5,2.0)
+    targetBurst(tex.ring,b,phase,p,2.8*strength)
   end
+  return (tonumber(live.drawSerial) or 0) > drawBefore
 end
 
 function M.install()
@@ -670,9 +725,39 @@ function M.install()
   local innerBegin, innerUpdate, innerUpdateGen2, innerDraw, innerFinish =
     Stadium.begin, Stadium.update, Stadium.updateGen2, Stadium.draw, Stadium.finish
 
-  -- Observe Gold's own move-animation entry point.  No battle logic is changed:
-  -- the wrapper only remembers which move the AnimRunner that immediately
-  -- follows belongs to, so the world-space renderer can select an effect.
+  -- Observe Gold's own move-animation entry point.  v0.2.24 latches the
+  -- presentation independently of Gold's AnimRunner object: Gold is allowed to
+  -- swap from the move script to an after-hit/damage runner before the world
+  -- canvas is rendered, and tying the 3D layer to that object made the effect
+  -- vanish even though the move itself was still on screen.
+  local goldToken = 0
+  local function resolveGoldMoveDef(screen, moveId)
+    local battle = screen and screen.battle
+    if battle and type(battle.moveDef) == "function" then
+      local okDef, def = pcall(battle.moveDef, battle, moveId)
+      if okDef and type(def) == "table" then return def end
+    end
+    local data = (screen and screen.game and screen.game.data)
+      or (battle and battle.data) or {}
+    local moves = data and data.moves
+    if type(moves) == "table" then
+      local direct = moves[moveId]
+      if type(direct) == "table" then return direct end
+      local want = tonumber(moveId)
+      for _, def in pairs(moves) do
+        if type(def) == "table" then
+          local index = tonumber(def.index or def.moveIndex or def.number)
+          if want and index == want then return def end
+          if type(moveId) == "string" then
+            local id = tostring(def.id or def.name or "")
+            if id == moveId then return def end
+          end
+        end
+      end
+    end
+    return nil
+  end
+
   local okGold, GoldBattleState = pcall(require, "src.ui.gen2.BattleState")
   if okGold and type(GoldBattleState) == "table"
       and type(GoldBattleState.animForMove) == "function"
@@ -680,16 +765,50 @@ function M.install()
     local innerAnimForMove = GoldBattleState.animForMove
     GoldBattleState.animForMove = function(self, moveId, side, ...)
       local started = innerAnimForMove(self, moveId, side, ...)
-      if started then
+      if moveId ~= nil and (side == "player" or side == "enemy") then
+        goldToken = goldToken + 1
         self._stadium3DFxMove = moveId
         self._stadium3DFxSide = side
-      else
-        self._stadium3DFxMove = nil
-        self._stadium3DFxSide = nil
+        self._stadium3DFxDef = resolveGoldMoveDef(self, moveId)
+        self._stadium3DFxToken = goldToken
+        self._stadium3DFxElapsed = 0
+        self._stadium3DFxReadyToken = nil
+        self._stadium3DFxReadyFrames = 0
       end
       return started
     end
     GoldBattleState._stadium3DFxMoveHook = true
+  end
+
+  -- Fail open. Gold's cartridge OBJ attack sprites are hidden only after the
+  -- world-space renderer has successfully drawn the SAME latched move on at
+  -- least two prior frames. If the 3D path is absent, late, or throws, Gold's
+  -- original effect remains visible instead of v0.2.23's "nothing at all".
+  if okGold and type(GoldBattleState) == "table"
+      and type(GoldBattleState.drawSceneBody) == "function"
+      and not GoldBattleState._stadium3DFxObjSuppress then
+    local innerDrawSceneBody = GoldBattleState.drawSceneBody
+    GoldBattleState.drawSceneBody = function(self, ...)
+      local adapted = goldBattleAdapter(self)
+      local token = adapted and adapted._goldToken
+      local owns = token ~= nil
+        and self._stadium3DFxReadyToken == token
+        and (tonumber(self._stadium3DFxReadyFrames) or 0) >= 2
+      local view = self and self.animView
+      if owns and view and type(view.drawObjects) == "function" then
+        local priorRaw = rawget(view, "drawObjects")
+        view.drawObjects = function() end
+        local out = { pcall(innerDrawSceneBody, self, ...) }
+        if priorRaw ~= nil then view.drawObjects = priorRaw else view.drawObjects = nil end
+        if not out[1] then error(out[2], 0) end
+        table.remove(out, 1)
+        local u=(table and table.unpack) or unpack
+        if u then return u(out) end
+        return
+      end
+      return innerDrawSceneBody(self, ...)
+    end
+    GoldBattleState._stadium3DFxObjSuppress = true
   end
 
   Stadium.begin = function(arena, ...)
@@ -706,9 +825,20 @@ function M.install()
 
   if type(innerUpdateGen2) == "function" then
     Stadium.updateGen2 = function(dt, screen, groundY, ...)
-      -- Replace, rather than retain, the adapter every frame: once Gold moves
-      -- from the move's AnimRunner to its damage/send-out animation, the 3D
-      -- effect must disappear immediately instead of looping on stale data.
+      if type(screen) == "table" and screen._stadium3DFxToken ~= nil then
+        local elapsed = (tonumber(screen._stadium3DFxElapsed) or 0)
+          + math.max(0, tonumber(dt) or 0)
+        screen._stadium3DFxElapsed = elapsed
+        if elapsed > 1.10 then
+          screen._stadium3DFxMove = nil
+          screen._stadium3DFxSide = nil
+          screen._stadium3DFxDef = nil
+          screen._stadium3DFxToken = nil
+          screen._stadium3DFxElapsed = nil
+          screen._stadium3DFxReadyToken = nil
+          screen._stadium3DFxReadyFrames = 0
+        end
+      end
       live.battle = goldBattleAdapter(screen)
       if groundY~=nil then live.groundY=groundY end
       return innerUpdateGen2(dt, screen, groundY, ...)
@@ -717,8 +847,22 @@ function M.install()
 
   Stadium.draw = function(pull, ...)
     local out={innerDraw(pull, ...)}
-    local ok,err=pcall(drawWorldFx,pull)
-    if not ok then log("warn","Phase 5 world effect skipped: %s",tostring(err)) end
+    local ok,drew=pcall(drawWorldFx,pull)
+    if not ok then
+      log("warn","Phase 5 world effect skipped: %s",tostring(drew))
+    elseif drew and live.battle and live.battle._goldScreen then
+      local screen = live.battle._goldScreen
+      local token = live.battle._goldToken
+      if token ~= nil then
+        if screen._stadium3DFxReadyToken == token then
+          screen._stadium3DFxReadyFrames =
+            (tonumber(screen._stadium3DFxReadyFrames) or 0) + 1
+        else
+          screen._stadium3DFxReadyToken = token
+          screen._stadium3DFxReadyFrames = 1
+        end
+      end
+    end
     local u=(table and table.unpack) or unpack
     if u then return u(out) end
   end

@@ -629,11 +629,18 @@ function BattleScene.render(state, arena, textures, token)
     end
   --  if not whiteFill and not discs then
     if not discs then
+      -- BATTLE VISIBILITY BUBBLE: keep the actual encounter terrain, but
+      -- dissolve tall tree/wall/shrub fragments that stand in either
+      -- camera-to-Pokemon sight line. This is enabled only for terrain and
+      -- disabled before the Pokemon/FX pass, so the fighters themselves are
+      -- never faded.
+      Voxel3D.battleOcclusion(arena, groundY)
       Voxel3D.draw(terrain, atlasFor(host), nil)
       for i, nb in ipairs(neighbors) do
         Voxel3D.draw(nbMesh[i], atlasFor(nb.map),
                    Mat4.translate(nb.ox, 0, nb.oy))
       end
+      Voxel3D.battleOcclusion(nil)
     elseif discs then
       -- discs: the two platforms, and nothing else. No terrain, no
       -- neighbouring maps, no water, no grass and no flowers -- see the

@@ -416,6 +416,32 @@ end
 -- Public draw-coverage query used by the Gen-2 BattleState shim.  It is kept
 -- separate from `covers`, whose input contract is the legacy Gen-1 battler
 -- wrapper and whose trainer/substitute rules should not be guessed at here.
+-- Direct-control bridge used by BattlePokemonControl. It deliberately exposes
+-- only high-level presentation verbs; the controller never receives the private
+-- Stadium session or mutates Gold's battle logic.
+function Stadium.controlReady(side)
+  if side ~= "player" and side ~= "enemy" then return false end
+  local mon = session and session[side]
+  if not (mon and mon.rig and mon.visible and mon.model_matrix) then return false end
+  return mon.state ~= "entrance" and mon.state ~= "faint"
+end
+
+function Stadium.manualAttack(side)
+  if side ~= "player" and side ~= "enemy" then return false end
+  local mon = session and session[side]
+  if not (mon and mon.rig and mon.visible and mon.model_matrix) then return false end
+  if mon.state == "entrance" or mon.state == "faint" then return false end
+  if type(mon.manualAttackGen2) == "function" then
+    local ok, played = pcall(mon.manualAttackGen2, mon)
+    if ok and played then return true end
+  end
+  if type(mon.request) == "function" then
+    local ok, played = pcall(mon.request, mon, "attack")
+    return ok and played and true or false
+  end
+  return false
+end
+
 function Stadium.visible(side)
   if side ~= "player" and side ~= "enemy" then return false end
   local mon = session and session[side]

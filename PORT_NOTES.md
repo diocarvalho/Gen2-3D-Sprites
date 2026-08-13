@@ -1,6 +1,66 @@
-## v0.2.22 - Dex 249 textureless-body fix
+## v0.2.35 — custom in-battle PKMN / PACK overlays
 
-The user-supplied `249.dsm` and `249_geo_dump.txt` falsified the previous hierarchy hypothesis. All 75 extracted joints use flags `0x01`, there are no Lugia-local `0x20`/`0x21` display-list transform nodes, and the stable bind transform produces a coherent silhouette. The missing visual mass was primitive 0: `tex=-1`, 647 vertices, 1,758 indices, spanning 38 bones. `StadiumRig:draw()` skipped parts whose `StadiumPack.image()` returned nil, so this untextured lit body never reached Voxel3D. Dex 249 now maps only the 0xFFFF texture sentinel to a cached opaque 1x1 white image. The shared extractor/rig remains untouched.
+Normal live 3D battles no longer push `Gen2PartyMenu` or `Gen2PackMenu` for the two face-button commands. `BattleControllerUI` holds a lightweight selector state while the underlying Gold `BattleState` remains in `phase == "menu"`, consumes only selector D-pad/A/B events, and draws four Stadium-style rows over the existing world. A valid switch is submitted through Gold's battle action API. Battle items call Gold's `useItem`; party-target item effects call Gold's `applyPartyItem`, with a custom party target and custom move target for single-slot PP items. Tutorial/contest and non-normal submenu flows remain native.
+
+## v0.2.34 — let Gold open its own battle submenus
+
+The controller diamond no longer calls `openPack()` / `openParty()` itself. It writes Gold's own battle-menu cursor (`FIGHT=1`, `PKMN=2`, `PACK=3`, `RUN=4`) and queues a synthetic GB `A` edge on the live `Input` object. On the next fixed step Gold's existing `BattleState:update()` performs the exact cartridge-style branch, including its current `Screens.push` calls, stack ownership, item rules, switch rules and callbacks. The custom HUD also stops owning presentation while the battle state is `submenu`, so the native Pack/Party screen remains visible and receives ordinary input.
+
+## v0.2.32 — guaranteed HUD draw ownership
+
+The v0.2.31 compositor-based HUD could still disappear because Gold's live 3D battle shot and the later UI compositor do not always agree on which stack object owns presentation. v0.2.32 removes that dependency: `VoxelScene.render()` asks `OverworldBattle.battle()` for the exact live Gen-2 `BattleState` and draws `BattleControllerUI` while the world scene canvas is still bound. `GoldComposeBridge` sees the scene-owned HUD flag and skips duplicate overlay composition. If the scene draw fails, the existing compositor/native UI fallback remains available.
+
+The battle occlusion shader now excludes geometry through `groundY + 8.5`, preserving jump ledges and other low map borders while continuing to clear taller trees/bushes/walls from combat sightlines.
+
+## v0.2.32 - controller HUD visibility hardening
+
+The 0.2.30 full battle replacement could hide Gold's native command canvas successfully while failing to surface the replacement command panel on hosts where the live Gold BattleState was not the exact object returned by the simple stack-top lookup. The compositor now asks `GoldVoxelBridge.battleScreen()`, which forwards the BattleState stored by `OverworldBattle.battle()`. It only owns the frame when that BattleState (or a wrapper sharing the same logic battle) is the visible top state, so PACK/PARTY screens still fall back to Gold. The command panel also uses a presentation-only command-ready gate that spans the one-step `resolving -> menu` seam.
+
+# v0.2.29 controller input boundary
+
+The core issue in v0.2.28 was hook placement. `src.core.Input:gamepadaxis` converts `leftx/lefty` into held GB directions using its own hysteresis before `BattleState:update` reads them. Wrapping `Game2:gamepadpressed` could not stop that conversion. `BattleControllerUI.install` now wraps the live `game.input` methods themselves: analog `leftx/lefty` are swallowed only while the normal BattleState owns the screen, and any pre-existing `source="stick"` direction is released/cleared. D-pad input still uses the native path for move/item/party submenus.
+
+Physical face buttons are intercepted at `Input:gamepadpressed` while `phase == "menu"`, before `GamepadMap` maps them to GB A/B. A per-controller release latch prevents the release event from leaking into the newly opened submenu. A frame poll of `isGamepadDown` provides a fallback for platform/controller stacks that miss mapped button events. Keyboard WASD is similarly withheld from native GB directions in the live battle state, while arrow keys activate the four command positions directly.
+
+The camera bug had a separate unreachable seam: Gold's `OverworldBattle.update` intentionally calls `CamControl.tick` only on the non-Gold legacy path. v0.2.29 therefore polls `FirstPerson.pollMappedRightStick` from `BattleCinematic.frameImpl` itself and applies `manualLook` there. This guarantees that the exact camera returned to `VoxelScene` sees right-stick input.
+
+# v0.2.28 battle visibility / controller UI
+
+### Occlusion handling
+
+Gold route geometry is packed into one depth-tested `ChunkMesher` mesh, so fading a named tree/wall object after meshing is not available without rebuilding the map into many draw calls. v0.2.28 handles battle visibility in `Voxel3D` instead. The vertex shader carries uncurved world position; while `BattleScene` draws terrain it enables two camera-to-combatant XZ capsules plus a softer midpoint bubble. Fragments more than five world pixels above encounter ground are dither-discarded inside those regions. Because discarded fragments never write depth, the Pokemon/effects behind them become genuinely visible; ground stays opaque and the uniform is disabled before Pokemon/FX draws.
+
+### Command UI and inputs
+
+`BattleControllerUI.lua` only claims Gold `BattleState.phase == "menu"`. SDL face-button names map spatially to the requested PlayStation layout (`x`/west Fight, `b`/east Run, `a`/south Pack, `y`/north Pokemon). PC arrows mirror those positions. The module calls the same BattleState public methods (`submit`, `openPack`, `openParty`) and reproduces the native Fight entry/Struggle gate, then hands every submenu back to Gold.
+
+`GoldComposeBridge` redraws the 3D battle canvas over the lower native command region before the custom dock, so the old opaque white menu is removed rather than merely tinted. This restoration happens only during `phase == "menu"`; move lists, messages, item screens and party screens remain native.
+
+### Camera/control
+
+Direct Pokemon movement accepts WASD in addition to left stick. `CamControl.tick` now branches live-world battles to `BattleCinematic.manualLook`; the previous code updated `BattleCam` even though `BattleCinematic` owned the rendered camera.
+
+# v0.2.27
+
+- Added direct control of the player's active Stadium 2 Pokemon during Gold live-world battles.
+- Left stick moves the 3D Pokemon camera-relative inside a bounded battle arena.
+- PlayStation Square / Xbox X (SDL gamepad `x`) triggers real imported Stadium 2 skeletal attack performances. Repeated presses cycle safe non-idle clips for the current species.
+- The battle camera treats direct-control mode as player-active and follows the controlled Pokemon.
+- Direct movement is presentation-only: Gold remains authoritative for HP, turns, moves, switching, items, catches and battle outcomes.
+- Control waits until the player's 3D Pokemon has completed its entrance and is actually visible; trainer intro/tutorial/faint states are not hijacked.
+- Lugia retains the v0.2.22 untextured-body material fix and v0.2.26 attack-root pinning/safe-clip exclusions.
+
+## v0.2.26 Lugia attack-stage travel removal
+
+The imported Stadium 2 Lugia attack clips contain camera-stage translation that is valid when Stadium follows one Pokemon with its own shot, but looks like teleporting/flying when replayed as a world-space actor under Gen1Recomp's fixed live-battle camera. Clip filtering alone was insufficient because even visually usable clips can carry the common torso/root through a large stage arc.
+
+`StadiumRig:measureBind()` now retains per-bone bind translations as runtime-only metadata. `StadiumRig:pinBoneToBind()` subtracts the current-to-bind translation of a selected posed bone from every pivot/draw matrix. `StadiumMon:build()` applies this only to Dex 249 while `state == "attack"`, using runtime bone #3 (the uploaded Lugia diagnostic's `bone[2]`, the common torso/root for wings/neck/tail). This preserves local skeletal animation and removes only bulk actor travel. No DSM bytes or shared species routing are changed.
+
+## v0.2.25 Gold attack presentation fail-open bridge
+
+The v0.2.23 OBJ suppression was too optimistic: `BattleState:animForMove` could start Gold's native animation, then Gold could replace that runner with its after-hit animation before `OverworldBattle.update` rendered the voxel shot. The 3D adapter therefore saw no matching runner while the UI wrapper had already hidden `BattleAnimView:drawObjects`.
+
+v0.2.25 latches `{move, side, resolved def, token, elapsed}` at `animForMove` and advances the world-space effect on its own short clock. The skeletal bridge resolves symbolic Gold move keys through `Battle:moveDef` to the move definition's numeric `index` before calling `StadiumMon:attackGen2`. Native OBJ suppression is now fail-open and requires two successful world-space draw frames for the same token before hiding Gold's sprite layer.
 
 ## v0.2.16 Lugia root-cause pass: preserve geo joint flags
 

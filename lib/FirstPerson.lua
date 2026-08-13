@@ -110,13 +110,10 @@ FirstPerson.yaw = 0
 FirstPerson.pitch = FirstPerson.PITCH_DEFAULT
 FirstPerson.blend = 0
 
--- A multiplier on the first-person field of view, for anything that wants
--- to narrow the lens without owning the rig: 1 is the ordinary 65
--- degrees, and horde mode's iron sights ease it down toward 40 while the
--- player is looking down them (lib/HordeGun). Kept here rather than in
--- the caller because the fov is folded into the orbit blend below, and
--- because signature() has to know -- a lens that narrows while the player
--- stands still still has to re-fit the shadow box.
+-- A multiplier on the first-person field of view, for compatibility with
+-- camera features that narrow the lens without owning the rig. 1 is the
+-- ordinary field of view. Kept here because the value is folded into the
+-- orbit blend and signature() must notice lens-only camera changes.
 FirstPerson.fovScale = 1
 
 local wasEngaged = false
@@ -889,12 +886,7 @@ function FirstPerson.install(game)
   -- pressed is remembered per button, so the release always reaches the
   -- overlay even if the capture ended while the button was down --
   -- otherwise a click that outlives the rung strands A held forever.
-  --
-  -- HORDE MODE re-reads the same two buttons as a weapon: left fires,
-  -- right holds the sights. Claimed BEFORE the A/B mapping below rather
-  -- than on top of it, so a click during the mode never also lands as a
-  -- GB button -- otherwise the A that ends the GAME OVER card would be
-  -- spent by the shot that ended the run.
+
   local mouseHeld = {}
   local MOUSE_BTN = { [1] = "a" }
   do

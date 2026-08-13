@@ -1,12 +1,93 @@
-# v0.2.22 — original Stadium 2 Lugia body restored
+# v0.2.35 — Stadium-style PKMN / PACK battle selectors
 
-- Re-analyzed the uploaded `249.dsm` and `249_geo_dump.txt` instead of changing the skeleton decoder again.
-- Found the actual failure: Lugia primitive 0 is the original 647-vertex / 1,758-index main body and deliberately has no texture (`tex=-1`). The runtime previously treated a missing texture as a missing primitive and skipped the whole body.
-- Dex 249 now renders textureless Stadium geometry with a 1x1 opaque white material, allowing Voxel3D lighting/shadows to shade the original untextured body just like Stadium's lit material path.
-- Switched Lugia back to the real Stadium 2 `249.dsm` model and its original animations.
-- Kept `LugiaRescue` only as a last-resort fallback if the real pack or GPU rig cannot load.
-- No Stadium 2 ROM re-import is required; the v0.2.21 diagnostic `249.dsm` is already sufficient.
-- The shared extractor, cache format, and skeleton transform code are unchanged, so this fix cannot repeat the previous all-Pokémon importer regressions.
+- Replaces Gold's full-screen battle PKMN menu with a Stadium-style four-row scrolling glass selector drawn directly over the live 3D battlefield.
+- Replaces Gold's full-screen Battle Pack with the same custom list language: four visible item rows, scrolling, quantities, pocket labels and disabled-in-battle marking.
+- Party-target items (heals, status cures, Revives, Ether/Elixer family) stay in the custom HUD. Single-move PP items get a matching four-move target selector.
+- Valid Pokémon switches still call Gold `BattleState:submit({kind="switch"})`; items still use Gold `useItem` / `applyPartyItem`, so battle rules, inventory consumption, catch logic and turn costs remain upstream-owned.
+- FIGHT and RUN keep the proven native A-dispatch path from v0.2.34.
+- Matching upstream snapshot: `bryanthaboi/gen1recomp` `dev` commit `f6a035947f7593baad6a9afca3b1157bfc76004a` (2026-08-13).
+
+# v0.2.34 — native battle-command dispatch for PACK / PKMN
+
+- Square/FIGHT, Circle/RUN, Cross/PACK and Triangle/PKMN now select Gold's native 2x2 battle-menu cursor slot and enqueue one synthetic Game Boy A edge instead of re-implementing command behavior inside the mod.
+- PACK and PKMN therefore execute through current Gen1Recomp `src/ui/gen2/BattleState.lua` itself, which owns `Screens.push(..., "Gen2PackMenu")` and `Screens.push(..., "Gen2PartyMenu")`.
+- The replacement controller HUD now returns `false` from `BattleControllerUI.owns()` during `phase == "submenu"`, so a pushed native Pack/Party screen cannot be covered by the scene HUD.
+- Matching upstream target checked against `bryanthaboi/gen1recomp` `dev` head `941181d31c817525e690bd771649be19f70f1319`; the only change since the previous checked head was launcher/save/mod-target work, not Gen-2 battle input/menu files.
+
+# v0.2.33 — Triangle/Y PKMN battle shortcut fix
+
+- Fixes Triangle / Xbox Y doing nothing on the live 3D battle command screen.
+- BattleControllerUI now resolves input against the exact `OverworldBattle.battle()` BattleState when `Game2.stack:top()` is not the battle screen, matching the reliable scene-HUD lookup introduced in v0.2.32.
+- Once Gold pushes the native party or item submenu (`phase == "submenu"`), the mod immediately releases input ownership so normal party/item D-pad, stick and A/B controls work unchanged.
+- Adds a retained `lastShortcutError` diagnostic instead of silently losing a shortcut exception inside `pcall`.
+- Targeted against `bryanthaboi/gen1recomp` `dev` at commit `9ceb1a8940a553cefdab5333ee817877bf1c1538` (2026-08-13).
+
+# v0.2.32 — HUD on the actual scene canvas + low ledges preserved
+
+- Moves the full controller-native battle HUD into the live `VoxelScene.render()` canvas immediately before `endScene()`. If the 3D battle world/Pokemon are visible, the replacement HP panels, messages, command diamond, and move panel now share that guaranteed visible canvas.
+- GoldComposeBridge detects that the scene already owns the HUD and no longer double-draws it; the older compositor/native UI paths remain only as fail-open fallbacks.
+- Keeps the face-button controls: Square/Xbox X FIGHT, Circle/B RUN, Cross/A PACK, Triangle/Y PKMN; left stick moves the Pokemon and right stick controls the live battle camera.
+- Raises the live battle obstruction cutout floor from 2.5 to 8.5 world units so low jump ledges, border fences, curbs and short retaining edges remain visible. Only taller blocking geometry is eligible for clearing.
+- Retains the v0.2.31 Lugia safeguards, Stadium rendering, battle effects, capture systems and open-world work.
+
+# v0.2.32
+
+- Restores the controller-layout battle command UI in the full live-3D battle replacement.
+- Resolves the HUD against the exact `OverworldBattle.battle()` BattleState that VoxelScene is rendering instead of relying only on `Game2.stack:top()`.
+- Makes the BATTLE COMMANDS panel larger and more obvious, with Square/Fight, Circle/Run, Cross/Pack and Triangle/PKMN laid out like the controller face.
+- Keeps the command panel visible across Gold's brief `resolving -> menu` fixed-step seam so it cannot blink/disappear while the battle is waiting for input. Inputs still activate only in the real `menu` phase.
+- PACK/PKMN and other pushed screens remain native and are not covered by the replacement HUD.
+- Retains v0.2.30 live VoxelScene tree/bush/wall obstruction clearing, direct Pokemon movement, right-stick battle camera, Lugia safeguards and Stadium battle work.
+
+# v0.2.29
+
+- Fixed battle input ownership at `src.core.Input`, where Gen1Recomp actually converts the analog left stick into GB D-pad directions. During normal live 3D battles the analog left stick is now swallowed from native menu input and remains available to direct Pokemon locomotion.
+- Controller face commands now intercept the physical SDL buttons before GamepadMap converts them into GB A/B: Square/Xbox X = FIGHT, Circle/B = RUN, Cross/A = PACK, Triangle/Y = PKMN. Matching releases are swallowed safely after phase changes.
+- Added frame-level physical face-button polling as a fallback for controller stacks/wrappers that miss `gamepadpressed`.
+- WASD is reserved for direct Pokemon locomotion during the live battle screen; arrow keys remain the PC controller-diamond command shortcuts.
+- Right-stick camera control is now polled inside `BattleCinematic.frame`, the exact camera producing the visible Gold live-battle shot, eliminating the previous unreachable `CamControl.tick` path.
+- Retains v0.2.28 battle occlusion dissolve, controller UI, trainer-battle support, 3D effects, direct Pokemon control and all Lugia body/root-motion safeguards.
+
+# v0.2.28
+
+- Added a smart battle-visibility dissolve: tall terrain fragments in either camera-to-Pokemon sight corridor, plus a softer combat bubble, are dither-discarded while the ground remains solid. This keeps encounter-site scenery without letting trees/walls/shrubs hide the fight.
+- Replaced the native four-command box in live 3D battle menu phase with a controller-diamond overlay and restores the 3D world underneath the old opaque command/text region before drawing it.
+- Controller main-menu shortcuts: Square/Xbox X = FIGHT, Circle/Xbox B = RUN, Cross/Xbox A = PACK, Triangle/Xbox Y = PKMN.
+- PC arrow-key shortcuts mirror the same diamond: Left = FIGHT, Right = RUN, Down = PACK, Up = PKMN.
+- Added WASD movement for the directly controlled Pokemon while preserving left-stick movement.
+- Fixed live-battle right-stick camera control: axes now feed `BattleCinematic.manualLook`, the camera that actually renders Gold live-world battles, instead of the legacy `BattleCam` state.
+- Square manual Stadium clip polling no longer steals the command menu or move list; those phases keep their UI/confirm ownership.
+- Gold remains authoritative for turns, move legality, HP, switching, items and outcomes.
+
+# v0.2.27
+
+- Added direct control of the player's active Stadium 2 Pokemon during Gold live-world battles.
+- Left stick moves the 3D Pokemon camera-relative inside a bounded battle arena.
+- PlayStation Square / Xbox X (SDL gamepad `x`) triggers real imported Stadium 2 skeletal attack performances. Repeated presses cycle safe non-idle clips for the current species.
+- The battle camera treats direct-control mode as player-active and follows the controlled Pokemon.
+- Direct movement is presentation-only: Gold remains authoritative for HP, turns, moves, switching, items, catches and battle outcomes.
+- Control waits until the player's 3D Pokemon has completed its entrance and is actually visible; trainer intro/tutorial/faint states are not hijacked.
+- Lugia retains the v0.2.22 untextured-body material fix and v0.2.26 attack-root pinning/safe-clip exclusions.
+
+# v0.2.26 — Lugia world-space attack root lock
+
+- Fixed Lugia still flying across the screen during Aeroblast even after excluding the two most extreme imported Stadium 2 clips.
+- The problem is stage/root motion rather than the now-correct Lugia mesh: Stadium authored the performance for a camera that follows Lugia, while the Gen1Recomp live battle camera is fixed in the overworld.
+- During Dex 249 attack states only, the runtime now pins Lugia's torso/root node (diagnostic bone[2], runtime bone #3) to the exact position that node occupies in the bind pose.
+- The correction translates the entire posed skeleton by one shared delta, so the imported Stadium clip still animates Lugia's rotations, wings, neck, tail, eyes, and local body motion; only bulk travel across the stage is removed.
+- Normal idle/entrance/hit/faint anchoring is unchanged, and no other species uses the new exact torso pin.
+- No DSM/cache format change and no Stadium 2 ROM re-import are required.
+- Retains v0.2.24's fail-open 3D attack-effect bridge, v0.2.23 trainer-battle support/Horde removal, and the v0.2.22 original Lugia body/material fix.
+
+# v0.2.25 — restore visible attacks + reliable Gold→Stadium move bridge
+
+- Fixed the v0.2.23 regression where Gold's native OBJ attack sprites could be suppressed even when the world-space 3D effect never became visible.
+- Gold move identifiers are now resolved through the live Gen-2 Battle object to the move definition's numeric `index` before selecting a Stadium 2 skeletal clip. Symbolic keys such as `FLAMETHROWER` no longer fall through the numeric selector.
+- Stadium 2 skeletal attacks use their own per-move token instead of depending on the lifetime/identity of Gold's `AnimRunner`, so a runner swap to the damage/after-animation cannot cancel the 3D Pokémon motion.
+- World-space 3D move effects are latched for a short presentation window independent of `AnimRunner` replacement. The adapter carries the already-resolved move definition rather than guessing how `game.data.moves` is keyed.
+- Gold's original OBJ/sprite move layer is now **fail-open**: it remains visible until the matching 3D effect has issued real world-space draw calls for two frames. If the 3D renderer is unavailable, late, or throws, Gold's original attack effect remains instead of producing a blank attack.
+- Retains v0.2.23 trainer-battle live 3D staging and Horde-code removal, plus the working v0.2.22 original Stadium 2 Lugia body/material fix.
+- No Stadium 2 ROM re-import is required.
 
 # v0.2.21
 

@@ -367,6 +367,115 @@ function StadiumMon:attack(moveIndex)
                       (aux and aux >= 0) and (aux + 1) or nil)
 end
 
+-- Stadium 2 packs already contain the Pokemon's real skeletal battle clips,
+-- but the original move->clip routing table is not mapped into the DSM yet.
+-- In those packs every legacy move slot therefore contains the same provisional
+-- animation 0.  Gold's native move event still gives us the real move id/type,
+-- so v0.2.23 chooses among the REAL imported non-idle clips by move family.
+-- This is deliberately runtime-only: no DSM/importer format changes, and Gen-1
+-- packs with a real per-move table keep their exact mapping above.
+local GEN2_FAMILY = {
+  NORMAL=1, FIGHTING=1, BUG=1, STEEL=1, ROCK=1, GROUND=1,
+  FLYING=2, DRAGON=2,
+  FIRE=3, WATER=3, ELECTRIC=3, ICE=3, GRASS=3,
+  PSYCHIC=4, GHOST=4, DARK=4, POISON=4,
+}
+
+local function normType(def)
+  local t = def and (def.type or def.moveType)
+  if type(t) == "table" then t = t.id or t.name end
+  return type(t) == "string" and string.upper(t):gsub("[^A-Z0-9]", "") or ""
+end
+
+local function provisionalMoveRouting(model)
+  local rows = model and model.moveAnim
+  if type(rows) ~= "table" or #rows == 0 then return true end
+  local first = rows[1]
+  for i = 2, math.min(#rows, StadiumPack.N_MOVES) do
+    if rows[i] ~= first then return false end
+  end
+  return true
+end
+
+-- Lugia's imported Stadium 2 clip bank contains two camera-stage performances
+-- that are valid in Stadium's own per-Pokemon shot but are NOT safe when the
+-- skeleton is replayed as a world-space actor.  The user's real 249.dsm was
+-- measured frame-by-frame after v0.2.24: clip 8 reaches ~2.79x the bind span
+-- and clip 10 ~3.20x (with >1 body-length of centre travel).  Clip 10 is what
+-- the provisional family router happened to choose for Aeroblast, which is why
+-- Lugia appeared to tear apart during its attack even though its idle model was
+-- finally correct.  Keep this exclusion Dex-249-only; no shared importer or
+-- renderer behavior changes.
+local LUGIA_UNSAFE_WORLD_CLIPS = { [8] = true, [10] = true }
+
+local function eligibleGen2Clips(model)
+  local out = {}
+  local anims = model and model.anims or {}
+  local species = tonumber(model and model.species)
+  -- Animation #1 is the provisional standby/bind-time clip on the current
+  -- Stadium 2 importer.  Attack selection never uses it.  Prefer finite clips
+  -- in a useful battle-performance duration range; if a species only has long
+  -- clips, keep those rather than dropping back to a flat/no-motion attack.
+  for i = 2, #anims do
+    local sec = tonumber(anims[i] and anims[i].seconds) or 0
+    local unsafe = species == 249 and LUGIA_UNSAFE_WORLD_CLIPS[i]
+    if not unsafe and sec > 0.20 and sec <= 4.75 then out[#out + 1] = i end
+  end
+  if #out == 0 then
+    for i = 2, #anims do
+      if not (species == 249 and LUGIA_UNSAFE_WORLD_CLIPS[i]) then
+        out[#out + 1] = i
+      end
+    end
+  end
+  return out
+end
+
+-- Manual 3D-battle attack button. Gold has not selected a move here, so
+-- cycle through the species' real imported Stadium 2 performance clips instead
+-- of pretending there is a move id. The same safety filter used by the move
+-- bridge applies, including Lugia's world-unsafe clip exclusions.
+function StadiumMon:manualAttackGen2()
+  local model = self.model
+  if not model or self.state == "faint" then return false end
+  local clips = eligibleGen2Clips(model)
+  if #clips == 0 then return self:request("attack") end
+  local cursor = (tonumber(self._manualAttackCursor) or 0) + 1
+  if cursor > #clips then cursor = 1 end
+  self._manualAttackCursor = cursor
+  return self:request("attack", clips[cursor], nil)
+end
+
+function StadiumMon:attackGen2(moveIndex, def)
+  local model = self.model
+  moveIndex = tonumber(moveIndex)
+  if not (model and moveIndex and moveIndex >= 1) then return false end
+
+  -- A future extractor that supplies real routing automatically wins.  This
+  -- also preserves exact Stadium-1 behavior for the shared Gen-1 move range.
+  if moveIndex <= StadiumPack.N_MOVES and not provisionalMoveRouting(model) then
+    local ok = self:attack(moveIndex)
+    if ok then return true end
+  end
+
+  local clips = eligibleGen2Clips(model)
+  if #clips == 0 then return self:request("attack") end
+
+  local family = GEN2_FAMILY[normType(def)] or 5
+  local power = tonumber(def and def.power) or 0
+  -- Status moves use a calmer bucket; damaging moves spread across the real
+  -- clip bank by family + move id so Fire Blast, Tackle, Aeroblast, etc. do
+  -- not all restart the exact same skeletal motion.
+  local seed
+  if power <= 0 then
+    seed = moveIndex * 3 + 17
+  else
+    seed = moveIndex * 7 + family * 11 + math.floor(power / 20)
+  end
+  local pick = clips[(seed % #clips) + 1]
+  return self:request("attack", pick, nil)
+end
+
 -- ------- per frame
 
 function StadiumMon:update(dt)
@@ -516,10 +625,22 @@ function StadiumMon:build()
   -- self.anim is nil while a species has nothing to play, and pose() reads
   -- that as "the bind pose", which is exactly what is wanted
   self.rig:pose(self.anim, self.time * StadiumMon.FPS, self.loop)
-  -- and then back onto the tile, because these animations were authored for
-  -- a camera that followed the Pokemon and this one does not move (see
-  -- StadiumRig.anchor)
-  self.rig:anchor(StadiumMon.TRAVEL, self.dt)
+  -- Stadium's performances were authored for a camera that follows the actor.
+  -- Most species only need the general excursion limiter.  Lugia is different:
+  -- its imported attack bank carries the whole torso through large stage arcs,
+  -- so even otherwise-valid clips can launch Dex 249 across this fixed battle
+  -- camera.  The uploaded geo diagnostic identifies bone #3 (1-based here;
+  -- diagnostic bone[2]) as the torso/root from which both wings, neck and tail
+  -- branch.  During ATTACKS only, keep that authored torso at its bind location
+  -- while preserving all of the clip's local rotations and child animation.
+  local pinned = false
+  if tonumber(self.species) == 249 and self.state == "attack"
+      and type(self.rig.pinBoneToBind) == "function" then
+    pinned = self.rig:pinBoneToBind(3) and true or false
+  end
+  if not pinned then
+    self.rig:anchor(StadiumMon.TRAVEL, self.dt)
+  end
   self.rig:skin(self.yaw or 0)
   -- no clock of its own: the texture animation rides the frame pose() just
   -- resolved, which is what keeps a blink inside its standby loop and a

@@ -222,6 +222,20 @@ CamControl.surveyAccum = 0
 function CamControl.tick(dt)
   if not battleLive() then return end
   local x, y = FirstPerson.stickX(), FirstPerson.stickY()
+  local dead = 0.10
+  x = math.abs(x or 0) > dead and x or 0
+  y = math.abs(y or 0) > dead and y or 0
+  if liveWorldBattle() then
+    -- The current Gold live battle is rendered by BattleCinematic, not the
+    -- legacy BattleCam orbit. v0.2.27 was still feeding the right stick into
+    -- BattleCam, so the values changed but the visible camera did not. Route
+    -- the same right-stick axes to the camera that actually owns this frame.
+    dt = math.max(0, math.min(0.05, tonumber(dt) or 0))
+    if x ~= 0 or y ~= 0 then
+      BattleCinematic.manualLook(x * dt * 2.9, -y * dt * 2.25)
+    end
+    return
+  end
   if x ~= 0 then BattleCam.stickOrbit(x, dt) end
   if y ~= 0 then BattleCam.stickPitch(-y, dt) end
 end

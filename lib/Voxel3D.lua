@@ -73,6 +73,7 @@ Voxel3D.FACE_SHADE = {
 local SHADER = [[
   varying float vShade;
   varying vec3 vSun;          // this fragment's place in the sun's view
+  varying vec3 vWorld;        // uncurved world position; battle visibility uses it
 #ifdef VOXEL_GRID
   // model space, one unit per voxel -- see VoxelGrid. Precision matters
   // here in a way it does not for a colour: the seam is the FRACTIONAL
@@ -98,6 +99,7 @@ local SHADER = [[
     vGrid = vertex_position.xyz;
 #endif
     vec4 w = model * vertex_position;
+    vWorld = w.xyz;
     // The shadow lookup runs off `sunModel`, not `model`. For terrain the
     // two are the same matrix, but a character is drawn as a slab LEANING
     // back by the camera's pitch -- a trick played on the viewer, which
@@ -137,6 +139,21 @@ local SHADER = [[
   uniform float sunDark;      // how far into black a shadow goes; 0 = off
   uniform float sunBias;
   uniform vec2 sunTexel;
+
+  // LIVE BATTLE VISIBILITY. Terrain is one combined depth-tested mesh, so
+  // individual trees/walls/bushes cannot be alpha-sorted independently. During
+  // a live 3D battle, tall fragments inside the combat clearing or either
+  // camera-to-combatant sight corridor are discarded completely. Ground stays
+  // opaque. This is intentionally stronger than the old dither dissolve: a few
+  // surviving depth-writing fragments were still enough to hide a Pokemon.
+  uniform float battleOccOn;
+  uniform vec3 battleOccEye;
+  uniform vec2 battleOccA;
+  uniform vec2 battleOccB;
+  uniform vec2 battleOccMid;
+  uniform float battleOccGround;
+  uniform float battleOccRadius;
+  uniform float battleOccBubble;
 
   // the two-channel pack ShadowMap writes: high byte, then low
   float sunDepth(vec2 uv) {
@@ -213,12 +230,42 @@ local SHADER = [[
   uniform float glassGlint;   // and its strength: 0 while standing still
   uniform float glassOn;      // 0 for sprite-sheet draws (see Voxel3D.glass)
 
+  float segmentDistance2D(vec2 p, vec2 a, vec2 b) {
+    vec2 ab = b - a;
+    float den = max(dot(ab, ab), 0.0001);
+    float t = clamp(dot(p - a, ab) / den, 0.0, 1.0);
+    return length(p - (a + ab * t));
+  }
+
+  float battleDither(vec3 world, vec2 sc) {
+    // Stable coarse screen/world hash: reads as a transparent dissolve rather
+    // than a flickering checkerboard as the camera moves around the fight.
+    vec2 q = floor(world.xz * 0.5) + floor(sc * 0.25) * vec2(0.37, 0.61);
+    return fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
   vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     vec4 p = Texel(tex, tc);
     // sprite sheets key GB OBJ color 0 to alpha 0; discarding rather than
     // blending keeps those texels out of the depth buffer, so a model never
     // carves a transparent hole out of whatever stands behind it
     if (p.a < 0.5) discard;
+
+    if (battleOccOn > 0.5 && vWorld.y > battleOccGround + 8.5) {
+      vec2 wp = vWorld.xz;
+      vec2 ep = battleOccEye.xz;
+      float sight = min(segmentDistance2D(wp, ep, battleOccA),
+                        segmentDistance2D(wp, ep, battleOccB));
+      float corridor = 1.0 - smoothstep(8.0, max(10.0, battleOccRadius), sight);
+      float bubbleDist = length(wp - battleOccMid);
+      float bubble = 1.0 - smoothstep(battleOccBubble * 0.42,
+                                     max(1.0, battleOccBubble), bubbleDist);
+      // A hard visibility cutout is correct here because this shader is enabled
+      // only for world terrain / grass passes. Pokemon, effects and characters
+      // are drawn after it with battleOccOn reset to zero.
+      if (corridor > 0.04 || bubble > 0.34) discard;
+    }
+
     // the hour's tint multiplies like the sun terms do: it is LIGHT, the
     // same warm or moonlit cast on every surface, not a palette swap
     vec3 rgb = p.rgb * vShade * sunlight(vSun) * dayTint;
@@ -945,6 +992,17 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   pcall(sh.send, sh, "glassGlint", Voxel3D.glassGlint or 0)
   -- on until a sprite pass says otherwise, reset per frame like `ghost`
   pcall(sh.send, sh, "glassOn", 1)
+  -- Battle obstruction dissolve is opt-in per terrain draw. Resetting it at
+  -- scene start prevents a failed/early battle frame from leaking visibility
+  -- rules into Pokemon cards, attack FX, or the next free-roam frame.
+  pcall(sh.send, sh, "battleOccOn", 0)
+  pcall(sh.send, sh, "battleOccEye", Voxel3D.eye or { 0, 0, 0 })
+  pcall(sh.send, sh, "battleOccA", { 0, 0 })
+  pcall(sh.send, sh, "battleOccB", { 0, 0 })
+  pcall(sh.send, sh, "battleOccMid", { 0, 0 })
+  pcall(sh.send, sh, "battleOccGround", 0)
+  pcall(sh.send, sh, "battleOccRadius", 26)
+  pcall(sh.send, sh, "battleOccBubble", 46)
   -- the curved world bends about the camera's focus, so the horizon keeps
   -- a fixed distance ahead of the player rather than sitting on the map.
   -- A placed camera may decline it outright (Voxel3D.camera.curve = 0).
@@ -1310,6 +1368,40 @@ function Voxel3D.endShadows()
   if not active then return end
   pcall(love.graphics.setDepthMode, "lequal", true)
   love.graphics.setColor(1, 1, 1, 1)
+end
+
+-- Smart live-battle visibility cutout. Call with the current arena immediately
+-- around terrain/grass draws, then call with nil before Pokemon/FX. Because it
+-- works in the ordinary depth shader it needs no per-tree mesh split and stays
+-- cheap on large routes. Ground and low jump-ledges/border fences remain opaque while tall scenery in the combat
+-- clearing and camera sight corridors stops writing depth altogether.
+function Voxel3D.battleOcclusion(arena, groundY)
+  if not (active and activeShader) then return false end
+  local sh = activeShader
+  if not arena then
+    pcall(sh.send, sh, "battleOccOn", 0)
+    return true
+  end
+  local a, b = arena.player, arena.enemy
+  local ax, az = type(a) == "table" and tonumber(a[1]), type(a) == "table" and tonumber(a[2])
+  local bx, bz = type(b) == "table" and tonumber(b[1]), type(b) == "table" and tonumber(b[2])
+  if not (ax and az and bx and bz) then
+    pcall(sh.send, sh, "battleOccOn", 0)
+    return false
+  end
+  local mid = arena.mid
+  local mx = type(mid) == "table" and tonumber(mid[1]) or ((ax + bx) * 0.5)
+  local mz = type(mid) == "table" and tonumber(mid[2]) or ((az + bz) * 0.5)
+  local eye = Voxel3D.eye or { mx, (tonumber(groundY) or 0) + 48, mz + 96 }
+  pcall(sh.send, sh, "battleOccEye", eye)
+  pcall(sh.send, sh, "battleOccA", { ax, az })
+  pcall(sh.send, sh, "battleOccB", { bx, bz })
+  pcall(sh.send, sh, "battleOccMid", { mx, mz })
+  pcall(sh.send, sh, "battleOccGround", tonumber(groundY) or 0)
+  pcall(sh.send, sh, "battleOccRadius", 26)
+  pcall(sh.send, sh, "battleOccBubble", 46)
+  pcall(sh.send, sh, "battleOccOn", 1)
+  return true
 end
 
 -- Draw one mesh with `model` (a Mat4) applied. Texture may be nil to keep
