@@ -1,3 +1,228 @@
+## v0.2.81 Gold party-leader follower binding
+
+- Trainer `follow` mode now treats the saved party slot as authoritative. Slot 1 remains the default, so Gold PARTY -> SWITCH naturally replaces the follower when the top-of-party Pokemon changes.
+- `ControlEngine:_syncFollowLeaderBinding()` runs before player/trailer visual sync and rewrites the persistent follower fingerprint to the Pokemon currently occupying that slot. This fixes the old behavior where `Selection:getActiveFollowerMon()` deliberately chased the starter fingerprint to its new party position.
+- Trailer composition also compares `spec.mon ~= trailer.pokepcMon`, not species alone, so same-species and shiny/non-shiny swaps trigger a correct rebind.
+- Explicit FOLLOW selections still bind another party slot; the mod does not reorder the party itself.
+- No Stadium DSM7 cache rebuild is required.
+
+## v0.2.80 Gen-2 full-color follower recovery
+
+- The mod is Gen-2-only, so its Pokemon follower/wild sprite providers no longer derive Gen-1 luminance sheets based on `PaletteFX.mode`. The original RGBA follower sheets are always served as `trueColor=true`.
+- `lib/follower/control_engine.lua` uses colored normal/shiny submerged sheets directly during water-surface refreshes; entering/leaving water can no longer swap a colored follower for a grayscale one.
+- Party follower icons use the resolved sprite definition's `trueColor` contract instead of `paletteFxRedpp()`.
+- This release changes no DSM format and requires no Stadium 2 cache rebuild.
+
+## v0.2.79 DSM7 render-tile origin/window parity
+
+The RDP texture path is tile-relative: after the tile shift, SL/TL from `G_SETTILESIZE` are subtracted before clamp/wrap/mirror. SH/TH are the inclusive clamp bounds, and mask zero forces clamping even if MIRROR/WRAP bits are present. DSM6 recorded `G_SETTILE` but discarded `G_SETTILESIZE`, so it could not reproduce this after extraction. DSM7 scans both commands, bakes the origin into packed UVs, resolves the effective sampling span, and crops each decoded texture variant to that span so LOVE's native clamp/repeat/mirrored-repeat addresses the same texel range.
+
+## v0.2.78 DSM6 material fidelity + National-number Pokédex
+
+The Stadium fragment parser previously rebuilt textured primitives from texture-table pixels plus a CI4 palette selector, but discarded the render tile's S/T address fields and treated Vtx bytes 12..14 as normals unconditionally. DSM6 persists the per-primitive address/lighting/tint result. Material DL scanning is recursive with a hard budget, render-tile shifts/masks are folded into packed UVs, and LOVE's sampler is switched per primitive to repeat / mirrored-repeat / clamp. A negative Stadium texture index now resolves to a neutral 1x1 material for every species, with DSM6 tint supplying unlit/material colour.
+
+The cache marker now accepts DSM6 rev1 only. This is deliberate: DSM4/DSM5 do not contain the missing material bits, so runtime heuristics cannot reconstruct them safely.
+
+For the modern Pokédex, `GoldSubmenuBattleStyle` wraps the live `PokedexMenu:order()` only while custom UI is enabled and returns a stable sort of `dex.entries[*].dex`. This changes the backing list, not just rendering, so `current()`, cursor movement and 3D preview ownership all use the same National-number row.
+
+## v0.2.77 independent player/Pokémon model ownership
+
+`GoldVoxelBridge` now exports two model gates: `V.modelsEnabled()` remains the Stadium Pokémon gate backed by the existing `stadium3dSprites` option, while `V.playerModelsEnabled()` is backed by the new `player3dModel` option. `OverworldStadium` uses the player gate only for the `red_3d_player` renderer and its mesh-shadow/card-artifact suppression; Pokémon preparation/draw/cast continues to use the Pokémon gate. This means disabling the player model cannot release or flatten Stadium Pokémon, and disabling Stadium Pokémon cannot disable the selected Character Selector skin.
+
+## v0.2.76 Stadium dialogue + extended OPEN WORLD zoom
+
+- `TextBoxBattleStyle` patches presentation only. `src.render.TextBox:update`, substitution, pagination, CONT/page waits, auto/stay semantics and callbacks remain engine-owned. The custom draw reconstructs the currently typed visible prefix from `self.pages` + `Font.split()` and renders it in window space after cancelling Gold's centered 160x144 UI transform.
+- `ChoiceBox` receives the same presentation-only treatment; its native up/down/A/B and 15-frame answer hold remain unchanged.
+- `DioramaZoom` now reads `worldZoomRange`: STANDARD=2.20, FAR=4.00, WORLD=8.00, EXTREME=12.00. The initial value remains 1.0, so existing camera startup framing is unchanged.
+- `OpenWorldZoom` wraps the official `zoom.range` hook. With OPEN WORLD active and a non-STANDARD range, its lower offset becomes `-S`, allowing `Zoom.scale()` to reach the engine's existing 0.25 hard floor. Integer stepping/persistence remain engine-owned.
+- Current engine check: `dev` head `7804ef97938c25da4cf86257a161b9f5f32e2a3d`; the shared TextBox and Zoom seams used here are present on that snapshot.
+
+## v0.2.75 battle overlay geometry + posed-model camera fit
+
+- `BattleControllerUI.drawCommandDiamond` now reserves independent vertical lanes. The bottom PACK/DOWN command ends well above the footer, and icon/font size is bounded by panel height so wide/short windows cannot force command text into the stick hint.
+- `StadiumRig:posedBounds()` exposes the already-calculated current pose AABB without duplicating skinning internals.
+- `PartyModelPreview` builds the current pose before camera selection, transforms its live bounds into preview-world scale, centers the camera on the posed mesh, and computes distance from both vertical FOV and `tan(horizontalFov/2) = aspect * tan(verticalFov/2)`. Model depth is included in the eye distance.
+- The Pokédex caller uses posed-bounds horizontal/vertical padding rather than the old bind-height `focusY` workaround.
+
+## v0.2.74 Gold live-battle command startup
+
+- v0.2.74 follower seams: connected outdoor Gold maps now apply the preserved Wilds trailer handoff synchronously inside `map.entered`, after destination people lists are rebuilt but before another render can occur. This removes the one-frame follower pop without recreating the trailer.
+
+- Current Gold `BattleState:update` holds `phase = intro/resolving` text at `messageTimer > 0` until A/B; it then changes to `phase = menu` during a fixed step before the next render. The custom direct controller wrapper previously treated that logical menu state as immediately clickable.
+- `BattleControllerUI` now separates **visual readiness** from **input arming**. A normal command menu must complete one `drawCommandDiamond` pass before face-button / arrow / D-pad shortcuts are accepted. Warmup edges are swallowed instead of leaking into Gold's hidden native menu.
+- Ordinary custom-UI battle intro prompts are auto-confirmed through Gold's own input queue after a short hold. This is restricted to `phase == intro`, excluding tutorial/contest and all later decision/message phases.
+- A mapped face button that is forwarded during intro is marked held in the polling fallback until release, preventing the same physical A/Cross edge from being reinterpreted as PACK when the menu becomes ready.
+
+## v0.2.73 Gold follower ownership correction
+
+- Reverts v0.2.72's Gold-only `partyTrailMons()` reservation: Wilds again supplies follower slot #1 on Gold and owns its interpolation/trail state.
+- Gold's native `src.world.gen2.Follower` remains a fallback only. When embedded Wilds is present, native `pikachuFollower` entities are purged while `pokepcTrailer` entities are explicitly preserved.
+- This matches the shared Wilds control engine's existing `shouldSpawnStockFollower` behavior, which already suppresses the stock/native follower in ordinary FOLLOW mode when Wilds trailers are active.
+- `LEAD PARTY FOLLOWER` now gates the Wilds trail list itself so OFF actually removes followers.
+
+## v0.2.72 Gold follower transition ownership
+
+- Gold's native `src.world.gen2.Follower` owns primary follower slot #1.
+- Embedded Wilds `partyTrailMons()` reserves that slot on Gold and only creates trailers for configured followers #2+.
+- Extra trailers anchor behind the native Gold follower when present.
+- `GoldPartyFollower` de-duplicates orphan native followers on `map.entered` and keeps the current/newest engine entity.
+- Native Gold follower species follows the embedded Wilds active FOLLOW selection when available, with party slot #1 as early-boot fallback.
+
+## v0.2.71 Wilds sandbox recovery
+- The current mod sandbox throws on `love.filesystem`. Wilds runtime-sheet probes were still dereferencing it during `registerContent()`, aborting the embedded Wilds factory before any map could initialize.
+- Wilds asset existence/read paths now use `EngineCompat` (`mod:read` / `mod:info`, with engine-owned persistence FS fallback). Raw `io` fallbacks were removed from the active runtime-sheet/water paths.
+- This is additive to v0.2.70: voxel terrain, Stadium models, Character Selector coexistence and compose/drawWorld compatibility remain intact.
+
+## v0.2.70 current-sandbox renderer recovery
+- Current Gen1Recomp blocks `love.system` inside mod-owned code. GoldVoxelBridge and GoldComposeBridge now use engine `src.core.Platform` first and guard the complete legacy `love.system` expression inside `pcall`.
+- GoldPipelineBridge is active again on current engines through `render_pipelines.drawWorld`.
+- If `red_3d_player` / Character Selector is installed, the Stadium pipeline deliberately remains OFF so Gen1Recomp does not zero the selector's `voxel` pipeline. The compose bridge remains the world owner and OverworldStadium still consumes `red3dPlayerRenderer:drawVoxel` for the selected skin.
+
+## v0.2.69 desktop compose/canvas recovery
+
+- Desktop uses the confirmed v0.2.45 `render.compose` ownership path again; `GoldPipelineBridge` is not registered.
+- `Voxel3D.canvasRestorePolicy()`, `ShadowMap.canvasRestorePolicy()`, and `AntiAlias.canvasRestorePolicy()` report `physical-screen` on Windows/Linux/macOS/unknown desktop targets and `nested-caller` on Android/iOS.
+- `Voxel3D` begin/end cleanup, the `ShadowMap` prepass, and `AntiAlias.resolve()` all follow that same platform policy. This preserves Android's v0.2.58 whole-frame fix without forcing desktop back into an intermediate canvas that can be overwritten by Gold's native 2D present. Because `red_3d_player` is delegated from inside the voxel scene, the same fix also restores the Skin Selector's 3D character path when the voxel world is active.
+- The v0.2.68 pipeline file remains in source for reference but is inert in this release.
+
+## v0.2.68 current Gold world-pipeline compatibility
+
+- Current desktop Gen1Recomp now consumes `render_pipelines.drawWorld` on Gold. The old Gen-2 port assumption that Gold had to be replaced only at `render.compose` is no longer sufficient.
+- `lib/GoldPipelineBridge.lua` registers `stadium2_gold_voxel` with `priority = 1100`, an OFF/ON ladder, a cheap option gate, and a `drawWorld(ctx)` callback that hands `ctx.state` (the live Gold World) to `GoldVoxelBridge.renderFrame`.
+- `game.ready`, `map.entered`, and this mod's voxel/Open World option changes synchronize the engine pipeline level. The mod option remains authoritative; no user hotkey is required to activate the engine world pass.
+- `GoldComposeBridge` remains installed. A one-frame handoff bit from `GoldPipelineBridge` tells it when current Gold already rendered voxels, preventing duplicate `VoxelScene` work. If an older host never calls `drawWorld`, the bit is never set and the original compose path runs unchanged.
+- The drawWorld canvas uses `ctx.width`/`ctx.height`, matching the engine pipeline compositor. Legacy compose continues to use its existing physical/logical scaling path.
+
+## v0.2.66
+
+- Restored the known-working v0.2.45 live `ChunkMesher` implementation for current/neighbor voxel terrain.
+- Removed `VoxelDiskCache` from the live mesher dependency path; persistent disk-cache I/O remains disabled.
+- Keeps v0.2.65 Stadium ROM import compatibility and all later UI/follower/settings/Open World features.
+
+## v0.2.66 Stadium ROM import compatibility notes
+
+- Current Gen1Recomp mod sandboxes no longer expose raw `love.system`, `love.filesystem`, or `io` to mod chunks. v0.2.64 still dereferenced those APIs when the Stadium ROM action was pressed, which explains a picker-time crash even after boot recovery succeeded.
+- `lib/EngineCompat.lua` now resolves engine-owned `src.core.Platform`, `src.core.SaveData`, `src.core.HostShell`, and `src.import.RomImporter` services behind guarded calls.
+- Android/iOS uses the engine RomImporter mobile ROM-picker branch so the native bridge executes in engine scope. `picked_rom.gb` is treated only as a temporary transport filename; the mod validates N64 magic before calling `StadiumInstall.beginFrom`.
+- Desktop dialog output is staged into the save directory through HostShell and then read through `SaveData.persistenceFs`; no raw mod `io.open` remains in the Stadium import path.
+- StadiumInstall, StadiumPack, and Lugia diagnostic output use the same engine persistence filesystem.
+
+## v0.2.64 recovery notes
+
+- Regression boundary confirmed by device testing: v0.2.45 boots while later builds crash at Play on the same install.
+- Startup now guards all optional post-v0.2.45 presentation/settings installers.
+- `ModSettingsPersistence` no longer overrides `ManagerState:persistOptions`, rebinds `game.options`, or calls `Game2:persistOptions`; it persists only this mod's changed key.
+- `AndroidFullFrameFlip` does not patch `Game2:draw` unless the engine reports Android.
+- Persistent `VoxelDiskCache` I/O is recovery-disabled; in-memory meshing/cache remains active.
+
+## v0.2.62 runtime notes
+- `PartyModelPreview` builds/skinned the current Stadium pose before selecting the preview camera, scans the posed vertex rows through the actor model matrix, and computes a camera distance from both horizontal and vertical FOV.
+- If posed bounds cannot be measured, the previous height/radius estimate remains as a safe fallback.
+- UI panel dimensions are unchanged in this release; the fix is entirely the internal model-view camera.
+
+## v0.2.61 runtime notes
+- Gen2 `src.world.gen2.Follower` still owns movement/trailing. The mod now changes only that NPC's local `spriteDef` after spawn, keyed by the live party lead's National Dex number; the global `SPRITE_PIKACHU` placeholder remains untouched.
+- Pokédex viewer geometry is UI-only; preview camera/model scale is unchanged from v0.2.59.
+- Categorized settings keep ManagerState as the value/persistence owner and only restore root cursor/scroll state on category return.
+
+## v0.2.60 runtime notes
+
+- `customUI=false` bypasses PauseMenuBattleStyle, GoldSubmenuBattleStyle, ModMenuBattleStyle, categorized settings presentation and BattleControllerUI ownership.
+- GoldComposeBridge ignores pause-backdrop flags while native UI is selected so original opaque/full-screen pages behave normally.
+- Pokédex preview panel height is increased without widening the panel or reducing the v0.2.59 model scale.
+
+## v0.2.59 runtime notes
+- Stadium UI previews retain high-resolution overscan but use tighter camera distance and a higher focus target. This specifically fixes the v0.2.58 tradeoff where clipping was reduced by making the Pokémon too small.
+- No UI panel dimensions changed.
+- v0.2.58 cache safety and Android flip rendering remain unchanged.
+
+## v0.2.58 runtime notes
+- Current-map correctness now wins over persistent-cache speed: only non-urgent/far FULL maps may be restored from disk. If a disk-restored far map becomes urgent/current, its terrain/water mesh is released and rebuilt before becoming authoritative.
+- Offscreen render passes must restore their caller canvas. This is required by Android whole-frame rotation and also makes Voxel3D/ShadowMap/AA composable with future final-frame effects.
+- PartyModelPreview's fifth argument is an optional framing table (`renderScale`, `heightExtent`, `radiusExtent`, `cameraMargin`, `focusY`, `fovDeg`). Existing four-argument callers continue to use safer defaults.
+
+## v0.2.55 — Persistent Cache / Settings / Pokédex Preview
+- `lib/VoxelDiskCache.lua` persists the unindexed six-float vertex stream produced by ChunkMesher's FFI sink for FULL terrain + water meshes. Cache signatures include map body tiles, dimensions/tileset identity and canonicalized seam masks; cached geometry is uploaded directly to LOVE meshes before auxiliary scenery warms.
+- `lib/ModSettingsPersistence.lua` patches the Gen2 ManagerState persistence seam to call `Game2:persistOptions()` after ManagerState updates `save.options.modOptions` / `loader.modOptions`.
+- `GoldSubmenuBattleStyle` reuses `PartyModelPreview` for POKéDEX list/entry model showcases and releases the preview actor on PokedexMenu exit.
+
+## v0.2.54 — Native Tilt + Live Pause Backdrops
+Gold/Recomp's built-in OPTIONS `TILT` setting now directly changes the voxel diorama camera pitch; the separate mod DIORAMA TILT row is removed. Pause-launched OPTIONS, POKéDEX, POKéMON, PACK, POKéGEAR, AJ/Trainer Card and SAVE keep the live voxel overworld visible behind their custom glass UI, matching MOD SETTINGS.
+
+## v0.2.52 pause settings shortcut
+- Uses the official `ui.start_menu.items` hook; no engine StartMenu item table is replaced.
+- Injects after the native `option` row, then pushes `ManagerState`, selects this mod by id, and calls its native `openOptions` method.
+- Clears ManagerState's intermediate back stack so B returns to START directly.
+
+## v0.2.51
+- Added **3D POKéMON / SPRITES** in Mod Options.
+- ON (default): current Stadium/3D model presentation.
+- OFF: keeps the voxel renderer, OPEN WORLD, 3D terrain, trees, buildings, grass, props, weather and cameras, but restores Gold-style 2D sprite/card characters and Pokemon.
+- OFF also disables Stadium model previews in the custom party/battle PKMN menus and releases live-battle Stadium combatants so Gold's normal 2D battle pics can render over the voxel battlefield.
+- The lead party follower and visible Wilds Pokemon remain functional using their 2D sprite providers.
+
+## v0.2.50
+- Live battle trainer grounding fix: the battle-only trainer stand can still move horizontally for composition, but its vertical height is now anchored to the real player/encounter ground instead of whatever raised tree/cliff voxel happens to sit under the displaced stand point.
+- Clears stale step/ledge lift and disables the free-roam visual walking/bobbing bridge while battle mode owns the trainer pose, preventing the trainer from drifting or floating above the ground during camera movement.
+- OPEN WORLD full-3D rendering and v0.2.49 tree void filling are otherwise unchanged.
+
+## v0.2.49
+- OPEN WORLD tree void-fill refinement: remaining stitched white gaps are now filled by side-aware edge tree sampling, reducing missed holes and making the synthetic forest apron follow the nearby map edge more closely.
+- Keeps the open-world + voxel/3D combination intact; this update only refines how remaining outdoor void patches are forest-filled.
+
+v0.2.48 note: OPEN WORLD now backfills remaining outdoor stitched voids with matching tree/forest filler instead of leaving white rectangular holes.
+
+
+## v0.2.47 OPEN WORLD 3D integration
+
+- OPEN WORLD now implies an active Gold voxel provider; it cannot silently become the engine's flat survey renderer.
+- Open-world neighbours use full ChunkMesher meshes with per-map cardinal seam masks. The outside ring/apron remains on boundary maps, closing the visible world perimeter at very large zoom.
+- VoxelScene records a per-frame ready-neighbour set and gates neighbour terrain auxiliaries (figures/grass/flowers/shadows) to it. This preserves the current/ready 3D world while farther meshes build.
+- TerrainAtlas calls are guarded per map and fall back to the atlas attached by GoldVoxelBridge, preventing a single distant atlas failure from aborting the composed voxel frame.
+- OFF retains the original body-only direct-neighbour streaming behavior.
+
+## v0.2.46 — OPEN WORLD now extends, never replaces, the 3D scene
+
+The v0.2.45 graph refactor accidentally deleted `neighborUrgent()` while `adaptedNeighbors()` still invoked it for every depth-1 connected map. That error occurred while constructing the Gold voxel state, so `GoldComposeBridge` correctly failed open to the already-rendered flat Gold frame. The visible symptom was severe: the new map-residency work appeared present, but all of this mod's VoxelScene-only presentation — voxel terrain, 3D scenery/grass and Stadium-model entities — vanished.
+
+v0.2.46 restores the helper and adds a regression test that reaches the actual `adaptedNeighbors()` path rather than testing the graph math in isolation. OPEN WORLD is now treated strictly as a residency-set choice: `makeState()` always carries the same current map, merged Gold entities/visible Wilds Pokemon, ghosts and camera state; ON only expands `state.neighbors` to the connected graph. Consequently every existing VoxelScene pass (terrain/structures, water, figures, actors/Stadium replacements, grass and flowers, shadows) keeps executing.
+
+The option transition is also explicit. `mod.options_changed` invalidates `neighborMapCache` and `openWorldGraphCache` immediately, while the render frame independently re-reads `mod.options:get("openWorld")`. On the first OFF frame, VoxelScene's `open|...` -> `stream|...` live-key transition calls `ChunkMesher.setLive(..., true)`, dropping the far meshes instead of retaining the previous open-world generation.
+
+## v0.2.45 — optional full connected-map OPEN WORLD
+
+`GoldVoxelBridge` now has two residency modes selected by the `openWorld` mod option. The default streaming path is unchanged: adapt the current map's direct cardinal connections, request those neighbour body meshes, and let `VoxelScene.prefetch` / `ChunkMesher.setLive` bound residency to the current neighbourhood.
+
+With OPEN WORLD enabled, the bridge breadth-first walks `map.def.connections` through `world.maps`. Connection offsets are accumulated from each source map so every reachable connected map is expressed in current-map coordinates. Root direct neighbours still prefer Gold's own `world.neighbors` offsets; deeper maps use the same `offset * 32` / source-width / destination-width placement math as the proven direct adapter. The graph excludes warp-only destinations.
+
+The full graph is passed to `VoxelScene` as render neighbours and therefore joins the live mesh/animated-atlas set. Far maps request body-only meshes as normal-priority cooperative jobs; only first-ring destinations near an approached edge become urgent. Current-map border masks are explicitly restricted to `depth <= 1`, and `V.goldNeighbors` remains first-ring-only for third-person camera collision, avoiding world-size scans in those hot paths.
+
+Switching OPEN WORLD off clears the adapted-map graph cache. The smaller `VoxelScene` live key makes `ChunkMesher.setLive` cancel/release far jobs/meshes and `TerrainAtlas.setLive` release far per-map animated atlases. If graph traversal itself fails, the bridge logs it and falls back to direct-neighbour streaming instead of disabling the voxel renderer.
+
+## v0.2.44 — BATTLE COMMANDS is a native/custom UI switch
+
+`BattleControllerUI.owns()` and its input-ownership gate now both return false when the mod option `battleCommands` is OFF. That is intentionally broader than v0.2.43: the scene renderer no longer bakes the replacement HUD into the 3D battle shot, controller/keyboard events are no longer intercepted by the custom command layer, and `GoldComposeBridge` therefore takes its existing fail-open/native path and composites Gold's own Gen-2 battle UI. Turning the option back ON restores the custom Stadium battle presentation without changing battle rules.
+
+## v0.2.38 — actual Gold START menu + exact custom battle-selector styling
+
+## v0.2.40 Mod Manager / third-party pause-menu scope
+
+- `lib/ModMenuBattleStyle.lua` owns the standard Mod Manager presentation for every mod, including per-mod `options_schema` pages.
+- A Mod Manager instance created while Gold's START menu is on top becomes transparent so the voxel world remains behind the glass submenu; managers opened elsewhere retain an opaque dark surround.
+- The `screen.pushed` listener only replaces drawing for recognizable list-like third-party states in the pause chain. It does not replace their update methods or guess at bespoke custom renderers.
+- Built-in Gold pause screens remain owned by `GoldSubmenuBattleStyle.lua`; the bridge detects those tags and does not double-wrap them.
+
+
+## v0.2.39 pause/submenu presentation scope
+
+The custom START skin now shows the normal full pause list in one tall panel. `GoldSubmenuBattleStyle` tags submenu instances only when their constructor is reached while `src.ui.gen2.StartMenu` is the current stack top. Tagged built-in screens become transparent presentation overlays and receive custom renderers; their original update/action methods are untouched. This prevents field/battle/script users of the same Gen-2 menu classes from being globally reskinned. Pokedex graphics-heavy AREA/search utility views intentionally retain their native renderer rather than discarding gameplay information. Externally injected pause rows remain owned by their injecting mod.
+
+v0.2.37 patched the wrong class (`src.ui.StartMenu`, the Gen-1 path). Gold's visible gameplay menu is `src.ui.gen2.StartMenu`; its rows include PACK and PokéGEAR and every row carries the two-line MENU ACCOUNT description seen in the Gold UI. v0.2.38 patches `src.ui.gen2.StartMenu.draw` directly and leaves `update`, `choose`, `close`, `Chrome.List`, unlock rules and `ui.start_menu.items` hook results untouched.
+
+The renderer intentionally mirrors `BattleControllerUI`'s custom PACK/PKMN selector values rather than merely using a vaguely modern theme: panel fill `0.018, 0.026, 0.045`, 0.82 selector alpha, 0.20 white border, the same 42%-width right-side selector geometry, four visible rows, 0.07/0.17 row fills and 0.72 selected outline. The selected MENU ACCOUNT description is drawn as the same left-side battle-message panel language. Quit YES/NO is also custom-rendered.
+
+`GoldComposeBridge` redraws Gold's visible stack after painting the voxel world. The pause renderer calls `love.graphics.origin()` inside that draw, so on the voxel compose path it escapes the centered 160x144 transform and draws at the same whole-window resolution as the custom battle HUD. A small-target scale fallback keeps the renderer usable on direct native-canvas paths. Any rendering error calls Gold's original `StartMenu:draw()` so the menu cannot become invisible or unusable.
+
 ## v0.2.35 — custom in-battle PKMN / PACK overlays
 
 Normal live 3D battles no longer push `Gen2PartyMenu` or `Gen2PackMenu` for the two face-button commands. `BattleControllerUI` holds a lightweight selector state while the underlying Gold `BattleState` remains in `phase == "menu"`, consumes only selector D-pad/A/B events, and draws four Stadium-style rows over the existing world. A valid switch is submitted through Gold's battle action API. Battle items call Gold's `useItem`; party-target item effects call Gold's `applyPartyItem`, with a custom party target and custom move target for single-slot PP items. Tutorial/contest and non-normal submenu flows remain native.
@@ -372,3 +597,7 @@ For a live overworld frame (`ctx.generation == 2` and `ctx.worldActive == true`)
 ## v0.2.21 - Dex 249 diagnostic isolation
 
 The Lugia investigation is now completely side-band. `lib/LugiaGeoDump.lua` reparses only the original Dex-249 FRAGMENT for logging and never feeds values back to `StadiumFragment`, `StadiumBuild.pack`, `StadiumRig`, or `StadiumPack`. This is specifically designed to prevent another all-Pokemon regression while capturing the static transform and display-list nodes the simplified extractor currently discards.
+
+
+### v0.2.67 desktop voxel recovery
+A fresh Gold options block defaults native `TILT` to OFF/0. While `3D VOXEL WORLD` is enabled, that OFF value now selects the voxel renderer's normal 35-degree diorama camera rather than a literal 0-degree/flat camera. Gold TILT 15/35/50 continue to map directly to those voxel pitches; disable `3D VOXEL WORLD` for the native 2D overworld.

@@ -41,6 +41,7 @@
 local V = ...
 
 local StadiumPack = {}
+local Compat = V.require("EngineCompat")
 
 local byte = string.byte
 local floor = math.floor
@@ -69,11 +70,12 @@ local function readPack(species)
   -- half-written folder must not be read at all. Required lazily: Install
   -- requires this module at load, so the reverse edge cannot be taken then.
   local rel = ("%s/%03d.dsm"):format(StadiumPack.CACHE_DIR, species)
-  if love and love.filesystem and love.filesystem.getInfo
+  local f = Compat.fs()
+  if f and type(f.getInfo) == "function" and type(f.read) == "function"
      and V.require("StadiumInstall").ready() then
-    local okInfo, info = pcall(love.filesystem.getInfo, rel, "file")
+    local okInfo, info = pcall(f.getInfo, rel, "file")
     if okInfo and info then
-      local ok, bytes = pcall(love.filesystem.read, rel)
+      local ok, bytes = pcall(f.read, rel)
       if ok and type(bytes) == "string" and #bytes > 4 then return bytes end
     end
   end
@@ -248,7 +250,7 @@ local function readBones(s, p, model, hasFlags)
   model.nodeFlags = hasFlags and flags or nil
   model.restT, model.restR, model.restS = t, r, sc
   model.hasExactNodeFlags = hasFlags == true
-  -- v0.2.17 regression guard: DSM5 preserves the raw flag byte, but the
+  -- v0.2.17 regression guard: DSM5/6/7 preserve the raw flag byte, but the
   -- Stadium 2 meaning of every flag combination is not verified roster-wide.
   -- Keep the proven DSM4 transform walk for ordinary species and isolate the
   -- flag-aware experiment to Lugia, the one model that actually needs it.
@@ -273,6 +275,21 @@ local function readPrims(s, p, model)
     blend, p = u8(s, p)
     prim.cull = cull ~= 0
     prim.additive = blend ~= 0
+    if model.packFormat == "DSM6" or model.packFormat == "DSM7" then
+      prim.wrapS, p = u8(s, p)
+      prim.wrapT, p = u8(s, p)
+      local lit
+      lit, p = u8(s, p)
+      prim.lit = lit ~= 0
+      local r, g, b, a
+      r, p = u8(s, p); g, p = u8(s, p); b, p = u8(s, p); a, p = u8(s, p)
+      prim.tint = { r, g, b, a }
+    else
+      -- DSM4/5 used LOVE's default clamp and always treated bytes 12..14 as
+      -- normals. Keep those semantics when a developer loads a legacy pack.
+      prim.wrapS, prim.wrapT, prim.lit = 2, 2, true
+      prim.tint = { 255, 255, 255, 255 }
+    end
     prim.texAnim, p = i16(s, p)
 
     -- the texture-animation channel's value -> which texture to swap in.
@@ -497,16 +514,13 @@ local function opaqueRgba(bytes)
 end
 
 local function solidWhiteImage(model)
-  -- Stadium 2 Lugia's largest/main primitive is intentionally untextured.
-  -- In the N64 renderer it is a lit white material, not an absent surface.
-  -- DSM stores texture index -1 as u16 0xFFFF; the reader converts ordinary
-  -- texture indices to Lua's 1-based convention, so that sentinel arrives
-  -- here as 65536.  Older builds returned nil and StadiumRig consequently
-  -- skipped the entire 647-vertex body, leaving only the textured eyes/fins
-  -- floating in space.  Keep this rescue material Dex-249-only so no other
-  -- species' established rendering path changes.
-  if model._lugiaSolidWhite ~= nil then
-    return model._lugiaSolidWhite or nil
+  -- A negative Stadium texture index is a REAL material: the RDP can shade a
+  -- primitive from vertex/primitive colour without a texture. DSM stores -1
+  -- as u16 0xFFFF, which becomes 65536 after the reader's 1-based conversion.
+  -- Lugia first exposed the bug, but it is not unique; DSM6/7 preserve a tint
+  -- for every such primitive and uses this white texel as the neutral source.
+  if model._solidWhite ~= nil then
+    return model._solidWhite or nil
   end
   local ok, img = pcall(function()
     local px = string.char(255, 255, 255, 255)
@@ -515,16 +529,14 @@ local function solidWhiteImage(model)
     image:setFilter("nearest", "nearest")
     return image
   end)
-  model._lugiaSolidWhite = (ok and img) or false
-  return model._lugiaSolidWhite or nil
+  model._solidWhite = (ok and img) or false
+  return model._solidWhite or nil
 end
 
 function StadiumPack.image(model, index)
   local slot = model.textures and model.textures[index]
   if not slot then
-    if tonumber(model.species) == 249 and tonumber(index) == 65536 then
-      return solidWhiteImage(model)
-    end
+    if tonumber(index) == 65536 then return solidWhiteImage(model) end
     return nil
   end
   if slot.image ~= nil then return slot.image or nil end
@@ -630,13 +642,14 @@ function StadiumPack.load(species)
 
   local ok, model = pcall(function()
     local magic = bytes:sub(1, 4)
-    if magic ~= "DSM4" and magic ~= "DSM5" then
-      error("not a supported DSM4/DSM5 Stadium pack", 0)
+    if magic ~= "DSM4" and magic ~= "DSM5" and magic ~= "DSM6"
+        and magic ~= "DSM7" then
+      error("not a supported DSM4/DSM5/DSM6/DSM7 Stadium pack", 0)
     end
     local m = { bytes = bytes, packFormat = magic }
     local p = 5
     p = readHeader(bytes, p, m)
-    p = readBones(bytes, p, m, magic == "DSM5")
+    p = readBones(bytes, p, m, magic ~= "DSM4")
     p = readAttachments(bytes, p, m)
     p = readPrims(bytes, p, m)
     p = readTextures(bytes, p, m)
@@ -667,6 +680,10 @@ function StadiumPack.invalidate()
         slot.image = nil
       end
     end
+    if model and model._solidWhite and model._solidWhite.release then
+      pcall(model._solidWhite.release, model._solidWhite)
+    end
+    if model then model._solidWhite = nil end
   end
 end
 

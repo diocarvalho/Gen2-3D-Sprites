@@ -21,6 +21,14 @@ local Bridge = {
   syncBuilds = 0,
   syncBuildFailures = 0,
   meshPendingFrames = 0,
+  openWorld = false,
+  openWorldMaps = 0,
+  openWorldDirectMaps = 0,
+  openWorldGraphBuilds = 0,
+  openWorldFallbacks = 0,
+  openWorldOverlapRejects = 0,
+  openWorldGraphRoot = nil,
+  openWorldGraphError = nil,
   cameraMode = "diorama",
   cameraLevel = 1,
   cameraHotkeyCycles = 0,
@@ -87,6 +95,7 @@ local Voxel, Voxel3D, VoxelScene, ChunkMesher, FirstPerson, CamControl, GoldCame
 local OverworldBattle, OverworldCapture, GoldColorAtlas
 local GoldMap = nil
 local neighborMapCache = {}
+local openWorldGraphCache = { rootId = nil, maps = nil, specs = nil }
 local logOnce
 
 local function optionEnabled()
@@ -96,14 +105,102 @@ local function optionEnabled()
     or value == "false" or value == "off")
 end
 
+-- Independent model switches. Neither disables the voxel world, 3D terrain,
+-- buildings, trees, grass, props, weather, cameras or OPEN WORLD residency.
+-- Pokemon geometry and the human-player Character Selector skin are separate
+-- layers so either can fall back to Gold's 2D card while the other stays 3D.
+local function modelOptionEnabled(key, default)
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return default ~= false end
+  local ok, value = pcall(options.get, options, key)
+  if not ok or value == nil then return default ~= false end
+  return not (value == false or value == 0 or value == "0"
+    or value == "false" or value == "off")
+end
+
+local function modelsEnabled()
+  return modelOptionEnabled("stadium3dSprites", true)
+end
+
+local function playerModelsEnabled()
+  return modelOptionEnabled("player3dModel", true)
+end
+
+V.modelsEnabled = modelsEnabled
+V.playerModelsEnabled = playerModelsEnabled
+Bridge.modelsEnabled = modelsEnabled
+Bridge.playerModelsEnabled = playerModelsEnabled
+
+local function toggleValue(value, default)
+  if value == nil then return default and true or false end
+  if value == true or value == 1 or value == "1" then return true end
+  if value == false or value == 0 or value == "0" then return false end
+  if type(value) == "string" then
+    value = value:lower()
+    if value == "true" or value == "on" or value == "yes" then return true end
+    if value == "false" or value == "off" or value == "no" then return false end
+  end
+  return default and true or false
+end
+
+local function optionOpenWorld()
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return false end
+  local ok, value = pcall(options.get, options, "openWorld")
+  if not ok then return false end
+  return toggleValue(value, false)
+end
+
+local function voxelModeEnabled()
+  -- OPEN WORLD is defined as the full 3D world. It therefore keeps the voxel
+  -- provider and its camera controls alive even if the independent legacy
+  -- voxel3d option is false in an older save.
+  return optionEnabled() or optionOpenWorld()
+end
+
+Bridge.voxelModeEnabled = voxelModeEnabled
+
+local function applyOpenWorldMode(enabled)
+  enabled = toggleValue(enabled, false)
+  if Bridge.openWorld == enabled then return false end
+  -- The mode switch only changes residency. Never replace the current voxel
+  -- scene: clear the lightweight graph/adapted-map caches and let the next
+  -- normal VoxelScene frame rebuild the neighbour set around the SAME current
+  -- map/entities/terrain renderer. This is the key v0.2.46 rule that keeps all
+  -- Stadium models, trees, grass, props and voxel geometry alive in both modes.
+  neighborMapCache = {}
+  openWorldGraphCache = { rootId = nil, maps = nil, specs = nil }
+  Bridge.openWorld = enabled
+  Bridge.openWorldGraphError = nil
+  if not enabled then
+    Bridge.openWorldMaps = 0
+    if V then V.goldOpenWorldMaps = {} end
+  end
+  return true
+end
+
+Bridge.optionOpenWorld = optionOpenWorld
+Bridge._applyOpenWorldMode = applyOpenWorldMode
+
 local CAMERA_ORDER = { "diorama", "third", "first" }
 local CAMERA_NEXT = { diorama = "third", third = "first", first = "diorama" }
 
 local function platformName()
-  if love and love.system and type(love.system.getOS) == "function" then
-    local ok, osName = pcall(love.system.getOS)
-    if ok and type(osName) == "string" then return osName end
+  -- Current Gen1Recomp sandboxes throw when mod code dereferences
+  -- love.system at all. Prefer the engine-owned Platform seam and keep the
+  -- old direct LÖVE fallback entirely inside pcall for older hosts.
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okDetect, info = pcall(Platform.detect)
+    if okDetect and type(info) == "table" and type(info.os) == "string" then
+      return info.os
+    end
   end
+  local ok, osName = pcall(function()
+    local system = love and love.system
+    return system and system.getOS and system.getOS()
+  end)
+  if ok and type(osName) == "string" then return osName end
   return "Unknown"
 end
 
@@ -184,6 +281,42 @@ end
 -- while the Character Selector owns the public camera state.
 V.externalCameraOwner = externalCameraEnabled
 V.externalCameraPassthrough = externalCameraEnabled
+
+local function optionDioramaTilt()
+  -- v0.2.54: Gold's own OPTIONS -> TILT row is the authoritative diorama
+  -- camera pitch. The engine stores it as levels OFF/15/35/50 in
+  -- game.options.tilt. Previously this mod had a separate DIORAMA TILT option,
+  -- which meant changing the real OPTIONS row only warped/zoomed the native
+  -- presentation while our voxel camera kept its old pitch. Mirror the native
+  -- row directly into the real 3D camera instead.
+  local game = Bridge.game
+  local native = game and (game.options or (game.save and game.save.options))
+  if type(native) == "table" and native.tilt ~= nil then
+    local level = math.floor(tonumber(native.tilt) or 0)
+    if level < 0 then level = 0 elseif level > 3 then level = 3 end
+    -- Gold's native TILT defaults to OFF (level 0) on a fresh install.
+    -- While the voxel renderer is explicitly enabled, treating that as a
+    -- literal 0-degree voxel camera makes the real 3D terrain appear flat/2D.
+    -- OFF therefore means "use the voxel diorama default"; the three explicit
+    -- Gold tilt rungs still map 1:1 to 15/35/50 degrees. Turning 3D VOXEL
+    -- WORLD off remains the actual way to return to Gold's native 2D world.
+    local angles = { 35, 15, 35, 50 }
+    return angles[level + 1]
+  end
+
+  -- Backward-compatible fallback for a frame before Game2 is bound, or for an
+  -- older experimental host. Existing saves that still contain dioramaTilt
+  -- continue to get a sensible camera until the native options table arrives.
+  local options = mod and mod.options
+  if options and type(options.get) == "function" then
+    local ok, value = pcall(options.get, options, "dioramaTilt")
+    value = ok and tonumber(value) or nil
+    if value == 0 or value == 15 or value == 35 or value == 50 or value == 75 then
+      return value
+    end
+  end
+  return 35
+end
 
 local function optionCameraMode()
   local control = optionCameraControl()
@@ -342,7 +475,7 @@ local function fireCameraHotkey(game, fromPoll)
   -- soon as the transparent capture state leaves the stack.
   local top = stackTop(game)
   if top and top._stadiumCaptureOverlay == true then return false end
-  if isAndroid() or not optionEnabled() or not goldFreeRoam(game) then
+  if isAndroid() or not voxelModeEnabled() or not goldFreeRoam(game) then
     return false
   end
   local mode = Bridge.cycleCameraMode(true)
@@ -409,8 +542,17 @@ local function cameraSliderRect()
   return (ww - w) * 0.5, 12, w, h
 end
 
+local function optionCameraSlider()
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return true end
+  local ok, value = pcall(options.get, options, "cameraSlider")
+  if not ok or value == nil then return true end
+  return value ~= false
+end
+
 local function cameraSliderVisible(game)
-  return isAndroid() and optionEnabled() and goldFreeRoam(game or Bridge.game)
+  return isAndroid() and voxelModeEnabled() and optionCameraSlider()
+     and goldFreeRoam(game or Bridge.game)
 end
 
 local function sliderModeAt(x)
@@ -562,7 +704,7 @@ Bridge.updateCameraSliderTouches = updateCameraSliderTouches
 -- for pinch zoom. This feeds FirstPerson.lookBy, the same yaw/pitch used by
 -- both the 1ST/3RD free-roam camera and Gold's live-overworld battle shot.
 local function updateRightLookTouches(game, battleActive)
-  if not isAndroid() or not optionEnabled() then
+  if not isAndroid() or not voxelModeEnabled() then
     Bridge._rightLookPollId = nil
     Bridge._rightLookPollX, Bridge._rightLookPollY = nil, nil
     return false
@@ -605,7 +747,7 @@ local function updateRightLookTouches(game, battleActive)
     local ok, x, y = pcall(T.getPosition, id)
     if not ok or type(x) ~= "number" or type(y) ~= "number" then return nil end
     if x < ww * 0.45 then return nil end
-    if touchInsideSlider(x, y) then return nil end
+    if cameraSliderVisible(game or Bridge.game) and touchInsideSlider(x, y) then return nil end
     if controlAt(x, y) then return nil end
     return x, y
   end
@@ -666,7 +808,7 @@ Bridge.updateRightLookTouches = updateRightLookTouches
 -- that late Game2 touch wrappers are not reliable enough. This watches LOVE's
 -- physical contacts directly and changes the continuous diorama camera distance.
 local function updateDioramaPinchTouches(game)
-  if not isAndroid() or not optionEnabled() or optionCameraMode() ~= "diorama"
+  if not isAndroid() or not voxelModeEnabled() or optionCameraMode() ~= "diorama"
      or not goldFreeRoam(game or Bridge.game) then
     Bridge._dioramaPinchA, Bridge._dioramaPinchB = nil, nil
     Bridge._dioramaPinchGap = nil
@@ -682,7 +824,7 @@ local function updateDioramaPinchTouches(game)
   local function free(id)
     local ok, x, y = pcall(T.getPosition, id)
     if not ok or type(x) ~= "number" or type(y) ~= "number" then return nil end
-    if touchInsideSlider(x, y) then return nil end
+    if cameraSliderVisible(game or Bridge.game) and touchInsideSlider(x, y) then return nil end
     if TouchControls and type(TouchControls.hitTest) == "function" then
       local okHit, hit = pcall(TouchControls.hitTest, TouchControls, x, y)
       if okHit and hit then return nil end
@@ -986,20 +1128,34 @@ local function goldMapModule()
   return nil
 end
 
+local function nativeNeighborIndex(world)
+  local native = {}
+  for _, nb in ipairs(world and world.neighbors or {}) do
+    if nb and nb.id then native[nb.id] = nb end
+  end
+  return native
+end
+
+local function connectionPlacement(sourceDef, targetDef, conn, dir, sourceOx, sourceOy)
+  local offset = tonumber(conn and conn.offset) or 0
+  sourceOx, sourceOy = tonumber(sourceOx) or 0, tonumber(sourceOy) or 0
+  if dir == "north" then
+    return sourceOx + offset * 32, sourceOy - targetDef.height * 32
+  elseif dir == "south" then
+    return sourceOx + offset * 32, sourceOy + sourceDef.height * 32
+  elseif dir == "west" then
+    return sourceOx - targetDef.width * 32, sourceOy + offset * 32
+  else -- east
+    return sourceOx + sourceDef.width * 32, sourceOy + offset * 32
+  end
+end
+
 local function directNeighborSpecs(world)
   local root = world and world.map and world.map.def
   local maps = world and world.maps
   if not (root and maps) then return {} end
 
-  -- Prefer offsets Gold already computed for its native connected-map strips.
-  -- If a strip image was unavailable and Gold omitted that record, derive the
-  -- same connection offset directly so voxel streaming is not held hostage by
-  -- the 2D bake path.
-  local native = {}
-  for _, nb in ipairs(world.neighbors or {}) do
-    if nb and nb.id then native[nb.id] = nb end
-  end
-
+  local native = nativeNeighborIndex(world)
   local out, seen = {}, {}
   for _, dir in ipairs(CARDINAL_CONNECTIONS) do
     local conn = root.connections and root.connections[dir]
@@ -1010,18 +1166,12 @@ local function directNeighborSpecs(world)
       local n = native[id]
       local ox, oy = n and tonumber(n.ox), n and tonumber(n.oy)
       if not (ox and oy) then
-        local offset = tonumber(conn.offset) or 0
-        if dir == "north" then
-          ox, oy = offset * 32, -def.height * 32
-        elseif dir == "south" then
-          ox, oy = offset * 32, root.height * 32
-        elseif dir == "west" then
-          ox, oy = -def.width * 32, offset * 32
-        else -- east
-          ox, oy = root.width * 32, offset * 32
-        end
+        ox, oy = connectionPlacement(root, def, conn, dir, 0, 0)
       end
-      out[#out + 1] = { id = id, dir = dir, ox = ox, oy = oy, native = n }
+      out[#out + 1] = {
+        id = id, dir = dir, ox = ox, oy = oy, native = n, depth = 1,
+        parentId = world.map.id or root.id,
+      }
     end
   end
   return out
@@ -1040,6 +1190,126 @@ local function neighborUrgent(world, dir)
   if dir == "east" then return x >= w - 1 - EDGE_URGENT_CELLS end
   return false
 end
+
+local function placementRect(def, ox, oy)
+  if not def then return nil end
+  ox, oy = tonumber(ox) or 0, tonumber(oy) or 0
+  return {
+    x1 = ox, y1 = oy,
+    x2 = ox + (tonumber(def.width) or 0) * 32,
+    y2 = oy + (tonumber(def.height) or 0) * 32,
+  }
+end
+
+local function placementOverlap(a, b)
+  if not (a and b) then return 0 end
+  local w = math.min(a.x2, b.x2) - math.max(a.x1, b.x1)
+  local h = math.min(a.y2, b.y2) - math.max(a.y1, b.y1)
+  if w <= 0 or h <= 0 then return 0 end
+  return w * h
+end
+
+local function overlapsPlaced(rect, placed, exceptId)
+  for id, other in pairs(placed or {}) do
+    if id ~= exceptId and placementOverlap(rect, other.rect) > 0 then
+      return id, other
+    end
+  end
+  return nil
+end
+
+-- OPEN WORLD walks every map reachable through Gold's cardinal connection
+-- table and solves each map into one coordinate space rooted at the CURRENT
+-- map. Doors, caves and buildings reached by warps are intentionally excluded:
+-- they are not physically adjacent terrain and must not be glued into the
+-- outdoor plane. Breadth-first order queues direct areas first, then farther
+-- rings, so the nearby world becomes ready while the rest builds in background.
+local function allConnectedNeighborSpecs(world)
+  local rootMap = world and world.map
+  local root = rootMap and rootMap.def
+  local maps = world and world.maps
+  if not (rootMap and root and maps) then return {} end
+  local rootId = rootMap.id or root.id
+
+  if openWorldGraphCache.rootId == rootId
+      and openWorldGraphCache.maps == maps
+      and type(openWorldGraphCache.specs) == "table" then
+    return openWorldGraphCache.specs
+  end
+
+  local native = nativeNeighborIndex(world)
+  local out, seen = {}, { [rootId] = true }
+  local placed = {
+    [rootId] = { id = rootId, def = root, ox = 0, oy = 0,
+      rect = placementRect(root, 0, 0) },
+  }
+  local queue = { { id = rootId, def = root, ox = 0, oy = 0, depth = 0 } }
+  local head = 1
+  while head <= #queue do
+    local source = queue[head]
+    head = head + 1
+    for _, dir in ipairs(CARDINAL_CONNECTIONS) do
+      local conn = source.def.connections and source.def.connections[dir]
+      local id = conn and (conn.mapId or conn.map)
+      local def = id and maps[id] or nil
+      if def and not seen[id] then
+        local ox, oy
+        -- Gold's own neighbour builder is the coordinate authority whenever it
+        -- already knows this map (it keeps more than the immediate ring warm).
+        -- v0.2.45-v0.2.56 only trusted native offsets at depth 1, then solved
+        -- deeper maps independently; on some connection loops that let a far
+        -- map land on TOP of the current map. Collision stayed correct because
+        -- Gold still owned movement, but the overlapping voxel mesh painted a
+        -- different road/grass layout under the player: the "invisible road"
+        -- failure reported in v0.2.56.
+        local n = native[id]
+        if n then ox, oy = tonumber(n.ox), tonumber(n.oy) end
+        if not (ox and oy) then
+          ox, oy = connectionPlacement(source.def, def, conn, dir,
+                                       source.ox, source.oy)
+        end
+
+        local rect = placementRect(def, ox, oy)
+        local clashId = overlapsPlaced(rect, placed, id)
+        if clashId then
+          -- Cardinally stitched map BODIES may touch at an edge but should not
+          -- occupy the same world pixels. Skip an inconsistent placement rather
+          -- than allowing a far map to visually overwrite the collision-authority
+          -- current map. Leaving it unseen lets another graph path place it later.
+          Bridge.openWorldOverlapRejects = (Bridge.openWorldOverlapRejects or 0) + 1
+          if logOnce then
+            logOnce(("open-world-overlap:%s:%s:%s"):format(tostring(rootId),
+                tostring(id), tostring(clashId)), "warn",
+              "OPEN WORLD skipped overlapping map placement %s over %s",
+              tostring(id), tostring(clashId))
+          end
+        else
+          local rec = {
+            id = id, dir = dir, ox = ox, oy = oy, depth = source.depth + 1,
+            parentId = source.id,
+          }
+          out[#out + 1] = rec
+          seen[id] = true
+          placed[id] = { id = id, def = def, ox = ox, oy = oy, rect = rect }
+          queue[#queue + 1] = {
+            id = id, def = def, ox = ox, oy = oy, depth = rec.depth,
+          }
+        end
+      end
+    end
+  end
+
+  openWorldGraphCache = { rootId = rootId, maps = maps, specs = out }
+  Bridge.openWorldGraphBuilds = Bridge.openWorldGraphBuilds + 1
+  Bridge.openWorldGraphRoot = rootId
+  Bridge.openWorldGraphError = nil
+  return out
+end
+
+-- Internal probes used by the release regression suite. They are intentionally
+-- underscored and do not participate in the public mod API.
+Bridge._allConnectedNeighborSpecs = allConnectedNeighborSpecs
+Bridge._placementOverlap = placementOverlap
 
 local function adaptedNeighborMap(world, id)
   local maps, tilesets = world and world.maps, world and world.tilesets
@@ -1067,32 +1337,61 @@ local function adaptedNeighborMap(world, id)
 end
 
 local function adaptedNeighbors(world)
-  local out, byId = {}, {}
-  for _, spec in ipairs(directNeighborSpecs(world)) do
+  local openWorld = optionOpenWorld()
+  -- Read the public option every rendered frame, then apply it as a residency
+  -- mode change. v0.2.45 accidentally crashed below before this could produce
+  -- a valid voxel state, which made ON/OFF look identical in game.
+  applyOpenWorldMode(openWorld)
+
+  local specs
+  if openWorld then
+    local ok, result = pcall(allConnectedNeighborSpecs, world)
+    if ok and type(result) == "table" then
+      specs = result
+      Bridge.openWorldGraphError = nil
+    else
+      Bridge.openWorldFallbacks = Bridge.openWorldFallbacks + 1
+      Bridge.openWorldGraphError = tostring(result)
+      specs = directNeighborSpecs(world)
+      logOnce("open-world-graph:" .. tostring(result), "warn",
+        "OPEN WORLD graph build failed; using direct-map streaming this frame: %s",
+        tostring(result))
+    end
+  else
+    specs = directNeighborSpecs(world)
+  end
+
+  local out, byId, direct = {}, {}, {}
+  local native = nativeNeighborIndex(world)
+  for _, spec in ipairs(specs) do
     local map, err = adaptedNeighborMap(world, spec.id)
     if map then
+      local depth = tonumber(spec.depth) or 1
       local rec = {
         id = spec.id, map = map, ox = spec.ox, oy = spec.oy, dir = spec.dir,
-        -- Background builds start immediately at the ordinary neighbour budget;
-        -- approaching an edge promotes that destination to the urgent slice so
-        -- fast movement is much less likely to outrun its mesh.
-        urgent = neighborUrgent(world, spec.dir),
+        depth = depth, parentId = spec.parentId,
+        -- Only a directly connected destination near the player gets urgent
+        -- build time. Far maps stay cooperative background jobs so OPEN WORLD
+        -- never starves the terrain currently under the player.
+        urgent = depth == 1 and neighborUrgent(world, spec.dir) or false,
       }
       out[#out + 1] = rec
       byId[spec.id] = rec
-
-      -- Add the actual Map object to Gold's own neighbour record too.  Existing
-      -- consumers such as ThirdPerson boom collision and follower seam checks
-      -- already look for `nb.map`; until now Gold's records never supplied it.
-      -- Unknown fields are ignored by the native 2D renderer.
-      if spec.native then spec.native.map = map end
+      if depth == 1 then
+        direct[#direct + 1] = rec
+        local n = native[spec.id]
+        if n then n.map = map end
+      end
     else
       logOnce("neighbor-adapt:" .. tostring(spec.id) .. ":" .. tostring(err),
         "warn", "Gold connected-map voxel adapter skipped %s: %s",
         tostring(spec.id), tostring(err))
     end
   end
-  return out, byId
+
+  Bridge.openWorldMaps = openWorld and (#out + 1) or 0
+  Bridge.openWorldDirectMaps = #direct
+  return out, byId, direct
 end
 
 local function adaptedGhosts(world, byId)
@@ -1112,7 +1411,9 @@ end
 local function currentMasks(neighbors)
   local masks = {}
   for _, nb in ipairs(neighbors or {}) do
-    if nb.map and nb.map.def then
+    -- OPEN WORLD carries far maps here too. Only first-ring maps can overlap
+    -- the current map's border apron, so only they participate in mask tests.
+    if (nb.depth == nil or nb.depth <= 1) and nb.map and nb.map.def then
       masks[#masks + 1] = {
         nb.ox, nb.oy,
         nb.ox + nb.map.def.width * 32,
@@ -1168,10 +1469,12 @@ local function makeState(world)
   local attached, attachErr = attachRenderer(world, world.map)
   if not attached then return nil, attachErr end
 
-  local neighbors, byId = adaptedNeighbors(world)
-  -- Shared with the camera/follower compatibility paths.  These are the exact
-  -- direct maps VoxelScene is drawing this frame, in current-map coordinates.
-  V.goldNeighbors = neighbors
+  local neighbors, byId, directNeighbors = adaptedNeighbors(world)
+  -- Third-person collision only needs maps touching the current one. OPEN
+  -- WORLD may render dozens of farther areas; scanning them per boom sample
+  -- adds CPU cost without changing the collision result near the player.
+  V.goldNeighbors = directNeighbors
+  V.goldOpenWorldMaps = neighbors
 
   return {
     map = world.map,
@@ -1188,7 +1491,8 @@ local function makeState(world)
     _stadiumFreeMoveActive = world._stadiumFreeMoveActive == true,
     _stadiumFreeVisualMoving = world._stadiumFreeVisualMoving == true,
     _stadiumFreeAnimDist = tonumber(world._stadiumFreeAnimDist) or 0,
-    _stadiumOpenWorldNeighbors = true,
+    _stadiumOpenWorldNeighbors = Bridge.openWorld == true,
+    _stadiumOpenWorldMapCount = Bridge.openWorldMaps,
   }
 end
 
@@ -1295,8 +1599,28 @@ function Bridge.install()
     Bridge.captureError = tostring(captureOrErr)
   end
 
+  -- Mod Manager persists the option and emits this event live. The frame path
+  -- still re-reads mod.options:get every time, but the event immediately drops
+  -- the cached full-world graph so OFF cannot remain visually sticky for even
+  -- one stale cache generation.
+  if not Bridge.openWorldOptionListenerInstalled
+      and mod and mod.events and type(mod.events.on) == "function" then
+    local okListener = pcall(mod.events.on, mod.events, "mod.options_changed",
+      function(payload)
+        if type(payload) ~= "table" or payload.key ~= "openWorld" then return end
+        if payload.mod ~= nil and payload.mod ~= mod.id then return end
+        applyOpenWorldMode(payload.value)
+      end)
+    Bridge.openWorldOptionListenerInstalled = okListener == true
+  end
+
   Bridge.installed = true
-  Bridge.active = optionEnabled()
+  -- OPEN WORLD is a 3D residency mode, not a second flat renderer.  If it is
+  -- enabled, keep the voxel provider alive even if an older save still has
+  -- the independent 3D VOXEL WORLD toggle off.  Turning OPEN WORLD off again
+  -- restores the ordinary voxel3d toggle's authority.
+  Bridge.active = voxelModeEnabled()
+  applyOpenWorldMode(optionOpenWorld())
   logOnce("installed", "info",
     "Gen-2 voxel renderer provider ready for Gold render.compose")
   return true, V
@@ -1309,7 +1633,10 @@ end
 
 function Bridge.renderFrame(world, ctx)
   Bridge.framesAttempted = Bridge.framesAttempted + 1
-  Bridge.active = optionEnabled()
+  -- OPEN WORLD always means OPEN WORLD *VOXELS*.  v0.2.45/46 could leave the
+  -- graph active while the voxel provider was disabled, which produced the
+  -- huge stitched native-2D overview shown in the user's screenshot.
+  Bridge.active = voxelModeEnabled()
   Bridge.mapId = world and world.map and world.map.id or nil
 
   if not Bridge.active then return nil, "voxel disabled", "disabled" end
@@ -1411,8 +1738,14 @@ function Bridge.renderFrame(world, ctx)
     Bridge.cameraMode, Bridge.cameraLevel = mode, level
     Bridge.captureCameraOverride = captureMode
 
-    -- DIORAMA keeps the proven v0.1.78 camera. FIRST and THIRD select the
-    -- already-authored placed-camera rungs, now driven by Gold's live Game2.
+    -- DIORAMA keeps the FULL preset semantics (so zoom still targets the
+    -- diorama distance), but its pitch is independently configurable. This
+    -- deliberately separates TILT from DioramaZoom: changing tilt rotates the
+    -- camera; changing zoom only changes distance. FIRST/THIRD keep their own
+    -- placed-camera rigs.
+    if renderMode == "diorama" and type(Voxel.setFullAngle) == "function" then
+      Voxel.setFullAngle(optionDioramaTilt())
+    end
     Voxel.setLevel(level)
     if type(Voxel.update) == "function" then Voxel.update(dt, level) end
     if FirstPerson and type(FirstPerson.update) == "function" then
@@ -1520,7 +1853,32 @@ function Bridge.status()
     extraEntitiesProvider = type(Bridge.extraEntitiesProvider) == "function",
     extraEntitiesMerged = Bridge.extraEntitiesMerged,
     connectedMaps = V.goldNeighbors and #V.goldNeighbors or 0,
-    openWorldNeighbors = true,
+    openWorld = Bridge.openWorld == true,
+    pokemonModels = modelsEnabled(),
+    playerModel = playerModelsEnabled(),
+    openWorldMaps = Bridge.openWorldMaps or 0,
+    openWorldDirectMaps = Bridge.openWorldDirectMaps or 0,
+    openWorldGraphBuilds = Bridge.openWorldGraphBuilds or 0,
+    openWorldGraphRoot = Bridge.openWorldGraphRoot,
+    openWorldGraphError = Bridge.openWorldGraphError,
+    openWorldFallbacks = Bridge.openWorldFallbacks or 0,
+    openWorldOverlapRejects = Bridge.openWorldOverlapRejects or 0,
+    openWorldLoadedMaps = (function()
+      if not (Bridge.openWorld and ChunkMesher and type(ChunkMesher.peek) == "function") then
+        return 0
+      end
+      local n = Bridge.mapId and 1 or 0
+      for _, nb in ipairs((V and V.goldOpenWorldMaps) or {}) do
+        if ChunkMesher.peek(nb.map, true) or ChunkMesher.peek(nb.map, false) then
+          n = n + 1
+        end
+      end
+      return n
+    end)(),
+    openWorldPendingBuilds = (ChunkMesher and type(ChunkMesher.pending) == "function")
+      and ChunkMesher.pending() or 0,
+    voxelDiskCache = (ChunkMesher and type(ChunkMesher.diskCacheStatus) == "function")
+      and ChunkMesher.diskCacheStatus() or nil,
     syncBuildMapId = Bridge.syncBuildMapId,
     syncBuilds = Bridge.syncBuilds,
     syncBuildFailures = Bridge.syncBuildFailures,
@@ -1562,12 +1920,15 @@ end
 
 -- Test/diagnostic accessors; no engine mutation.
 Bridge._mergedEntities = mergedEntities
-Bridge._directNeighborSpecs = directNeighborSpecs
 Bridge._adaptedNeighbors = adaptedNeighbors
 Bridge._currentMasks = currentMasks
 Bridge._makeState = makeState
+Bridge._directNeighborSpecs = directNeighborSpecs
+Bridge._allConnectedNeighborSpecs = allConnectedNeighborSpecs
+Bridge._neighborUrgent = neighborUrgent
 Bridge._selectorCameraMode = selectorCameraMode
 Bridge._externalCameraEnabled = externalCameraEnabled
 Bridge._optionCameraControl = optionCameraControl
+Bridge._optionDioramaTilt = optionDioramaTilt
 
 return Bridge

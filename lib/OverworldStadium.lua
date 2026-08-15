@@ -30,6 +30,22 @@ local PokemonHeights = V.require("PokemonHeights")
 local PokemonLocomotion = V.require("PokemonLocomotion")
 local FirstPerson = V.require("FirstPerson")
 
+local function modelsEnabled()
+  if type(V.modelsEnabled) == "function" then
+    local ok, value = pcall(V.modelsEnabled)
+    if ok then return value ~= false end
+  end
+  return true
+end
+
+local function playerModelsEnabled()
+  if type(V.playerModelsEnabled) == "function" then
+    local ok, value = pcall(V.playerModelsEnabled)
+    if ok then return value ~= false end
+  end
+  return true
+end
+
 -- Dex 249 no longer touches the unstable Stadium-2 ROM hierarchy. v0.2.20
 -- gives Lugia a dedicated procedural 3D rescue rig through StadiumMon. Keep the
 -- species-correct card only as a LAST-RESORT safety path for a host/driver where
@@ -124,6 +140,7 @@ local function red3dPokemonControl(player)
 end
 
 local function red3dRendererForPose(p)
+  if not playerModelsEnabled() then return nil end
   if not (p and p.isPlayer and type(p.entity) == "table") then return nil end
   if red3dPokemonControl(p.entity) or red3dSpecialCard(p.entity) then return nil end
 
@@ -882,6 +899,7 @@ end
 -- SpriteRenderer, which is what lets us rescue Wilds of Kanto entities that
 -- its billboard adapter has put on the emergency overlay path.
 function OverworldStadium.canRenderEntity(entity)
+  if not modelsEnabled() then return false, nil end
   if type(entity) ~= "table" then return false end
   local dex = resolveDex({ entity = entity, sprite = entity.sprite,
                            mapId = entity.mapId })
@@ -1093,6 +1111,7 @@ local function isPokemonPlayerPose(p, dex)
 end
 
 function OverworldStadium.shouldHidePose(p)
+  if not modelsEnabled() then return false end
   local e = p and p.entity
   if type(e) ~= "table" or e.skyRideRider ~= true then return false end
   local m = V.mod and V.mod.find and V.mod:find("DRAMATIC_SKY_RIDE")
@@ -1110,6 +1129,17 @@ function OverworldStadium.safeShouldHidePose(p)
 end
 
 function OverworldStadium.prepare(posed)
+  if not modelsEnabled() then
+    -- Clear stale model ownership immediately when the option is flipped OFF.
+    -- VoxelScene will then draw each pose through its ordinary sprite/card path.
+    OverworldStadium.releaseAll()
+    for _, p in ipairs(posed or {}) do
+      p.stadiumMon = nil
+      p.stadiumMatrix = nil
+      p.stadiumDex = nil
+    end
+    return posed
+  end
   frameNo = frameNo + 1
   if not Config.enabled then return true end
   local dt = dtForFrame()
@@ -1280,6 +1310,10 @@ local function withFreeVisualWalk(p, fn)
   if not (p and type(p.entity) == "table" and type(fn) == "function") then
     return false, nil
   end
+  -- A live battle owns the trainer pose and explicitly pins it to terrain.
+  -- Do not let the free-roam visual-walk bridge re-enable a walking/bobbing
+  -- animation on that static battle stand point.
+  if p.stadiumBattleGrounded == true then return pcall(fn) end
   -- Prefer the animation bit captured with this exact VoxelScene pose.  This
   -- is frame-local and cannot be stale across boot/map transitions.  Keep the
   -- live-world lookup only as a compatibility fallback for older callers that
@@ -1308,6 +1342,7 @@ local function withFreeVisualWalk(p, fn)
 end
 
 function OverworldStadium.draw(p)
+  if not modelsEnabled() then return false end
   if p and p.stadiumDex == 249 and not (p.stadiumMon and p.stadiumMon.rig) then
     return drawLugiaFallback(p)
   end
@@ -1333,6 +1368,7 @@ end
 -- rather than copying any character/model logic, so all built-in, imported,
 -- renamed, scaled, accessory-equipped, and future skins remain selector-owned.
 function OverworldStadium.drawPlayerSkin(p)
+  if not playerModelsEnabled() then return false end
   local renderer = red3dRendererForPose(p)
   if not renderer then return false end
 
@@ -1405,6 +1441,7 @@ function OverworldStadium.safePlayerSkinActive(p)
 end
 
 function OverworldStadium.cast(p, shadowMap)
+  if not modelsEnabled() then return false end
   local mon = p and p.stadiumMon
   local matrix = p and p.stadiumMatrix
   if not (mon and mon.rig and matrix and shadowMap) then return false end

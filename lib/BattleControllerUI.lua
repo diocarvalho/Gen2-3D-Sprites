@@ -29,6 +29,16 @@ local blockedPadRelease = setmetatable({}, { __mode = "k" })
 local blockedRawRelease = setmetatable({}, { __mode = "k" })
 local blockedKeyRelease = {}
 local polledPadHeld = setmetatable({}, { __mode = "k" })
+-- v0.2.74: direct battle shortcuts are armed only after the command panel has
+-- actually been drawn at least once for the current menu opening.  Gold can
+-- switch phase to "menu" during a fixed step before the next render.  Without
+-- this latch, a face-button edge in that tiny window selects an invisible
+-- command and the panel appears only after the action has already fired.
+local commandPresented = setmetatable({}, { __mode = "k" })
+-- Automatic intro-page advancement is per BattleState so a new encounter never
+-- inherits the previous one's prompt signature/counter.
+local introAuto = setmetatable({}, { __mode = "k" })
+local AUTO_INTRO_HOLD_FRAMES = 6
 local NIL_PAD = {}
 local function padKey(joystick) return joystick or NIL_PAD end
 
@@ -40,6 +50,70 @@ local function padKey(joystick) return joystick or NIL_PAD end
 -- applyPartyItem.
 local overlay = nil
 local itemEffectsCache = nil
+local partyPreviewCache = nil
+
+local function customUIEnabled()
+  local mod = V and V.mod
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return true end
+  local ok, value = pcall(options.get, options, "customUI")
+  if not ok or value == nil then return true end
+  return value ~= false
+end
+
+local function battleCommandsEnabled()
+  if not customUIEnabled() then return false end
+  local mod = V and V.mod
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return true end
+  local ok, value = pcall(options.get, options, "battleCommands")
+  if not ok or value == nil then return true end
+  return value ~= false
+end
+
+local function battleShortcutMode()
+  local mod = V and V.mod
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return "face" end
+  local ok, value = pcall(options.get, options, "battleShortcutMode")
+  value = ok and tostring(value or "face"):lower() or "face"
+  if value == "native" or value == "off" then return "native" end
+  if value == "dpad" or value == "arrows" then return "dpad" end
+  return "face"
+end
+
+-- Forward declaration: the same visual-ready test used by the HUD is also the
+-- safety gate for direct shortcuts.  BattleState can keep phase == "menu"
+-- while a message/text step is still on screen, so phase alone is NOT enough.
+local commandReady
+local function commandVisualReady(screen)
+  return screen ~= nil and tostring(screen.phase or "") == "menu"
+    and commandReady ~= nil and commandReady(screen) == true
+end
+
+local function commandInputReady(screen)
+  return commandVisualReady(screen) and commandPresented[screen] == true
+end
+
+local function commandWarming(screen)
+  return commandVisualReady(screen) and commandPresented[screen] ~= true
+end
+
+local function partyPreview()
+  if partyPreviewCache == false then return nil end
+  if partyPreviewCache then return partyPreviewCache end
+  local ok, got = pcall(V.require, "PartyModelPreview")
+  partyPreviewCache = (ok and type(got) == "table") and got or false
+  if not partyPreviewCache then M.lastPartyPreviewError = tostring(got) end
+  return partyPreviewCache or nil
+end
+
+local function releasePartyPreview(screen)
+  local preview = partyPreviewCache
+  if preview and type(preview.release) == "function" and screen then
+    pcall(preview.release, screen)
+  end
+end
 
 local function itemEffects()
   if itemEffectsCache ~= nil then return itemEffectsCache or nil end
@@ -54,7 +128,10 @@ local function overlayFor(screen)
 end
 
 local function closeOverlay(screen)
-  if not screen or (overlay and overlay.screen == screen) then overlay = nil end
+  if not screen or (overlay and overlay.screen == screen) then
+    if overlay and overlay.screen then releasePartyPreview(overlay.screen) end
+    overlay = nil
+  end
 end
 
 local function partyOf(screen)
@@ -362,6 +439,10 @@ local function screenOf(game)
 end
 
 local function battleInputOwned(game)
+  -- v0.2.44: BATTLE COMMANDS is now a complete UI-mode switch.  OFF means
+  -- Gold owns the battle screen and its controls again, rather than merely
+  -- hiding our command diamond while the replacement HUD still owns the frame.
+  if not battleCommandsEnabled() then return nil end
   local screen = screenOf(game)
   if not screen then return nil end
   -- Tutorial and contest flows have special cart-authored menus and automatic
@@ -376,6 +457,10 @@ local function battleInputOwned(game)
 end
 
 function M.owns(screen)
+  -- OFF restores Gold's original battle UI wholesale.  Returning false here
+  -- prevents the custom HUD from being baked into VoxelScene and makes
+  -- GoldComposeBridge fall through to the native Gen-2 battle canvas.
+  if not battleCommandsEnabled() then return false end
   if type(screen) ~= "table" or type(screen.battle) ~= "table" then return false end
   if screen.tutorial or screen.contest then return false end
   if screen.phase == "done" or screen.phase == "evolving" then return false end
@@ -446,8 +531,60 @@ local function queueNativeConfirm(screen)
   return false, "input cannot enqueue native A"
 end
 
+-- v0.2.74: the custom live battle UI should arrive at its command panel on its
+-- own.  Current Gold intentionally holds intro text at PromptButton until A/B;
+-- that made the first physical controller press both dismiss the unseen final
+-- intro prompt and, after phase flipped to menu, become a direct PACK/FIGHT/etc.
+-- shortcut.  Auto-page ONLY the battle intro while the custom battle UI owns
+-- the screen.  Every later battle prompt remains player-controlled.
+local function autoAdvanceIntro(screen)
+  if not (screen and battleCommandsEnabled()) then return false end
+  if screen.tutorial or screen.contest then return false end
+  if tostring(screen.phase or "") ~= "intro" then
+    introAuto[screen] = nil
+    return false
+  end
+  if (tonumber(screen.messageTimer) or 0) <= 0 or not screen.message then
+    return false
+  end
+  -- Match BattleState:update's gates: do not queue a prompt edge while an SFX,
+  -- send-out animation, HP/slide animation, or stats panel still owns the loop.
+  if screen.waitSfx or screen.anim or screen.hpAnim or screen.faintSlide
+      or screen.trainerSlide or screen.statsBoxMon then
+    return false
+  end
+
+  local queueCount = type(screen.queue) == "table" and #screen.queue or -1
+  local sig = table.concat({
+    tostring(screen.message), tostring(screen.messagePage or 0),
+    tostring(queueCount), tostring(screen.showPlayerTrainer),
+    tostring(screen.showEnemyTrainer),
+  }, "\31")
+  local state = introAuto[screen]
+  if not state then
+    state = { sig = nil, frames = 0, queued = false }
+    introAuto[screen] = state
+  end
+  if state.sig ~= sig then
+    state.sig, state.frames, state.queued = sig, 0, false
+  end
+  if state.queued then return true end
+
+  state.frames = state.frames + 1
+  if state.frames < AUTO_INTRO_HOLD_FRAMES then return true end
+  local queued, err = queueNativeConfirm(screen)
+  if queued then
+    state.queued = true
+    M.autoIntroPrompts = (M.autoIntroPrompts or 0) + 1
+    M.lastAutoIntroError = nil
+  else
+    M.lastAutoIntroError = tostring(err or "failed to auto-advance battle intro")
+  end
+  return queued
+end
+
 local function activateImpl(screen, index)
-  if not (screen and screen.phase == "menu" and screen.battle) then return false end
+  if not (screen and screen.battle and commandInputReady(screen)) then return false end
   index = tonumber(index)
   if not (index and index >= 1 and index <= 4) then return false end
 
@@ -495,6 +632,13 @@ local PAD_CHOICE = {
   b = INDEX.run,
   a = INDEX.pack,
   y = INDEX.pkmn,
+}
+
+local PAD_DPAD_CHOICE = {
+  dpleft = INDEX.fight,
+  dpright = INDEX.run,
+  dpdown = INDEX.pack,
+  dpup = INDEX.pkmn,
 }
 
 -- Generic desktop raw joystick convention (1=A,2=B,3=X,4=Y). The engine only
@@ -573,7 +717,17 @@ function M.install(game)
             blockedKeyRelease[key] = true
             return
           end
-          local choice = screen.phase == "menu" and KEY_CHOICE[key]
+          local shortcutMode = battleShortcutMode()
+          -- A menu can become logically ready before its first render. Swallow
+          -- command hotkeys during that one-frame warmup so the hidden native
+          -- cursor cannot move/select behind the custom panel.
+          if shortcutMode ~= "native" and commandWarming(screen)
+              and KEY_CHOICE[key] then
+            blockedKeyRelease[key] = true
+            return
+          end
+          local choice = shortcutMode ~= "native" and commandInputReady(screen)
+            and KEY_CHOICE[key] or nil
           if choice and M.activate(screen, choice) then
             blockedKeyRelease[key] = true
             return
@@ -609,8 +763,35 @@ function M.install(game)
         -- Swallow them while a selector is open so they never leak to Gold.
         if button == "x" or button == "y" then handled = true end
       else
-        local choice = screen and screen.phase == "menu" and PAD_CHOICE[button]
-        if choice then handled = M.activate(screen, choice) end
+        local shortcutMode = battleShortcutMode()
+        local choice = nil
+        if screen and commandInputReady(screen) then
+          if shortcutMode == "face" then
+            choice = PAD_CHOICE[button]
+          elseif shortcutMode == "dpad" then
+            choice = PAD_DPAD_CHOICE[button]
+          end
+        end
+        if choice then
+          handled = M.activate(screen, choice)
+        elseif screen and shortcutMode ~= "native" and commandWarming(screen) then
+          -- The command panel is logically ready but has not reached the screen
+          -- yet. Consume its shortcut buttons for this edge; never let the
+          -- native hidden menu accept an input the player could not see.
+          local warmChoice = shortcutMode == "face" and PAD_CHOICE[button]
+            or (shortcutMode == "dpad" and PAD_DPAD_CHOICE[button] or nil)
+          if warmChoice then handled = true end
+        elseif screen and shortcutMode == "face" and PAD_CHOICE[button]
+            and not commandInputReady(screen) then
+          -- If this physical face button is being used to page an intro line,
+          -- remember that it is already held before forwarding it to Gold.
+          -- The polling fallback must not reinterpret the SAME held edge as a
+          -- command after BattleState flips to menu later in the frame.
+          local key = padKey(joystick)
+          local poll = polledPadHeld[key]
+          if not poll then poll = {}; polledPadHeld[key] = poll end
+          poll[button] = true
+        end
       end
       if handled then
         local key = padKey(joystick)
@@ -651,8 +832,15 @@ function M.install(game)
         elseif button == 2 then handled = overlayControl(screen, "cancel")
         elseif button == 3 or button == 4 then handled = true end
       else
-        local choice = screen and screen.phase == "menu" and RAW_CHOICE[button]
-        if choice then handled = M.activate(screen, choice) end
+        local shortcutMode = battleShortcutMode()
+        local choice = screen and shortcutMode == "face"
+          and commandInputReady(screen) and RAW_CHOICE[button] or nil
+        if choice then
+          handled = M.activate(screen, choice)
+        elseif screen and shortcutMode == "face" and commandWarming(screen)
+            and RAW_CHOICE[button] then
+          handled = true
+        end
       end
       if handled then
         local key = padKey(joystick)
@@ -693,6 +881,15 @@ function M.install(game)
         elseif direction == "c" then
           return
         end
+      elseif screen and battleShortcutMode() == "dpad"
+          and commandInputReady(screen) then
+        local hats = { l = INDEX.fight, r = INDEX.run, d = INDEX.pack, u = INDEX.pkmn }
+        local choice = hats[direction]
+        if choice and M.activate(screen, choice) then return end
+      elseif screen and battleShortcutMode() == "dpad" and commandWarming(screen) then
+        local hats = { l = true, r = true, d = true, u = true,
+                       lu = true, ru = true, ld = true, rd = true }
+        if hats[direction] then return end
       end
       if inner then return inner(self, joystick, hat, direction, ...) end
     end
@@ -710,13 +907,20 @@ function M.update(game)
   if not M.installed or game ~= installedGame then return false end
   local screen = battleInputOwned(game)
   if not screen then
+    if overlay and overlay.screen then releasePartyPreview(overlay.screen) end
     overlay = nil
     return false
   end
   if overlay and (overlay.screen ~= screen or screen.phase ~= "menu"
       or (screen.battle and screen.battle.over)) then
+    if overlay.screen then releasePartyPreview(overlay.screen) end
     overlay = nil
   end
+  if not commandVisualReady(screen) then commandPresented[screen] = nil end
+  -- No physical A/B is required to reach the first command panel in an
+  -- ordinary custom-UI battle. The intro pages itself through Gold's own input
+  -- queue; subsequent messages/prompts remain untouched.
+  autoAdvanceIntro(screen)
   clearNativeStick(installedInput)
 
   local J = love and love.joystick
@@ -747,12 +951,16 @@ function M.update(game)
           end
         end
       else
-        for button, choice in pairs(PAD_CHOICE) do
+        local shortcutMode = battleShortcutMode()
+        local shortcutMap = shortcutMode == "dpad" and PAD_DPAD_CHOICE or PAD_CHOICE
+        for button, choice in pairs(shortcutMap) do
           local okDown, down = pcall(js.isGamepadDown, js, button)
           down = okDown and down and true or false
           if down and not held[button] then
             held[button] = true
-            if screen.phase == "menu" then M.activate(screen, choice) end
+            if shortcutMode ~= "native" and commandInputReady(screen) then
+              M.activate(screen, choice)
+            end
           elseif not down then
             held[button] = nil
           end
@@ -907,14 +1115,17 @@ local CHOICES = {
   { index = 2, kind = "triangle", label = "PKMN",  key = "UP",    dx =  0, dy = -1 },
 }
 
-local function commandReady(screen)
+commandReady = function(screen)
   if type(screen) ~= "table" or type(screen.battle) ~= "table" then return false end
   local phase = tostring(screen.phase or "")
-  if phase == "menu" then return true end
   if phase == "moves" or phase == "submenu" or phase == "done" or phase == "evolving"
       or phase == "locked-in" then
     return false
   end
+  -- IMPORTANT: Gold can already have phase == menu while a message/text box
+  -- still owns A/B for advancing dialogue. Never show/arm direct commands until
+  -- every text/animation gate is clear, or Cross/Circle can become PACK/RUN on
+  -- the same press that was meant to dismiss text.
   if screen.message or screen.anim or screen.hpAnim or screen.faintSlide
       or screen.trainerSlide or screen.statsBoxMon then
     return false
@@ -924,6 +1135,7 @@ local function commandReady(screen)
   if battle.over then return false end
   local queue = screen.queue
   if type(queue) == "table" and #queue > 0 then return false end
+  if phase == "menu" then return true end
   -- Gold can spend one fixed-step in intro/resolving immediately before it
   -- writes phase=menu. Keeping the controller panel up through that seam
   -- prevents the replacement HUD from blinking out even though the battle is
@@ -937,29 +1149,39 @@ local function drawCommandDiamond(screen, ww, wh)
   -- Keep this deliberately conspicuous. v0.2.30's compact dock could be easy
   -- to miss (or disappear for the one-frame resolving->menu seam), defeating
   -- the point of replacing Gold's command box with a controller-native UI.
-  local w = math.min(ww * 0.44, 590)
-  local h = math.min(wh * 0.43, 390)
+  local w = math.min(ww * 0.46, 620)
+  -- v0.2.75: reserve real vertical lanes for header, command diamond and
+  -- footer.  The old 43%-high panel put PACK/DOWN at ~88-96% of the panel
+  -- while the stick hint already lived at ~94%, so the two text blocks could
+  -- only overlap on shorter/wider windows.  A slightly taller panel plus a
+  -- body-relative icon size keeps every label inside its own lane.
+  local h = math.min(wh * 0.52, 430)
   local margin = math.max(18, wh * 0.025)
   local x = ww - w - margin
   local y = wh - h - margin
   local r = math.max(16, math.min(32, wh * 0.030))
   panel(x, y, w, h, r, 0.84)
 
-  local titleFont = font(math.max(20, wh * 0.028))
-  local labelFont = font(math.max(16, wh * 0.021))
-  local hintFont = font(math.max(11, wh * 0.014))
+  local titleFont = font(math.max(19, math.min(wh * 0.027, w * 0.066)))
+  local labelFont = font(math.max(13, math.min(wh * 0.019, h * 0.075)))
+  local hintFont = font(math.max(9, math.min(wh * 0.013, h * 0.050)))
   if titleFont then G.setFont(titleFont) end
   G.setColor(1, 1, 1, 0.98)
   G.print("BATTLE COMMANDS", x + w * 0.065, y + h * 0.065)
+  local shortcutMode = battleShortcutMode()
   if hintFont then G.setFont(hintFont) end
   G.setColor(1, 1, 1, 0.62)
-  G.print("FACE BUTTONS", x + w * 0.068, y + h * 0.155)
+  local subtitle = shortcutMode == "native" and "NATIVE MENU INPUT"
+    or (shortcutMode == "dpad" and "D-PAD / ARROWS" or "FACE BUTTONS")
+  G.print(subtitle, x + w * 0.068, y + h * 0.155)
 
   local cx = x + w * 0.53
-  local cy = y + h * 0.54
+  -- The icon CENTRES occupy only the middle 38% vertically.  Labels and their
+  -- direction hints then finish well above the dedicated footer lane.
+  local cy = y + h * 0.47
   local spreadX = w * 0.285
-  local spreadY = h * 0.235
-  local iconR = math.max(19, math.min(36, wh * 0.035))
+  local spreadY = h * 0.16
+  local iconR = math.max(15, math.min(32, wh * 0.030, h * 0.072))
   local selected = tostring(screen.phase or "") == "menu"
     and (tonumber(screen.menuIndex) or 1) or -1
 
@@ -967,23 +1189,37 @@ local function drawCommandDiamond(screen, ww, wh)
     local bx = cx + item.dx * spreadX
     local by = cy + item.dy * spreadY
     local on = selected == item.index
-    buttonIcon(item.kind, bx, by, iconR, on)
+    if shortcutMode == "face" then
+      buttonIcon(item.kind, bx, by, iconR, on)
+    else
+      -- D-pad/native modes deliberately avoid showing face-button glyphs that
+      -- no longer own these commands. The compact direction plate still uses
+      -- the same diamond positions and selection highlight.
+      G.setColor(1, 1, 1, on and 0.20 or 0.08)
+      roundRect("fill", bx - iconR, by - iconR * 0.72, iconR * 2, iconR * 1.44, iconR * 0.30)
+      G.setColor(1, 1, 1, on and 0.85 or 0.30)
+      roundRect("line", bx - iconR, by - iconR * 0.72, iconR * 2, iconR * 1.44, iconR * 0.30)
+    end
     if labelFont then G.setFont(labelFont) end
     G.setColor(1, 1, 1, on and 1.0 or 0.88)
     local tw = G.getFont():getWidth(item.label)
-    G.print(item.label, bx - tw * 0.5, by + iconR * 1.25)
+    local labelY = by + iconR * 1.14
+    G.print(item.label, bx - tw * 0.5, labelY)
     if hintFont then G.setFont(hintFont) end
     G.setColor(1, 1, 1, 0.54)
     local kw = G.getFont():getWidth(item.key)
     G.print(item.key, bx - kw * 0.5,
-            by + iconR * 1.25 + (labelFont and labelFont:getHeight() or 20))
+            labelY + (labelFont and labelFont:getHeight() or 20) * 0.92)
   end
 
   if hintFont then G.setFont(hintFont) end
   G.setColor(1, 1, 1, 0.68)
-  local hint = "LEFT STICK MOVE    •    RIGHT STICK CAMERA"
+  local hint = shortcutMode == "native"
+    and "D-PAD SELECT    •    A CONFIRM    •    B BACK"
+    or "LEFT STICK MOVE    •    RIGHT STICK CAMERA"
   local hw = G.getFont():getWidth(hint)
-  G.print(hint, x + (w - hw) * 0.5, y + h - G.getFont():getHeight() * 1.75)
+  local footerY = y + h - G.getFont():getHeight() * 1.55 - math.max(5, h * 0.018)
+  G.print(hint, x + (w - hw) * 0.5, footerY)
 end
 
 local function moveDef(screen, move)
@@ -1106,6 +1342,96 @@ local function selectorFooter(G, o, x, y, w, h, gap, wh)
   end
 end
 
+local function drawPartyModelPreview(screen, ww, wh, o, listX, listY, listH, gap, r)
+  local party = partyOf(screen)
+  local mon = party[tonumber(o and o.index) or 1]
+  local margin = math.max(18, wh * 0.025)
+  local x = margin
+  local y = listY
+  local w = listX - margin * 2
+  local h = listH
+  if not mon or w < math.max(190, ww * 0.18) then return false end
+
+  local G = love.graphics
+  panel(x, y, w, h, r, 0.82)
+  local titleFont = font(math.max(18, wh * 0.023))
+  local metaFont = font(math.max(11, wh * 0.013))
+  local name = cleanText(monName(screen, mon))
+  local species = cleanText(mon.species or "POKéMON")
+  local def = screen and screen.game and screen.game.data and screen.game.data.pokemon
+    and screen.game.data.pokemon[mon.species]
+  if def and def.name then species = cleanText(def.name) end
+  local dex = def and tonumber(def.dex or def.index) or nil
+  if titleFont then G.setFont(titleFont) end
+  G.setColor(1, 1, 1, 0.98)
+  G.print(name, x + w * 0.055, y + h * 0.035)
+  if metaFont then G.setFont(metaFont) end
+  G.setColor(1, 1, 1, 0.58)
+  local subtitle = species .. (dex and ("    #" .. string.format("%03d", dex)) or "")
+  G.print(subtitle, x + w * 0.055, y + h * 0.085)
+
+  local infoH = math.max(92, math.min(132, h * 0.20))
+  local modelX = x + gap * 1.3
+  local modelY = y + h * 0.14
+  local modelW = w - gap * 2.6
+  local modelH = h - infoH - h * 0.18
+  G.setColor(1, 1, 1, 0.035)
+  roundRect("fill", modelX, modelY, modelW, modelH, r * 0.58)
+  G.setColor(1, 1, 1, 0.075)
+  G.ellipse("fill", modelX + modelW * 0.50, modelY + modelH * 0.83,
+    modelW * 0.28, math.max(5, modelH * 0.045))
+
+  local preview = partyPreview()
+  local canvas, details
+  if mon.isEgg then
+    details = { error = "egg" }
+  elseif preview and type(preview.render) == "function" then
+    local ok, rendered, info = pcall(preview.render, screen, mon,
+      math.min(modelW, 480), math.min(modelH, 480))
+    if ok then canvas, details = rendered, info else M.lastPartyPreviewError = tostring(rendered) end
+  end
+  if canvas and type(canvas.getDimensions) == "function" then
+    local cw, ch = canvas:getDimensions()
+    if cw and ch and cw > 0 and ch > 0 then
+      local k = math.min(modelW / cw, modelH / ch)
+      G.setColor(1, 1, 1, 1)
+      G.draw(canvas, modelX + (modelW - cw * k) * 0.5,
+        modelY + (modelH - ch * k) * 0.5, 0, k, k)
+    end
+  else
+    local f = font(math.max(13, wh * 0.017))
+    if f then G.setFont(f) end
+    G.setColor(1, 1, 1, 0.68)
+    local msg = mon.isEgg and "EGG" or "3D MODEL UNAVAILABLE"
+    if details and details.error and details.error ~= "egg" then msg = "3D PREVIEW ERROR" end
+    G.printf(msg, modelX, modelY + modelH * 0.45, modelW, "center")
+  end
+
+  local hp = math.max(0, tonumber(mon.hp) or 0)
+  local maxHp = tonumber(mon.maxHp)
+    or (type(mon.stats) == "table" and tonumber(mon.stats.hp)) or math.max(1, hp)
+  maxHp = math.max(1, maxHp)
+  local ratio = math.max(0, math.min(1, hp / maxHp))
+  local iy = y + h - infoH - gap
+  G.setColor(1, 1, 1, 0.055)
+  roundRect("fill", x + gap, iy, w - gap * 2, infoH, r * 0.50)
+  if metaFont then G.setFont(metaFont) end
+  G.setColor(1, 1, 1, 0.66)
+  local status = mon.isEgg and "EGG" or hp <= 0 and "FNT" or cleanText(mon.status or "OK")
+  if status == "" then status = "OK" end
+  G.print(("LV %d    %s"):format(tonumber(mon.level) or 1, status),
+    x + gap * 2, iy + infoH * 0.22)
+  G.print(("HP %d / %d"):format(hp, maxHp), x + gap * 2, iy + infoH * 0.52)
+  local bx, by = x + gap * 2, iy + infoH * 0.76
+  local bw, bh = w - gap * 4, math.max(7, infoH * 0.08)
+  G.setColor(0, 0, 0, 0.48)
+  roundRect("fill", bx, by, bw, bh, bh * 0.5)
+  local cr, cg, cb = hpColor(ratio)
+  G.setColor(cr, cg, cb, 0.96)
+  if ratio > 0 then roundRect("fill", bx, by, math.max(2, bw * ratio), bh, bh * 0.5) end
+  return true
+end
+
 local function drawPartySelector(screen, ww, wh, o)
   local G = love.graphics
   local party = partyOf(screen)
@@ -1174,6 +1500,7 @@ local function drawPartySelector(screen, ww, wh, o)
       G.print("—", x + gap * 2.2, ry + rowH * 0.28)
     end
   end
+  drawPartyModelPreview(screen, ww, wh, o, x, y, h, gap, r)
   selectorFooter(G, o, x, y, w, h, gap, wh)
 end
 
@@ -1332,8 +1659,14 @@ function M.drawFull(screen, ctx)
     -- Custom PACK / PKMN selectors live on the 3D battlefield.
   elseif screen.phase == "moves" then
     drawMoves(screen, ww, wh)
-  elseif commandReady(screen) then
+  elseif battleCommandsEnabled() and commandReady(screen) then
     drawCommandDiamond(screen, ww, wh)
+    -- Arm direct command input only after the actual command panel has reached
+    -- a render pass. This is the key v0.2.74 invariant: no invisible command
+    -- can be selected between Gold's phase change and our next draw.
+    if tostring(screen.phase or "") == "menu" then
+      commandPresented[screen] = true
+    end
   end
   if not overlayFor(screen) then drawMessage(screen, ww, wh) end
   drawPhaseHint(screen, ww, wh)
@@ -1382,10 +1715,21 @@ function M.status()
     fullDraws = M.fullDraws,
     sceneDraws = M.sceneDraws,
     sceneDrawn = M.sceneDrawn,
-    commandVisible = commandReady(screenOf(installedGame)) and overlay == nil,
+    customUI = customUIEnabled(),
+    battleCommands = battleCommandsEnabled(),
+    nativeBattleUI = not battleCommandsEnabled(),
+    commandVisible = battleCommandsEnabled()
+      and commandReady(screenOf(installedGame)) and overlay == nil,
+    commandInputArmed = commandInputReady(screenOf(installedGame)),
+    autoIntroPrompts = M.autoIntroPrompts or 0,
+    lastAutoIntroError = M.lastAutoIntroError,
     customMenu = overlay and overlay.mode or nil,
+    partyPreview = partyPreviewCache and partyPreviewCache ~= false,
+    lastPartyPreviewError = M.lastPartyPreviewError,
     lastShortcutError = M.lastShortcutError,
-    controls = "left stick/WASD Pokemon; Square Fight Circle Run Cross Pack Triangle PKMN; arrows mirror commands; right stick camera",
+    controls = battleCommandsEnabled()
+      and "left stick/WASD Pokemon; Square Fight Circle Run Cross Pack Triangle PKMN; arrows mirror commands; right stick camera"
+      or "Gold original battle UI/input",
   }
 end
 

@@ -20,8 +20,8 @@ local V = ...
 local Config = V.require("config")
 local RuntimeSheets = V.require("runtime_sheets")
 local AnimatedSprites = V.require("animated_sprites")
+local EngineCompat = V.require("EngineCompat")
 local DebugLog = V.require("debug_log")
-local LuminanceSheet = V.require("luminance_sheet")
 
 local SpriteProviders = {}
 SpriteProviders.__index = SpriteProviders
@@ -84,12 +84,7 @@ local GOLD_ROOT_CANDIDATES = {
 
 local function fsExists(path)
   if type(path) ~= "string" or path == "" then return false end
-  local fs = love and love.filesystem
-  if fs and fs.getInfo then
-    local ok, info = pcall(fs.getInfo, path)
-    if ok and info then return true end
-  end
-  return false
+  return EngineCompat.exists(V.mod, path)
 end
 
 local function normalizeVariant(variant)
@@ -659,11 +654,9 @@ end
 
 ------------------------------------------------------------------------
 -- Built-in Poke Followers / GSC (provider id remains followers_ex for
--- save / chain compatibility). Assets ship split into subdirs:
---   assets/enhanced_overworld/poke_followers/normal/follower_%03d.png  (colored)
---   assets/enhanced_overworld/poke_followers/shiny/follower_%03d.png   (colored shiny)
--- The luminance (-grayscale) ramps are derived at load from the colored
--- sheets (see luminance_sheet.lua) — no separate grayscale asset files.
+-- save / chain compatibility). Assets are flat RGBA sheets in
+-- assets/enhanced_overworld/poke_followers/: normal, shiny and submerged
+-- variants. This Gen-2-only package always serves the original color art.
 -- Dex id maps 1:1. External PokePC packs remain an optional override.
 ------------------------------------------------------------------------
 
@@ -789,53 +782,42 @@ function SpriteProviders:_makeFollowersExProvider()
     local dex = resolveDexId(speciesId, game, mod)
     local wantShiny = normalizeVariant(variant) == "shiny"
 
-    -- Built-in pack: dex → follower_%03d.png split into normal/ (colored)
-    -- and shiny/ (colored shiny) subdirs. Luminance-based shading: every
-    -- COLORS mode EXCEPT ADVANCED derives a 3-shade luminance sheet from the
-    -- colored art at load (cached in the save dir — no separate -grayscale
-    -- files) and serves it with trueColor = false, so the engine's own zone
-    -- pass colors it out of the mode palette; ADVANCED serves the colored
-    -- art raw.
+    -- Built-in pack: follower_NNN_normal/shiny.png. This mod is Gen-2-only,
+    -- so always serve the original RGBA art. The previous luminance branch was
+    -- inherited from Gen 1, where a whole-canvas zone shader could recolor a
+    -- DMG-ramp sprite. Gold is CGB-native; a custom luminance follower has no
+    -- later OBJ palette assignment and therefore stays black-and-white.
     if owners:_builtinPokeFollowersReady() and dex then
       local imagePath, rel = nil, nil
       local usedVariant = wantShiny and "shiny" or "normal"
-      local redpp = Config.paletteFxRedpp and Config.paletteFxRedpp() or false
-      local lumaServed = false
-      if not redpp then
-        local cPath, cRel = owners:_pokeFollowersPath(dex, render)
-        if cPath then
-          local luma = LuminanceSheet.pathFor(cPath)
-          if luma then
-            imagePath, rel, lumaServed = luma, cRel, true
-          else
-            -- Derivation unavailable (headless): colored art stays raw.
-            imagePath, rel = cPath, cRel
-          end
-        end
-      end
-      if not imagePath and wantShiny then
-        -- prefer the shiny/ sheet, fall back to normal/.
+
+      if wantShiny then
         local sPath, sRel = owners:_pokeFollowersShinyPath(dex, render)
         if sPath and sRel then
           local sExists = true
           if mod and mod.read then
             local ok, data = pcall(function() return mod:read(sRel) end)
             sExists = ok and data ~= nil
-          elseif not fsExists(sRel) then
+          elseif not fsExists(sRel) and not fsExists(sPath) then
             sExists = false
           end
           if sExists then
             imagePath, rel = sPath, sRel
+          else
+            usedVariant = "normal"
           end
+        else
+          usedVariant = "normal"
         end
       end
+
       if not imagePath then
         imagePath, rel = owners:_pokeFollowersPath(dex, render)
       end
       if not imagePath then
         return nil, nil, "poke_followers path unresolved for dex " .. tostring(dex)
       end
-      -- Existence: prefer mod.read / fs when available.
+
       local exists = true
       if mod and mod.read then
         local ok, data = pcall(function()
@@ -849,14 +831,12 @@ function SpriteProviders:_makeFollowersExProvider()
       if not exists then
         return nil, nil, "missing poke_followers sheet for dex " .. tostring(dex)
       end
+
       local def = {
         image = imagePath,
         frames = 6,
         walker = true,
-        -- trueColor travels with the art: luminance sheets are false so the
-        -- zone pass colors them; colored art (ADVANCED / headless fallback)
-        -- is true so it draws raw.
-        trueColor = not lumaServed,
+        trueColor = true,
         id = "SPRITE_OW_WILD_" .. tostring(dex),
       }
       return def, {
@@ -940,12 +920,10 @@ function SpriteProviders:_makeFollowersExProvider()
     }, nil
   end
 
-  -- Water extension (submerged sheets).  Naming is
-  -- follower_NNN_{variant}_submerged.png.  Luminance-based shading: every
-  -- non-ADVANCED mode derives the 3-shade luminance sheet from the colored
-  -- submerged art at load (cached in the save dir — no separate
-  -- -grayscale_submerged files) and serves it through the engine's zone
-  -- pass; ADVANCED keeps the colored (normal/shiny) art.
+  -- Water extension (submerged sheets). Naming is
+  -- follower_NNN_{variant}_submerged.png. Gold keeps these original RGBA
+  -- sheets in every display mode; the old Gen-1 luminance conversion left
+  -- custom followers black-and-white because no Gen-2 zone pass recolored them.
   function provider:resolveWater(speciesId, variant, game)
     local okAvail, why = self:isAvailable(game)
     if not okAvail then
@@ -954,44 +932,24 @@ function SpriteProviders:_makeFollowersExProvider()
     local dex = resolveDexId(speciesId, game, mod)
     if not dex then return nil, nil, "dex unresolved" end
 
-    local redpp = Config.paletteFxRedpp and Config.paletteFxRedpp() or false
     local imagePath, rel, usedVariant = nil, nil, "normal"
-    local lumaServed = false
-    if not redpp then
-      local cPath, cRel = owners:_pokeFollowersSubmergedPath(dex, render, "normal")
-      local cExists = false
-      if cPath and cRel then
+    local tryVariants = (normalizeVariant(variant) == "shiny")
+      and { "shiny", "normal" } or { "normal" }
+    for _, v in ipairs(tryVariants) do
+      local pth, r = owners:_pokeFollowersSubmergedPath(dex, render, v)
+      if pth and r then
+        local exists = true
         if mod and mod.read then
-          local ok, data = pcall(function() return mod:read(cRel) end)
-          cExists = ok and data ~= nil
-        elseif fsExists(cRel) or fsExists(cPath) then
-          cExists = true
-        end
-      end
-      if cExists then
-        local luma = LuminanceSheet.pathFor(cPath)
-        if luma then
-          imagePath, rel, lumaServed = luma, cRel, true
-        else
-          imagePath, rel = cPath, cRel
-        end
-      end
-    else
-      local tryVariants = (variant == "shiny") and { "shiny", "normal" } or { "normal" }
-      for _, v in ipairs(tryVariants) do
-        imagePath, rel = owners:_pokeFollowersSubmergedPath(dex, render, v)
-        if imagePath and rel then
-          local exists = true
-          if mod and mod.read then
-            local ok, data = pcall(function() return mod:read(rel) end)
-            if not ok or data == nil then
-              exists = fsExists(rel) or fsExists(imagePath)
-            end
-          elseif not fsExists(rel) then
-            exists = false
+          local ok, data = pcall(function() return mod:read(r) end)
+          if not ok or data == nil then
+            exists = fsExists(r) or fsExists(pth)
           end
-          if exists then usedVariant = v; break end
-          imagePath, rel = nil, nil
+        elseif not fsExists(r) and not fsExists(pth) then
+          exists = false
+        end
+        if exists then
+          imagePath, rel, usedVariant = pth, r, v
+          break
         end
       end
     end
@@ -1002,7 +960,7 @@ function SpriteProviders:_makeFollowersExProvider()
       image = imagePath,
       frames = 6,
       walker = true,
-      trueColor = not lumaServed,
+      trueColor = true,
       id = "SPRITE_OW_WILD_SUBMERGED_" .. tostring(dex),
     }
     return def, {
@@ -1048,8 +1006,8 @@ function SpriteProviders:resolveWater(style, speciesId, variant, game)
         meta.providerId = providerId
         meta.kind = meta.kind or "submerged"
         meta.water = true
-        -- trueColor travels with the art the provider served (luminance
-        -- sheets in non-ADVANCED modes are false; colored art stays true).
+        -- Gen-2 providers return the art's real trueColor contract; the
+        -- built-in follower/submerged sheets are always RGBA true-color.
         return def, meta
       end
       if err then

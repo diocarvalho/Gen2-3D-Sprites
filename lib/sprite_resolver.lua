@@ -4,6 +4,7 @@
 -- Water: optional provider water API → Wilds swimming/levitates → PokeMMO →
 --        Pokedex → black. Never rebuilds rendering; only selects SpriteRenderer defs.
 local V = ...
+local EngineCompat = V.require("EngineCompat")
 local Config = V.require("config")
 local Surface = V.require("surface")
 local AnimatedSprites = V.require("animated_sprites")
@@ -293,10 +294,8 @@ function SpriteResolver:resolveWaterSprite(entity, context)
           local ok, p = pcall(function() return self.mod.assets:path(rel) end)
           if ok and type(p) == "string" then loadPath = p end
         end
-        if (love and love.filesystem and love.filesystem.getInfo
-            and love.filesystem.getInfo(loadPath))
-           or (love and love.filesystem and love.filesystem.getInfo
-               and love.filesystem.getInfo(rel)) then
+        if EngineCompat.exists(self.mod, loadPath)
+           or EngineCompat.exists(self.mod, rel) then
           local luma = (not redpp) and LuminanceSheet.pathFor(loadPath) or nil
           local image = luma or loadPath
           local def = {

@@ -10,6 +10,7 @@
 -- Lifecycle must NOT also wrap update/onMapEntered/shouldSpawn when the
 -- control engine is installed.
 local V = ...
+local EngineCompat = V.require("EngineCompat")
 local Constants = V.require("follower/constants")
 
 local DebugLog
@@ -151,6 +152,15 @@ function ControlEngine:_isYellow()
   return false
 end
 
+function ControlEngine:_partyFollowerEnabled()
+  local mod = self.mod
+  if mod and mod.options and type(mod.options.get) == "function" then
+    local ok, value = pcall(mod.options.get, mod.options, "partyFollower")
+    if ok and value ~= nil then return value ~= false end
+  end
+  return true
+end
+
 function ControlEngine:_opt(key, default)
   local cache = self._optCache
   if cache[key] ~= nil then return cache[key] end
@@ -290,6 +300,92 @@ function ControlEngine.monIdentityKey(mon)
   }, "|")
 end
 
+-- In normal trainer FOLLOW mode the selected party SLOT is authoritative, not
+-- the Pokemon fingerprint that happened to occupy it when the follower was
+-- first chosen. This is especially important for the default slot 1: when the
+-- player uses Gold's PARTY -> SWITCH command, slot 1 immediately becomes the
+-- new party leader and its follower must change with it instead of chasing the
+-- old starter's fingerprint to its new slot. Explicit box leaders remain
+-- identity-owned and the Pokemon-control modes keep their explicit selection.
+function ControlEngine:_followLeaderSlot(game)
+  local save = game and game.save
+  local party = save and save.party
+  if type(party) ~= "table" or #party == 0 then return nil end
+
+  local lead = save.pokepcLeader
+  if lead and lead.source == "party" then
+    local idx = tonumber(lead.index)
+    if idx and party[idx] then return idx end
+  end
+
+  local idx = tonumber(save.followerPartyIndex)
+  if idx and party[idx] then return idx end
+
+  -- LEAD PARTY FOLLOWER defaults to the actual party leader.
+  return party[1] and 1 or nil
+end
+
+function ControlEngine:_syncFollowLeaderBinding(game)
+  if self:controlMode(game) ~= "follow" then return false end
+  if not self:_partyFollowerEnabled() or self:followerCount(game) <= 0 then
+    return false
+  end
+
+  local save = game and game.save
+  local party = save and save.party
+  if type(party) ~= "table" or #party == 0 then return false end
+
+  local idx = self:_followLeaderSlot(game) or 1
+  local mon = party[idx]
+  -- Keep the existing healthy-follower contract. If the selected slot is
+  -- fainted/empty, follow the first healthy party member and bind to its slot.
+  if not mon or (tonumber(mon.hp) or 0) <= 0 then
+    mon, idx = nil, nil
+    for i, candidate in ipairs(party) do
+      if candidate and (tonumber(candidate.hp) or 0) > 0
+          and candidate.stopFollowing ~= true then
+        mon, idx = candidate, i
+        break
+      end
+    end
+  end
+  if not mon or not idx then return false end
+
+  local changed = false
+  local lead = save.pokepcLeader
+  if not (lead and lead.source == "party" and tonumber(lead.index) == idx) then
+    save.pokepcLeader = { source = "party", index = idx }
+    changed = true
+  end
+  if tonumber(save.followerPartyIndex) ~= idx then
+    save.followerPartyIndex = idx
+    changed = true
+  end
+
+  -- Rebind the persistent fingerprint to whichever mon NOW occupies that
+  -- slot. Selection used to deliberately follow the old Pokemon through a
+  -- party reorder; updating it here keeps every auxiliary path (menu label,
+  -- sprite refresh, water refresh) aligned with the visible Wilds trailer.
+  local selection = self.selection
+  if selection and type(selection.monFingerprint) == "function" then
+    local key = selection.monFingerprint(mon)
+    local state = selection.state
+    if key and state and (state.selectedMonKey ~= key
+        or tonumber(state.selectedSlot) ~= idx) then
+      if type(selection.selectFollower) == "function" then
+        local ok, selected = pcall(selection.selectFollower, selection, mon, game, {})
+        if ok and selected then changed = true end
+      elseif type(state.setSelection) == "function" then
+        state:setSelection(key, idx)
+        changed = true
+      end
+    end
+  end
+
+  if changed then self:bustLeaderVisual(game) end
+  return changed
+end
+
 function ControlEngine:toggleStopFollowing(mon, game)
   if not mon then return end
   mon.stopFollowing = not mon.stopFollowing
@@ -301,9 +397,10 @@ end
 
 function ControlEngine:setLeaderParty(game, partyIndex)
   if not game or not game.save then return end
-  -- Wilds owns the trailer pack independently of party order, so the
-  -- Yellow Pikachu-slot-1 layout is unnecessary and causes visible party
-  -- reordering when selecting a follower.
+  -- Bind to a party SLOT. In trainer FOLLOW mode that means a normal PARTY
+  -- reorder can replace the follower naturally: if slot 1 was selected, the
+  -- new slot-1 leader follows as soon as SWITCH completes. We still never
+  -- reorder the party from this mod-side selection call.
   game.save.pokepcLeader = { source = "party", index = partyIndex }
   game.save.followerPartyIndex = partyIndex
   if self.selection and type(self.selection.selectFollower) == "function" then
@@ -340,7 +437,25 @@ function ControlEngine:getLeaderMon(game)
     if mon then return mon, "box" end
   end
 
-  -- Prefer Wilds selection when available.
+  -- Normal trainer FOLLOW mode is slot-bound. This makes Gold's actual PARTY
+  -- leader change immediately replace the visible follower instead of the
+  -- persistent selection fingerprint following the old starter to its new
+  -- slot. Pokemon-control modes below remain identity-selected.
+  if self:controlMode(game) == "follow" then
+    local idx = self:_followLeaderSlot(game)
+    local mon = idx and save.party and save.party[idx]
+    if mon and (tonumber(mon.hp) or 0) > 0 and mon.stopFollowing ~= true then
+      return mon, "party", idx
+    end
+    for i, candidate in ipairs(save.party or {}) do
+      if candidate and (tonumber(candidate.hp) or 0) > 0
+          and candidate.stopFollowing ~= true then
+        return candidate, "party", i
+      end
+    end
+  end
+
+  -- Explicit selection remains authoritative when controlling a Pokemon.
   if self.selection and type(self.selection.getActiveFollowerMon) == "function" then
     local ok, mon, slot = pcall(self.selection.getActiveFollowerMon, self.selection, game, false)
     if ok and mon then return mon, "party", slot end
@@ -348,13 +463,13 @@ function ControlEngine:getLeaderMon(game)
 
   if lead and lead.source == "party" then
     local mon = save.party and save.party[lead.index]
-    if mon and (mon.hp or 0) >= 0 then return mon, "party" end
+    if mon and (mon.hp or 0) >= 0 then return mon, "party", lead.index end
   end
 
   local idx = save.followerPartyIndex
   if idx and save.party and save.party[idx] then
     local mon = save.party[idx]
-    if not mon.stopFollowing then return mon, "party" end
+    if not mon.stopFollowing then return mon, "party", idx end
   end
 
   if self:_isYellow() and save.party and save.party[1]
@@ -373,6 +488,11 @@ function ControlEngine:getActiveFollowerMon(game)
   -- No followers configured: no mon is active, regardless of selection
   -- state or party contents.
   if self:followerCount(game) <= 0 then return nil end
+  -- FOLLOW mode is party-slot bound; do not let Selection's fingerprint
+  -- resolution jump back to the old starter after PARTY -> SWITCH.
+  if self:controlMode(game) == "follow" then
+    return (self:getLeaderMon(game))
+  end
   if self.selection and type(self.selection.getActiveFollowerMon) == "function" then
     local ok, mon = pcall(self.selection.getActiveFollowerMon, self.selection, game, true)
     if ok and mon then return mon end
@@ -601,6 +721,7 @@ function ControlEngine:shouldUpdateWildsTrailers(game, ow)
 end
 
 function ControlEngine:partyTrailMons(game)
+  if not self:_partyFollowerEnabled() then return {} end
   local n = self:followerCount(game)
   if n <= 0 then return {} end
 
@@ -647,9 +768,8 @@ function ControlEngine:partyTrailMons(game)
   end
 
   if not front and leader then
-    -- The stock NPC (when active) renders the leader and reserves slot 1, so
-    -- the leader push is skipped here (skipMon blocks it below); the other
-    -- party mons — including Pikachu — trail behind in party order.
+    -- Wilds trailer #1 renders the selected leader. Yellow's stock Pikachu
+    -- is the one engine-owned exception and is skipped below when active.
     if leadIdx and save.party and save.party[leadIdx]
        and (save.party[leadIdx].hp or 0) > 0
        and not skipMon(leadIdx, save.party[leadIdx]) then
@@ -677,7 +797,7 @@ function ControlEngine:partyTrailMons(game)
   end
 
   -- If stock Pikachu is active, it fills slot 1.
-  -- Subtract 1 from extra trailers so total visible followers equals `n`.
+  -- Subtract 1 from Wilds trailers so total visible followers equals `n`.
   local maxTrailers = isStockPikaActive and math.max(0, n - 1) or n
   while #out > maxTrailers do out[#out] = nil end
 
@@ -1541,6 +1661,10 @@ local function compositionDirty(trailers, want)
     local t = trailers[i]
     if not t or t.pokepcTrailerKind ~= spec.kind then return true end
     if spec.kind == "mon" then
+      -- The party can contain two Pokemon of the same species (or shiny and
+      -- non-shiny copies). A species-only comparison leaves the old mon bound
+      -- after a party-leader switch, so compare the actual party object too.
+      if spec.mon ~= t.pokepcMon then return true end
       local sp = spec.mon and spec.mon.species
       local cur = t.pokepcMon and t.pokepcMon.species
       if sp ~= cur then return true end
@@ -2072,6 +2196,10 @@ function ControlEngine:update(game, ow, opts)
 
   local ok, err = pcall(function()
     self:_applyConnectionHandoff(ow)
+    -- Reconcile the trainer-follow selection BEFORE any visual/trailer sync.
+    -- This makes the first frame after PARTY -> SWITCH use the new party
+    -- leader for 2D, 3D, shiny and water follower resolution alike.
+    self:_syncFollowLeaderBinding(game)
     if self:isPokemonFront(game) or self:followerCount(game) <= 0 then
       self:_removeStockPikachu(ow)
     end
@@ -2164,25 +2292,14 @@ function ControlEngine:_refreshTrailerWaterSprites(game, ow, surface)
         local dex = AnimatedSprites and AnimatedSprites.resolveSpeciesId
           and AnimatedSprites.resolveSpeciesId(species, game, self.mod)
         if dex then
-          local Config = nil
-          pcall(function() Config = V.require("config") end)
-          local LuminanceSheet = nil
-          pcall(function() LuminanceSheet = V.require("luminance_sheet") end)
-          -- Luminance-based shading: every non-ADVANCED mode derives the
-          -- 3-shade luminance sheet from the colored submerged art at load
-          -- (cached in the save dir — no separate -grayscale_submerged
-          -- files) and serves it with trueColor=false, so the engine's zone
-          -- pass colors it out of the mode palette. ADVANCED keeps the
-          -- colored (shiny/normal) submerged sheets.
-          local redpp = Config and Config.paletteFxRedpp and Config.paletteFxRedpp()
-          local tryVariants = {}
-          if not redpp then
-            tryVariants = { "normal_submerged" }
-          elseif shiny then
-            tryVariants = { "shiny_submerged", "normal_submerged" }
-          else
-            tryVariants = { "normal_submerged" }
-          end
+          -- Gold is CGB-native, so the follower must keep the original RGBA
+          -- submerged sheet. The old Gen-1 luminance branch left the sprite
+          -- black-and-white because Gold has no later zone pass that assigns
+          -- colors to a custom follower. Preserve shiny art when it exists and
+          -- fall back to normal submerged art otherwise.
+          local tryVariants = shiny
+            and { "shiny_submerged", "normal_submerged" }
+            or { "normal_submerged" }
           for _, v in ipairs(tryVariants) do
             local rel = string.format(
               "assets/enhanced_overworld/poke_followers/follower_%03d_%s.png",
@@ -2194,21 +2311,13 @@ function ControlEngine:_refreshTrailerWaterSprites(game, ow, surface)
               end)
               if ok and type(p) == "string" then loadPath = p end
             end
-            if (love and love.filesystem and love.filesystem.getInfo
-                and love.filesystem.getInfo(loadPath))
-               or (love and love.filesystem and love.filesystem.getInfo
-                   and love.filesystem.getInfo(rel)) then
-              local luma = (not redpp) and LuminanceSheet
-                and LuminanceSheet.pathFor(loadPath) or nil
-              local image = luma or loadPath
+            if EngineCompat.exists(self.mod, loadPath)
+               or EngineCompat.exists(self.mod, rel) then
               resolved = {
-                image = image,
+                image = loadPath,
                 frames = 6,
                 walker = true,
-                -- trueColor travels with the art: luminance sheets are false
-                -- so the zone pass colors them; colored (ADVANCED / headless
-                -- fallback) is true so it draws raw.
-                trueColor = luma == nil,
+                trueColor = true,
                 id = "SPRITE_WILDS_FOLLOWER_SUBMERGED_" .. tostring(dex),
               }
               break
@@ -2288,11 +2397,13 @@ end
 function ControlEngine:syncAll(game, ow)
   game = game or self:_game()
   ow = ow or (game and game.overworld)
+  -- In trainer FOLLOW mode, update the saved fingerprint to the Pokemon that
+  -- currently occupies the selected party slot before rebuilding anything.
+  pcall(function() self:_syncFollowLeaderBinding(game) end)
   if ow then pcall(function() self:removeTrailers(ow) end) end
-  -- Never reorder the party here. Wilds designates the follower via save data
-  -- (pokepcLeader / followerPartyIndex), not party order, so the Yellow
-  -- Pikachu-slot-1 layout (ensureYellowLeaderLayout) is unnecessary and
-  -- caused visible party reordering when selecting a follower.
+  -- Never reorder the party here. The default binding is slot 1, so Gold's
+  -- own PARTY -> SWITCH operation changes the follower naturally; explicit
+  -- FOLLOW selections bind another slot without this mod moving party rows.
   if (self:isPokemonFront(game) or self:followerCount(game) <= 0) and ow and ow.player then
     ow.player._pokepcControlSpecies = nil
   end
@@ -2547,13 +2658,39 @@ function ControlEngine:install()
         local game = engine:_game()
         local ow = game and game.overworld
         pcall(function() engine:syncPlayerControlVisual(game, ow) end)
-        engine:_queueMapEntry(game, ow, payload)
-        engine._pendingMapTrailerSync = true
-        -- Seamless outside-to-outside connections keep the existing train
-        -- (translated by _applyConnectionHandoff); any other entry (warp /
-        -- door / boot) parks the pack on the player's cell.
-        if not (payload and payload.via == "connection") then
-          engine._pendingSpawnAtPlayer = true
+
+        -- v0.2.74: a Gold connection has already rebuilt the destination map,
+        -- player, NPC list and draw list by the time map.entered fires.  Apply
+        -- the preserved Wilds train RIGHT HERE instead of waiting for the next
+        -- mod update.  Deferring the reattach by even one update leaves a
+        -- renderable frame where rebuildPeople has dropped the old trailer
+        -- references but update() has not restored them yet, which reads as a
+        -- one-frame follower pop/flash at every outdoor map seam.
+        local queued = engine:_queueMapEntry(game, ow, payload)
+        local applied = false
+        if queued then
+          local ok, result = pcall(engine._applyConnectionHandoff, engine, ow)
+          applied = ok and result == true
+          if not ok then
+            logWarn(mod, "seamless follower handoff failed: %s", tostring(result))
+          end
+        end
+
+        if applied then
+          -- _applyConnectionHandoff already cleared both flags.  Keep them
+          -- explicit here so a later edit cannot accidentally recreate the
+          -- same train after it was reattached synchronously.
+          engine._pendingMapTrailerSync = false
+          engine._pendingSpawnAtPlayer = false
+        else
+          engine._pendingMapTrailerSync = true
+          -- Any non-connection entry (warp / door / boot), or a connection
+          -- whose preserved snapshot could not be reused, falls back to the
+          -- normal safe spawn path.  Genuine connections do not force a
+          -- player-cell respawn unless the handoff failed to queue/apply.
+          if not (payload and payload.via == "connection") or queued then
+            engine._pendingSpawnAtPlayer = true
+          end
         end
       end)
     subscribe("game.ready", function()
@@ -2635,6 +2772,7 @@ end
 --- Stock PikachuFollower spawn decision. False while surfing / bike / pack
 -- modes — this must never stop ControlEngine:update for Wilds trailers.
 function ControlEngine:_shouldSpawnStockFollower(game, ow)
+  if not self:_partyFollowerEnabled() then return false end
   -- Suppress stock follower if count is 0
   if self:followerCount(game) <= 0 then
     return false

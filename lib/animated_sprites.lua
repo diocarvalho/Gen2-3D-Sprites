@@ -4,6 +4,7 @@
 -- Shared mapping JSON + lazy per-species image/quad caches.
 -- Old Anima atlas path is intentionally unused at runtime.
 local V = ...
+local EngineCompat = V.require("EngineCompat")
 local Config = V.require("config")
 local JsonDecode = V.require("json_decode")
 local Tile = V.require("tile")
@@ -255,10 +256,8 @@ function AnimatedSprites:_readText(rel)
     end
   end
   local path = self:_modPath(rel)
-  if love and love.filesystem and love.filesystem.read and path then
-    local ok, data = pcall(love.filesystem.read, path)
-    if ok and type(data) == "string" then return data end
-  end
+  local data = EngineCompat.read(self.mod, path or rel)
+  if type(data) == "string" then return data end
   return nil
 end
 

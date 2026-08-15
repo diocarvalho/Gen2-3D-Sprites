@@ -1211,7 +1211,12 @@ end
 -- round trip free while staying bounded at two neighbourhoods.
 local prevLive = {}
 
-function ChunkMesher.setLive(live)
+function ChunkMesher.setLive(live, forgetPrevious)
+  -- Normal streaming keeps one previous neighbourhood warm for cheap
+  -- house/door round trips. OPEN WORLD -> OFF is different: the user is
+  -- explicitly asking to shed the expensive far-world residency now, so the
+  -- caller may discard that one-generation grace set before eviction.
+  if forgetPrevious then prevLive = {} end
   for id, c in pairs(cache) do
     if not live[id] and not prevLive[id] then
       releaseEntry(c)
@@ -1255,6 +1260,17 @@ function ChunkMesher.invalidate(mapId)
       table.remove(jobs, i)
     end
   end
+end
+
+-- v0.2.66 recovery: persistent disk cache is intentionally removed from the
+-- live mesher path. Keep these compatibility probes so newer status/debug code
+-- can ask about it without reintroducing any cache I/O or cache-era geometry.
+function ChunkMesher.diskCacheStatus()
+  return { enabled = false, recoveryDisabled = true, revision = "removed-from-live-mesher-v066" }
+end
+
+function ChunkMesher.clearDiskCache()
+  return false
 end
 
 Assets.register(function() ChunkMesher.invalidate() end)

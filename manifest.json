@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
   "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.2.35",
+  "version": "0.2.81",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -20,7 +20,7 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.35 replaces the live-battle PACK and PKMN full-screen Gold menus with Stadium-style four-row glass selectors that stay on the 3D battlefield. Pokémon switching, item use, party-target healing/status items and single-move PP restoration still call current Gen1Recomp battle routines underneath. FIGHT/RUN remain native-dispatched. Includes the full 3D battle HUD, scenery clearing, movement/camera controls and Lugia safeguards.",
+  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.81 makes trainer FOLLOW mode track the selected party slot (slot 1 by default), so PARTY -> SWITCH immediately replaces the visible follower instead of keeping the original starter fingerprint. Also refreshes same-species/shiny leader swaps. Keeps full-color 2D followers, DSM7 symmetric eye sampling, National-number Pokedex ordering, independent Pokemon/player 3D toggles, Stadium-style UI, extended OPEN WORLD zoom, seamless followers, roaming Wilds, voxel terrain and Character Selector coexistence.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,

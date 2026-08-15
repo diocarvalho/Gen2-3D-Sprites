@@ -143,9 +143,9 @@ function SpriteService:resolveFollowerSprite(opts)
   if providers and type(providers.resolve) == "function" then
     local result = providers:resolve(style, species, variant, game)
     if result and result.def and result.def.image then
-      -- trueColor travels with the art the provider served: luminance sheets
-      -- (non-ADVANCED modes) are false so the engine's zone pass colors them;
-      -- colored sheets (ADVANCED / external packs) are true so they draw raw.
+      -- trueColor travels with the provider definition. The bundled Gen-2
+      -- follower sheets are always RGBA true-color; external packs may still
+      -- state their own contract explicitly.
       local def = result.def
       local trueColor = def.trueColor ~= false
       return {
@@ -204,12 +204,10 @@ function SpriteService:resolvePartyIconDef(mon, game)
   local species = mon.species or "CHARMANDER"
   local shiny = isShinyMon(mon)
   local activeStyle = Config.spriteStyle and Config.spriteStyle(self.mod)
-  -- The art set is mode-dependent (colored in ADVANCED vs luminance
-  -- -grayscale everywhere else), so the cache key must include the redpp
-  -- gate; otherwise a mid-session COLORS toggle would keep serving stale art.
-  local redpp = Config.paletteFxRedpp and Config.paletteFxRedpp() or false
+  -- Gen-2 follower art stays full color in every display mode, so style +
+  -- species + shiny state fully identify the cached icon definition.
   local cacheKey = tostring(activeStyle or "") .. "|" .. tostring(species)
-    .. (shiny and "|s" or "|n") .. "|" .. (redpp and "c" or "g")
+    .. (shiny and "|s" or "|n")
   local cached = self._partyIconDefCache[cacheKey]
   if cached then return cached end
 
@@ -335,12 +333,10 @@ function SpriteService:drawPartyIcon(game, mon, x, y, selected, counter)
   local r, g, b, a = love.graphics.getColor()
   love.graphics.setColor(1, 1, 1, 1)
 
-  -- Luminance icons (every non-ADVANCED mode) must flow through the palette
-  -- shade pass exactly like the follower/wild sprites so they colorize per
-  -- mode. Only ADVANCED serves colored art, which must bypass the shader
-  -- and be claimed as true-color so it renders raw.
-  local trueColorMode = Config.paletteFxRedpp
-    and Config.paletteFxRedpp() or false
+  -- Gen-2 follower/party art is RGBA true-color. Do not key this off the
+  -- old Gen-1 RED++ mode: Gold has no zone recolor pass that can turn a
+  -- custom grayscale icon back into the Pokémon's real colors.
+  local trueColorMode = def.trueColor ~= false
   if trueColorMode and love.graphics.setShader then love.graphics.setShader() end
   love.graphics.draw(img, quad, x, y, 0, sx, sy)
   if trueColorMode and love.graphics.setShader and prevShader then

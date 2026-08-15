@@ -3,7 +3,7 @@
 --
 -- Path types (do not mix):
 --   relativePath  — mod-root relative, e.g. assets/generated/.../001-normal.png
---   loadPath      — love.filesystem path via mod.assets:path(relativePath)
+--   loadPath      — engine virtual path via mod.assets:path(relativePath)
 --                   e.g. mods/overworld_wild_spawns/assets/generated/.../001-normal.png
 --
 -- SpriteRenderer / Assets.image MUST receive loadPath, never a bare relativePath
@@ -11,6 +11,7 @@
 local V = ...
 local JsonDecode = V.require("json_decode")
 local Config = V.require("config")
+local EngineCompat = V.require("EngineCompat")
 
 local RuntimeSheets = {}
 RuntimeSheets.__index = RuntimeSheets
@@ -82,20 +83,8 @@ function RuntimeSheets:_readBytes(rel)
     end
   end
   local loadPath = self:_modPath(rel)
-  if love and love.filesystem and love.filesystem.read and loadPath then
-    local ok, data = pcall(love.filesystem.read, loadPath)
-    if ok and type(data) == "string" and data ~= "" then return data end
-  end
-  -- Unit-test / tooling fallback (never used as SpriteRenderer def.image).
-  local f = io.open(rel, "rb")
-  if not f and V.path then
-    f = io.open((V.path or ".") .. "/" .. rel, "rb")
-  end
-  if f then
-    local data = f:read("*a")
-    f:close()
-    if type(data) == "string" and data ~= "" then return data end
-  end
+  local data = EngineCompat.read(self.mod, loadPath or rel)
+  if type(data) == "string" and data ~= "" then return data end
   return nil
 end
 
@@ -231,22 +220,10 @@ function RuntimeSheets.probeImage(loadPath)
     end
     return false, "Assets.image returned nil", nil, nil
   end
-  -- Headless: verify file bytes exist via love or io when possible.
-  if love and love.filesystem and love.filesystem.getInfo then
-    local okInfo, info = pcall(love.filesystem.getInfo, loadPath)
-    if okInfo and info then
-      return true, "headless getInfo ok (no Assets)", nil, nil
-    end
-  end
-  local f = io.open(loadPath, "rb")
-  if not f and loadPath:match("^assets/") then
-    f = io.open(loadPath, "rb")
-  end
-  if f then
-    f:close()
-    return true, "headless file present (no Assets)", 16, 96
-  end
-  return false, "Assets.image unavailable and file not found: " .. loadPath, nil, nil
+  -- Current mod sandboxes deliberately hide raw filesystem/io access. This is
+  -- only a diagnostic probe; if Assets is unavailable, report that cleanly
+  -- instead of reaching around the sandbox.
+  return false, "Assets.image unavailable for probe: " .. loadPath, nil, nil
 end
 
 function RuntimeSheets:probeRegistration(speciesId, variant)
@@ -262,9 +239,8 @@ function RuntimeSheets:probeRegistration(speciesId, variant)
     okImg, imgErr, w, h = RuntimeSheets.probeImage(loadPath)
   end
   local getInfoRel = nil
-  if love and love.filesystem and love.filesystem.getInfo and rel then
-    local ok, info = pcall(love.filesystem.getInfo, rel)
-    getInfoRel = (ok and info) and "FOUND" or "MISSING"
+  if rel then
+    getInfoRel = EngineCompat.exists(self.mod, rel) and "FOUND" or "MISSING"
   end
   return {
     speciesId = n,

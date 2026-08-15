@@ -9,6 +9,7 @@
 -- bone, texture, animation, or DSM byte.
 
 local V = ...
+local Compat = V.require("EngineCompat")
 local StadiumFragment = V.require("StadiumFragment")
 
 local Dump = {}
@@ -375,8 +376,8 @@ end
 function Dump.write(blob, data, fileno, rom, path)
   local text, err = Dump.generate(blob, data, fileno, rom)
   if not text then return false, err end
-  local fs = love and love.filesystem
-  if not (fs and fs.write) then return false, "love.filesystem unavailable" end
+  local fs = Compat.fs()
+  if not (fs and type(fs.write) == "function") then return false, "filesystem unavailable" end
   local dir = path and path:match("^(.*)/[^/]+$")
   if dir and fs.createDirectory then pcall(fs.createDirectory, dir) end
   local ok, werr = fs.write(path or "cache/stadium/lugia_debug/249_geo_dump.txt", text)

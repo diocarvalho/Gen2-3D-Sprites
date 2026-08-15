@@ -48,6 +48,27 @@ local ModSetting = V.require("ModSetting")
 
 local AntiAlias = {}
 
+-- v0.2.69: Android/iOS render the whole Game2 frame into an outer canvas
+-- before presentation, so helper passes must restore that caller.  Desktop
+-- Gold's confirmed-working voxel path (v0.2.45) instead expects these passes
+-- to return to the physical screen; restoring an engine intermediate canvas
+-- there lets the later native 2D composite cover the voxel frame.
+local function preserveCallerCanvas()
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okInfo, info = pcall(Platform.detect)
+    if okInfo and type(info) == "table" and type(info.os) == "string" then
+      return info.os == "Android" or info.os == "iOS"
+    end
+  end
+  local ok, name = pcall(function()
+    local sys = love and love.system
+    return sys and sys.getOS and sys.getOS()
+  end)
+  return ok and (name == "Android" or name == "iOS") or false
+end
+
+
 -- the key under options.modOptions.DRAMALESS_SHAPE, shared by the row in
 -- OPTIONS and the mod manager's own settings page for this mod
 AntiAlias.KEY = "aa"
@@ -65,6 +86,10 @@ AntiAlias.setting = ModSetting.new(AntiAlias.KEY, AntiAlias.LABEL,
 -- 1 while there is no supersampling in force, which is also what every
 -- reader gets on a frame that never opened a pass at all.
 local live = 1
+
+function AntiAlias.canvasRestorePolicy()
+  return preserveCallerCanvas() and "nested-caller" or "physical-screen"
+end
 
 function AntiAlias.samples()
   return tonumber(AntiAlias.setting:get()) or 0
@@ -205,6 +230,11 @@ function AntiAlias.resolve(canvas, w, h, slot)
 
   local sh = getShader()
   local prevBlend, prevAlpha = love.graphics.getBlendMode()
+  local prevCanvas = nil
+  if preserveCallerCanvas() and love.graphics.getCanvas then
+    local okPrev, value = pcall(love.graphics.getCanvas)
+    if okPrev then prevCanvas = value end
+  end
   -- the scene canvas filters nearest for its usual 1:1 blit; the taps want
   -- linear, put back below so every other pass finds what it expects
   pcall(canvas.setFilter, canvas, "linear", "linear")
@@ -222,7 +252,12 @@ function AntiAlias.resolve(canvas, w, h, slot)
     love.graphics.clear(0, 0, 0, 0)
     love.graphics.draw(canvas, 0, 0, 0, w / cw, h / ch)
   end)
-  love.graphics.setCanvas()
+  if preserveCallerCanvas() and prevCanvas ~= nil then
+    pcall(love.graphics.setCanvas, prevCanvas)
+  else
+    -- Desktop: exact v0.2.45 pass-exit behavior.
+    pcall(love.graphics.setCanvas)
+  end
   love.graphics.setShader()
   love.graphics.setBlendMode(prevBlend or "alpha", prevAlpha)
   pcall(canvas.setFilter, canvas, "nearest", "nearest")

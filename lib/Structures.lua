@@ -286,6 +286,144 @@ function Structures.forMap(map)
     return hits >= 2
   end
 
+
+
+  -- OPEN-WORLD VOID TREE FILL. Some Gold maps do not expose a useful border
+  -- block, or their connected-map crop can still leave exterior apron cells
+  -- with nothing to repeat. In the stitched OPEN WORLD view those cells show as
+  -- white rectangular voids. Rather than leave a hole, synthesize a tree belt
+  -- from the map's OWN edge-adjacent tree art and repeat it outward.
+  --
+  -- v0.2.49 makes this edge-driven instead of broad radial filling: each side
+  -- of the map builds a small cache from the nearby in-body tree rows/columns,
+  -- so the synthetic apron follows the same local forest that already touches
+  -- that edge. If one side has no nearby trees, the fallback can borrow the
+  -- nearest other side's common tree so remaining white slots are still filled
+  -- without painting the whole map with one giant inferred canopy.
+  local treeEdgeCache = nil
+  local function buildTreeEdgeCache()
+    if treeEdgeCache ~= nil then return treeEdgeCache end
+    if not goldTreeTiles then
+      treeEdgeCache = false
+      return nil
+    end
+    local EDGE_DEPTH = 12
+    local edge = {
+      west = { sample = {}, common = nil, count = 0 },
+      east = { sample = {}, common = nil, count = 0 },
+      north = { sample = {}, common = nil, count = 0 },
+      south = { sample = {}, common = nil, count = 0 },
+      anyCommon = nil,
+    }
+    local allCounts = {}
+
+    local function addCount(bucket, tile)
+      if not tile then return end
+      bucket.counts = bucket.counts or {}
+      bucket.counts[tile] = (bucket.counts[tile] or 0) + 1
+      allCounts[tile] = (allCounts[tile] or 0) + 1
+      bucket.count = (bucket.count or 0) + 1
+    end
+
+    local function pickCommon(bucket)
+      local bestTile, bestCount = nil, -1
+      for tile, count in pairs(bucket.counts or {}) do
+        if count > bestCount then
+          bestTile, bestCount = tile, count
+        end
+      end
+      bucket.common = bestTile
+    end
+
+    local function nearestTreeInRect(x0, y0, x1, y1, anchorX, anchorY)
+      local bestTile, bestDist = nil, nil
+      for iy = y0, y1 do
+        for ix = x0, x1 do
+          local t = map:tileAt(ix, iy)
+          if t and goldTreeTiles[t] then
+            local d = math.abs(ix - anchorX) + math.abs(iy - anchorY)
+            if bestDist == nil or d < bestDist then
+              bestTile, bestDist = t, d
+            end
+          end
+        end
+      end
+      return bestTile
+    end
+
+    for y = 0, th - 1 do
+      local westTile = nearestTreeInRect(0, y, math.min(tw - 1, EDGE_DEPTH - 1), y, 0, y)
+      local eastTile = nearestTreeInRect(math.max(0, tw - EDGE_DEPTH), y, tw - 1, y, tw - 1, y)
+      edge.west.sample[y] = westTile
+      edge.east.sample[y] = eastTile
+      addCount(edge.west, westTile)
+      addCount(edge.east, eastTile)
+    end
+    for x = 0, tw - 1 do
+      local northTile = nearestTreeInRect(x, 0, x, math.min(th - 1, EDGE_DEPTH - 1), x, 0)
+      local southTile = nearestTreeInRect(x, math.max(0, th - EDGE_DEPTH), x, th - 1, x, th - 1)
+      edge.north.sample[x] = northTile
+      edge.south.sample[x] = southTile
+      addCount(edge.north, northTile)
+      addCount(edge.south, southTile)
+    end
+
+    for _, bucket in pairs(edge) do
+      if type(bucket) == 'table' then pickCommon(bucket) end
+    end
+    do
+      local bestTile, bestCount = nil, -1
+      for tile, count in pairs(allCounts) do
+        if count > bestCount then
+          bestTile, bestCount = tile, count
+        end
+      end
+      edge.anyCommon = bestTile
+    end
+
+    treeEdgeCache = edge.anyCommon and edge or false
+    return treeEdgeCache or nil
+  end
+
+  local function fallbackTreeTile(tx, ty)
+    if not goldTreeTiles then return nil end
+    if tx >= 0 and ty >= 0 and tx < tw and ty < th then return nil end
+    local edge = buildTreeEdgeCache()
+    if not edge then return nil end
+
+    local function sampleSide(side, index)
+      local bucket = edge[side]
+      if not bucket then return nil end
+      local sample = bucket.sample[index]
+      return sample or bucket.common or edge.anyCommon
+    end
+
+    local cx = math.min(math.max(tx, 0), tw - 1)
+    local cy = math.min(math.max(ty, 0), th - 1)
+
+    local choices = {}
+    if tx < 0 then
+      choices[#choices + 1] = { side = 'west', dist = -tx, idx = cy }
+    elseif tx >= tw then
+      choices[#choices + 1] = { side = 'east', dist = tx - tw + 1, idx = cy }
+    end
+    if ty < 0 then
+      choices[#choices + 1] = { side = 'north', dist = -ty, idx = cx }
+    elseif ty >= th then
+      choices[#choices + 1] = { side = 'south', dist = ty - th + 1, idx = cx }
+    end
+
+    table.sort(choices, function(a, b) return a.dist < b.dist end)
+    for _, choice in ipairs(choices) do
+      local tile = sampleSide(choice.side, choice.idx)
+      if tile then return tile end
+    end
+
+    -- Sparse edge or corner with no local sample: borrow the map's dominant
+    -- tree tile so no rectangular void survives just because one edge segment
+    -- lacked a direct neighbouring tree.
+    return edge.anyCommon
+  end
   -- Keep only the near tree belt and let the sky/void own the far surround.
   -- This is presentation-only; map collision remains the engine's original
   -- grid.  Gen 1 still follows its VOID FILL option; Gold is keyed from the
@@ -313,13 +451,19 @@ function Structures.forMap(map)
     -- floor on most Gen 2 maps, and a ring of it laid outside the shell
     -- shows over the top as a lawn of lino running off into the dark.
     if shell then return nil end
-    if not borderBlk then return nil end
-    if hullRingOnly and (tx < -ROUND_RING or ty < -ROUND_RING
+    local inRoundRing = not (tx < -ROUND_RING or ty < -ROUND_RING
                          or tx >= tw2 + ROUND_RING
-                         or ty >= th2 + ROUND_RING) then
+                         or ty >= th2 + ROUND_RING)
+    if hullRingOnly and not inRoundRing then
       return nil
     end
-    return borderBlk[(ty % 4) * 4 + (tx % 4) + 1] or 0
+    local borderTile = borderBlk and (borderBlk[(ty % 4) * 4 + (tx % 4) + 1] or 0) or nil
+    if borderTile then return borderTile end
+    if inRoundRing then
+      local fill = fallbackTreeTile(tx, ty)
+      if fill then return fill end
+    end
+    return nil
   end
   local shapeAt, tileAt = {}, {}
   for ty = y0, y1 do
@@ -353,7 +497,8 @@ function Structures.forMap(map)
           -- Authored terrain, houses, signs, fences and every in-map cell
           -- keep their existing geometry.
           local outsideBody = tx < 0 or ty < 0 or tx >= tw2 or ty >= th2
-          if outsideBody and Map.isOutdoor(def) and borderBlk and s and not s.flat then
+          if outsideBody and Map.isOutdoor(def) and s and not s.flat
+             and (borderBlk or (goldTreeTiles and tile and goldTreeTiles[tile])) then
             -- Gold's outdoor off-map fill is synthetic border scenery, never
             -- a real house/cliff object from the authored map body. Do not let
             -- ANY collision/profile classification merge that repeated fill

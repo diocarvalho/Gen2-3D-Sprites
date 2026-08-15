@@ -16,11 +16,11 @@
 -- hand a display list to whichever bone is live. Walking it builds the
 -- skeleton and decides which triangles belong to which bone.
 --
--- THE DISPLAY LISTS are F3DEX2, the N64's own graphics microcode. Only four
--- of its commands matter here -- load vertices, draw triangle(s), set the
--- geometry mode (which carries the cull bits), call/branch -- because
--- everything else is render state this rebuilds from the texture table
--- instead.
+-- THE DISPLAY LISTS are F3DEX2, the N64's own graphics microcode. Geometry
+-- lists supply vertices/triangles/cull+lighting/calls, while the material lists
+-- are scanned separately for the RDP render tile and colour state. DSM7 keeps
+-- that split explicit instead of pretending texture-table pixels alone describe
+-- how a surface is sampled.
 --
 -- THE ANIMATIONS are packed per-frame streams of 12- or 16-bit fields for
 -- 146 of the 151 species. The other five -- Pidgeot, Dodrio, Exeggutor,
@@ -317,6 +317,10 @@ function Model:build()
   self.curTlut = -1
   self.curMat = nil
   self.curTexAnim = -1
+  -- G_LIGHTING starts enabled for these model display lists. Track it across
+  -- DL calls because, unlike our old local cull shortcut, RSP geometry state
+  -- survives a nested material/display-list return.
+  self.geomLit = true
   self.stack = { -1 }
   -- The RSP vertex cache persists ACROSS display lists: a bone's list often
   -- preloads vertices that the next bone's list then indexes, which is how
@@ -414,13 +418,13 @@ function Model:walk(o, depth)
   end
 end
 
-function Model:primFor(tex, tlut, mat, texAnim, cull)
+function Model:primFor(tex, tlut, mat, texAnim, cull, lit)
   local key = tex .. "," .. tlut .. "," .. tostring(mat) .. ","
-              .. texAnim .. "," .. cull
+              .. texAnim .. "," .. cull .. "," .. tostring(lit)
   local p = self.primsByKey[key]
   if p == nil then
     p = { tex = tex, tlut = tlut, mat = mat, texAnim = texAnim, cull = cull,
-          verts = {}, nverts = 0, tris = {}, ntris = 0, remap = {} }
+          lit = lit, verts = {}, nverts = 0, tris = {}, ntris = 0, remap = {} }
     self.primsByKey[key] = p
     self.prims[#self.prims + 1] = p
   end
@@ -532,9 +536,17 @@ function Model:runDL(o, bone, depth)
       -- under either operator, so nothing is lost and the two loops that used
       -- to run 24 times each now run 11.
       cull = bor(band(cull, w0 % 0x800, 11), w1 % 0x800, 11)
+      -- The same geometry command also owns G_LIGHTING (0x20000). The vertex
+      -- payload changes meaning when it is off: bytes 12..14 become RGB.
+      if floor(w1 / 0x20000) % 2 == 1 then
+        self.geomLit = true
+      elseif floor((w0 % 0x1000000) / 0x20000) % 2 == 0 then
+        self.geomLit = false
+      end
     elseif op == 0x05 or op == 0x06 then              -- G_TRI1 / G_TRI2
       local prim = self:primFor(self.curTex, self.curTlut, self.curMat,
-                                self.curTexAnim, cull % 0x800 - cull % 0x200)
+                                self.curTexAnim, cull % 0x800 - cull % 0x200,
+                                self.geomLit)
       local flip = (floor(cull / 0x200) % 2 == 1)
                    and (floor(cull / 0x400) % 2 == 0)
       emit(prim, vbuf, flip,
@@ -553,24 +565,181 @@ function Model:runDL(o, bone, depth)
   end
 end
 
--- CI4 selects a 16-entry block of the palette through the render tile's
--- palette field; read it out of the material display list's last G_SETTILE.
-function Model:tilePalette(mat)
-  if mat == nil then return 0 end
-  local f = self.f
-  local pal = 0
-  for _ = 1, 16 do
-    local w0, w1 = f:u32(mat), f:u32(mat + 4)
-    local op = floor(w0 / 0x1000000)
-    if op == 0xF5 and floor(w1 / 0x1000000) % 8 == 0 then   -- render tile
-      pal = floor(w1 / 0x100000) % 16
-    elseif op == 0xDF then
-      break
-    end
-    mat = mat + 8
-  end
-  return pal
+-- Decode the RDP render-tile word.  DSM5 only kept `palette`, which was
+-- enough for the majority of CI4 materials but threw away the address modes
+-- that make many Stadium 2 face/body patches line up.  F3DEX2 packs the
+-- T-axis fields first and S-axis fields second in w1.
+local function decodeTileState(w1)
+  return {
+    palette = floor(w1 / 0x100000) % 16,
+    cmt = floor(w1 / 0x40000) % 4,
+    maskt = floor(w1 / 0x4000) % 16,
+    shiftt = floor(w1 / 0x400) % 16,
+    cms = floor(w1 / 0x100) % 4,
+    masks = floor(w1 / 0x10) % 16,
+    shifts = w1 % 16,
+  }
 end
+StadiumFragment.decodeTileState = decodeTileState
+
+-- G_SETTILESIZE carries the other half of the RDP sampler: SL/TL are the
+-- tile-coordinate origin SUBTRACTED from incoming S/T, while SH/TH are the
+-- clamp window's upper edge.  The fields are unsigned 10.2 fixed point.
+-- DSM6 restored SetTile but not this command; symmetric face/eye materials
+-- are where that omission is most visible because the second half samples
+-- across a mirror boundary.
+local function decodeTileSize(w0, w1)
+  return {
+    uls = (floor(w0 / 0x1000) % 0x1000) / 4.0,
+    ult = (w0 % 0x1000) / 4.0,
+    lrs = (floor(w1 / 0x1000) % 0x1000) / 4.0,
+    lrt = (w1 % 0x1000) / 4.0,
+  }
+end
+StadiumFragment.decodeTileSize = decodeTileSize
+
+local function rgbaWord(w1)
+  return { floor(w1 / 0x1000000) % 256, floor(w1 / 0x10000) % 256,
+           floor(w1 / 0x100) % 256, w1 % 256 }
+end
+
+-- One material's complete texture-addressing/color state.  Material display
+-- lists may call helpers, and several Stadium 2 materials put the final
+-- G_SETTILE beyond the old 16-command scan, so follow nested lists and keep a
+-- generous bounded budget.  Missing state deliberately falls back to LOVE's
+-- historical clamp/white/lit behavior so older/simple materials do not move.
+function Model:materialState(mat)
+  self.materialCache = self.materialCache or {}
+  local key = mat or false
+  local hit = self.materialCache[key]
+  if hit then return hit end
+  local state = {
+    palette = 0, cms = 2, cmt = 2, masks = 0, maskt = 0, shifts = 0, shiftt = 0,
+    uls = 0, ult = 0, lrs = nil, lrt = nil,
+    prim = { 255, 255, 255, 255 }, env = { 255, 255, 255, 255 },
+    explicitPrim = false, explicitEnv = false, lit = true,
+    sawTile = false, sawSize = false,
+  }
+  if mat == nil then
+    self.materialCache[key] = state
+    return state
+  end
+  local f = self.f
+  local budget = 192
+  local function walk(dl, depth)
+    if not dl or depth > 4 or budget <= 0 then return end
+    -- Some material helpers can point at engine/static display lists outside
+    -- this decompressed FRAGMENT. They are not readable here; stop cleanly
+    -- instead of turning a foreign segmented pointer into a negative string
+    -- offset and aborting the whole species build.
+    if dl < 0 or dl + 7 >= #f.d then return end
+    for _ = 1, 64 do
+      if budget <= 0 or dl < 0 or dl + 7 >= #f.d then return end
+      budget = budget - 1
+      local w0, w1 = f:u32(dl), f:u32(dl + 4)
+      local op = floor(w0 / 0x1000000)
+      dl = dl + 8
+      if op == 0xF5 and floor(w1 / 0x1000000) % 8 == 0 then -- G_SETTILE render tile
+        local t = decodeTileState(w1)
+        for k, v in pairs(t) do state[k] = v end
+        state.sawTile = true
+      elseif op == 0xF2 and floor(w1 / 0x1000000) % 8 == 0 then -- G_SETTILESIZE render tile
+        local t = decodeTileSize(w0, w1)
+        for k, v in pairs(t) do state[k] = v end
+        state.sawSize = true
+      elseif op == 0xFA then                              -- G_SETPRIMCOLOR
+        state.prim = rgbaWord(w1)
+        state.explicitPrim = true
+      elseif op == 0xFB then                              -- G_SETENVCOLOR
+        state.env = rgbaWord(w1)
+        state.explicitEnv = true
+      elseif op == 0xD9 then                              -- G_GEOMETRYMODE
+        -- G_LIGHTING = 0x00020000. F3DEX2 computes
+        -- new = (old & (w0 & 0xffffff)) | w1, so this command either
+        -- explicitly sets, explicitly clears, or leaves the bit alone.
+        if floor(w1 / 0x20000) % 2 == 1 then
+          state.lit = true
+        elseif floor((w0 % 0x1000000) / 0x20000) % 2 == 0 then
+          state.lit = false
+        end
+      elseif op == 0xDE then                              -- G_DL
+        walk(f:off(w1), depth + 1)
+        if floor(w0 / 0x10000) % 256 ~= 0 then return end
+      elseif op == 0xDF then                              -- G_ENDDL
+        return
+      end
+    end
+  end
+  walk(mat, 0)
+  self.materialCache[key] = state
+  return state
+end
+
+-- Kept as the old public helper because texture registration still asks only
+-- for CI4's palette bank.
+function Model:tilePalette(mat)
+  return self:materialState(mat).palette or 0
+end
+
+-- N64 tile coordinate shift: 1..10 shifts right; 11..15 represents a left
+-- shift of 16-shift.  The input here is already texels (S10.5 / 32).
+local function shiftedTexel(v, shift)
+  shift = tonumber(shift) or 0
+  if shift == 0 then return v end
+  if shift <= 10 then return v / (2 ^ shift) end
+  return v * (2 ^ (16 - shift))
+end
+StadiumFragment.shiftedTexel = shiftedTexel
+
+-- Resolve one N64 tile axis to the compact sampler the LOVE path can
+-- reproduce.  The RDP first makes the coordinate tile-relative by subtracting
+-- SL/TL.  A zero mask forces clamp even when the mirror/wrap bits are set.
+-- Otherwise mask N gives a 2^N-texel wrap boundary and MIRROR flips alternate
+-- periods.  For clamp, SH/TH define the last texel in the window.
+local function samplerAxis(dim, mode, mask, lo, hi, sawSize)
+  dim = math.max(1, floor(tonumber(dim) or 1))
+  mode = floor(tonumber(mode) or 2) % 4
+  mask = floor(tonumber(mask) or 0) % 16
+  lo = tonumber(lo) or 0
+
+  local clamp = (floor(mode / 2) % 2 == 1) or mask == 0
+  local span
+  if clamp then
+    if sawSize and tonumber(hi) ~= nil and hi >= lo then
+      -- gDPSetTileSize writes (width-1)<<2, so inclusive SH-SL + 1 is the
+      -- number of addressable texels.  Round the quarter-texel form only at
+      -- the final image boundary; the fractional origin itself stays exact.
+      span = floor((hi - lo) + 1.000001)
+    else
+      span = dim
+    end
+    span = math.max(1, math.min(dim, span))
+    return { origin = lo, span = span, wrap = 2, mask = mask }
+  end
+
+  span = 2 ^ mask
+  -- Stadium model textures are loaded as complete texture-table records. If a
+  -- defensive malformed descriptor asks for a wider mask than the image, do
+  -- not invent TMEM bytes; use the bytes that actually exist.
+  span = math.max(1, math.min(dim, span))
+  return { origin = lo, span = span, wrap = (mode % 2 == 1) and 1 or 0,
+           mask = mask }
+end
+StadiumFragment.samplerAxis = samplerAxis
+
+local function cropRgba(rgba, sw, sh, w, h)
+  sw, sh = floor(sw), floor(sh)
+  w, h = math.max(1, math.min(sw, floor(w))), math.max(1, math.min(sh, floor(h)))
+  if w == sw and h == sh then return rgba end
+  local rows = {}
+  local stride, take = sw * 4, w * 4
+  for y = 0, h - 1 do
+    local first = y * stride + 1
+    rows[#rows + 1] = sub(rgba, first, first + take - 1)
+  end
+  return concat(rows)
+end
+StadiumFragment.cropRgba = cropRgba
 
 -- ------- animations
 
@@ -1047,30 +1216,47 @@ function StadiumFragment.extract(data, name)
 
   local texIndexMap, texOut = {}, {}
 
-  local function register(texIdx, tlut, pal)
-    local key = texIdx .. "," .. tlut .. "," .. pal
+  local function samplerFor(texIdx, material)
+    local tex = (texIdx >= 0 and texIdx < #m.textures) and m.textures[texIdx + 1]
+    local tw, th = tex and tex.w or 32, tex and tex.h or 32
+    local su = samplerAxis(tw, material.cms, material.masks,
+                           material.uls, material.lrs, material.sawSize)
+    local sv = samplerAxis(th, material.cmt, material.maskt,
+                           material.ult, material.lrt, material.sawSize)
+    return su, sv, tw, th
+  end
+
+  -- A texture-table record can be sampled through different N64 tile windows.
+  -- Store a cropped variant for each effective window so LOVE's 0..1 sampler
+  -- addresses the same texel range the RDP did instead of stretching the full
+  -- source image across a smaller mask/clamp window.
+  local function register(texIdx, tlut, pal, material)
+    if texIdx < 0 or texIdx >= #m.textures then return -1 end
+    local su, sv = samplerFor(texIdx, material)
+    local key = table.concat({ texIdx, tlut, pal, su.span, sv.span }, ",")
     local hit = texIndexMap[key]
     if hit ~= nil then return hit end
-    if texIdx < 0 or texIdx >= #m.textures then return -1 end
     local slot = #texOut                              -- 0-based, as the file
     texIndexMap[key] = slot
     local tl = (tlut >= 0 and tlut < #m.tluts) and m.tluts[tlut + 1] or nil
     local w, h, rgba = decodeTexture(frag, m.textures[texIdx + 1], tl, pal)
-    texOut[slot + 1] = { index = texIdx, w = w, h = h, rgba = rgba }
+    rgba = cropRgba(rgba, w, h, su.span, sv.span)
+    texOut[slot + 1] = { index = texIdx, w = su.span, h = sv.span, rgba = rgba }
     return slot
   end
 
   -- an animated material can swap to any texture its channel names, so all of
-  -- them have to be decoded up front
+  -- them have to be decoded up front using that SAME material sampler.
   for _, p in ipairs(m.prims) do
     if p.ntris > 0 then
-      local pal = m:tilePalette(p.mat)
-      register(p.tex, p.tlut, pal)
+      local material = m:materialState(p.mat)
+      local pal = material.palette or 0
+      register(p.tex, p.tlut, pal, material)
       if p.texAnim >= 0 then
         for _, a in ipairs(auxAnims) do
           local tr, tn = a:track(p.texAnim)
           local vals, vn = unique(tr, tn)
-          for i = 1, vn do register(vals[i], p.tlut, pal) end
+          for i = 1, vn do register(vals[i], p.tlut, pal, material) end
         end
       end
     end
@@ -1079,8 +1265,14 @@ function StadiumFragment.extract(data, name)
   local prims = {}
   for _, p in ipairs(m.prims) do
     if p.ntris > 0 then
-      local pal = m:tilePalette(p.mat)
-      local ti = texIndexMap[p.tex .. "," .. p.tlut .. "," .. pal] or -1
+      local material = m:materialState(p.mat)
+      -- Lighting may be changed either by the geometry DL or by the material
+      -- DL the geo node installs before it. Either side disabling it changes
+      -- Vtx bytes 12..14 from normals to RGB.
+      local lit = (p.lit ~= false) and (material.lit ~= false)
+      local pal = material.palette or 0
+      local su, sv = samplerFor(p.tex, material)
+      local ti = register(p.tex, p.tlut, pal, material)
       -- texture-table index -> slot in texOut, for the animated swap
       local texMap = nil
       if p.texAnim >= 0 then
@@ -1088,28 +1280,48 @@ function StadiumFragment.extract(data, name)
           local tr, tn = a:track(p.texAnim)
           local vals, vn = unique(tr, tn)
           for i = 1, vn do
-            local slot = texIndexMap[vals[i] .. "," .. p.tlut .. "," .. pal]
-            if slot ~= nil then
+            local slot = register(vals[i], p.tlut, pal, material)
+            if slot ~= nil and slot >= 0 then
               texMap = texMap or {}
               texMap[vals[i]] = slot
             end
           end
         end
       end
-      local tw, th = 32, 32
-      if ti >= 0 then
-        tw, th = m.textures[p.tex + 1].w, m.textures[p.tex + 1].h
-      end
       local pos, uv, nrm, skin, idx = {}, {}, {}, {}, {}
+      local cr, cg, cb, ca = 0, 0, 0, 0
       for i = 1, p.nverts do
         local v = p.verts[i]
         pos[i * 3 - 2], pos[i * 3 - 1], pos[i * 3] = v[1], v[2], v[3]
-        uv[i * 2 - 1] = (v[4] / 32.0) / tw
-        uv[i * 2] = (v[5] / 32.0) / th
+        -- RDP order: shift the incoming S10.5 coordinate, subtract the tile
+        -- origin (SL/TL), then apply clamp/wrap/mirror within the effective
+        -- window.  Cropping the uploaded image to that same window lets LOVE's
+        -- native clamp/repeat sampler reproduce the final addressing step.
+        uv[i * 2 - 1] =
+          (shiftedTexel(v[4] / 32.0, material.shifts) - su.origin) / su.span
+        uv[i * 2] =
+          (shiftedTexel(v[5] / 32.0, material.shiftt) - sv.origin) / sv.span
         nrm[i * 3 - 2] = v[6] / 127.0
         nrm[i * 3 - 1] = v[7] / 127.0
         nrm[i * 3] = v[8] / 127.0
         skin[i] = v[10]
+        -- With G_LIGHTING off these same Vtx bytes are RGBA colour, not a
+        -- normal. Preserve a representative material tint so the LOVE path
+        -- does not reinterpret purple/red/grey body pieces as directions.
+        if lit == false then
+          cr = cr + (v[6] < 0 and v[6] + 256 or v[6])
+          cg = cg + (v[7] < 0 and v[7] + 256 or v[7])
+          cb = cb + (v[8] < 0 and v[8] + 256 or v[8])
+          ca = ca + (v[9] or 255)
+        end
+      end
+      local tint = { 255, 255, 255, 255 }
+      if lit == false and p.nverts > 0 then
+        tint = { floor(cr / p.nverts + 0.5), floor(cg / p.nverts + 0.5),
+                 floor(cb / p.nverts + 0.5), floor(ca / p.nverts + 0.5) }
+      elseif p.tex < 0 then
+        if material.explicitPrim then tint = material.prim
+        elseif material.explicitEnv then tint = material.env end
       end
       local ni = 0
       for i = 1, p.ntris do
@@ -1119,6 +1331,8 @@ function StadiumFragment.extract(data, name)
       end
       prims[#prims + 1] = {
         tex = ti, cull = p.cull, texAnim = p.texAnim, texMap = texMap,
+        wrapS = su.wrap, wrapT = sv.wrap,
+        lit = lit ~= false, tint = tint,
         pos = pos, uv = uv, nrm = nrm, skin = skin, nverts = p.nverts,
         idx = idx, nidx = ni,
       }

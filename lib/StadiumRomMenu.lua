@@ -14,6 +14,7 @@
 -- for: baseroms/baserom.z64.
 local V = ...
 local M = {}
+local Compat = V.require("EngineCompat")
 
 local PICKED_ROM = "picked_rom.gb"
 local PICKED_STADIUM = "picked_stadium.z64"
@@ -77,9 +78,8 @@ local function notifyDramaticShape(game)
 end
 
 local function safeRemove(path)
-  if love and love.filesystem and love.filesystem.remove then
-    pcall(love.filesystem.remove, path)
-  end
+  local f = Compat.fs()
+  if f and type(f.remove) == "function" then pcall(f.remove, path) end
 end
 
 local function setStatus(value)
@@ -87,9 +87,12 @@ local function setStatus(value)
 end
 
 local function pickedPath()
-  if not (love and love.filesystem and love.filesystem.getInfo) then return nil end
-  if love.filesystem.getInfo(PICKED_STADIUM, "file") then return PICKED_STADIUM end
-  if love.filesystem.getInfo(PICKED_ROM, "file") then return PICKED_ROM end
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function") then return nil end
+  local okStadium, stadium = pcall(f.getInfo, PICKED_STADIUM, "file")
+  if okStadium and stadium then return PICKED_STADIUM end
+  local okRom, rom = pcall(f.getInfo, PICKED_ROM, "file")
+  if okRom and rom then return PICKED_ROM end
   return nil
 end
 
@@ -126,8 +129,13 @@ end
 
 local function resolveGame(game)
   if game and game.stack then return game end
-  local ok, Game = pcall(require, "src.core.Game")
-  if ok and Game and Game.stack then return Game end
+  -- Gold's live owner is Game2.  Keep the Gen-1 fallback only for older shared
+  -- builds; requiring src.core.Game first on a Gen-2 sandbox is a dead-module
+  -- warning and can be rejected by stricter compatibility gates.
+  local ok2, Game2 = pcall(require, "src.core.Game2")
+  if ok2 and Game2 and Game2.stack then return Game2 end
+  local ok1, Game = pcall(require, "src.core.Game")
+  if ok1 and Game and Game.stack then return Game end
   return game
 end
 
@@ -158,11 +166,12 @@ local function failAndroid(game, why)
 end
 
 local function consumeAndroidPick(game)
-  if not (love and love.filesystem and love.filesystem.getInfo
-      and love.filesystem.read) then
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function" and type(f.read) == "function") then
     return false
   end
-  if not love.filesystem.getInfo(PENDING_FLAG, "file") then return false end
+  local okPending, pending = pcall(f.getInfo, PENDING_FLAG, "file")
+  if not (okPending and pending) then return false end
 
   local source = pickedPath()
   if not source then return false end
@@ -173,7 +182,10 @@ local function consumeAndroidPick(game)
   game = resolveGame(game)
   if not (game and game.stack) then return false end
 
-  local data, err = love.filesystem.read(source)
+  local okRead, data, err = pcall(f.read, source)
+  if not okRead then
+    return failAndroid(game, data or "could not read selected file")
+  end
   if type(data) ~= "string" then
     return failAndroid(game, err or "could not read selected file")
   end
@@ -211,7 +223,7 @@ local function consumeAndroidPick(game)
   if not pushBuildScreen(game) then
     -- Keep a marker so game.ready / the manager update can attach the screen
     -- that drives StadiumInstall.step(). The build itself remains alive.
-    pcall(love.filesystem.write, PENDING_FLAG, "build-screen\n")
+    if type(f.write) == "function" then pcall(f.write, PENDING_FLAG, "build-screen\n") end
   end
   return true
 end
@@ -224,8 +236,10 @@ function M.poll(game)
   -- staging file is enough for StadiumInstall on the next overworld boot and
   -- avoids legacy picker/import state interfering with the voxel pipeline.
   local consumed = consumeAndroidPick(game)
-  local osName = love and love.system and love.system.getOS and love.system.getOS() or nil
-  if osName ~= "Android" and not consumed then notifyDramaticShape(game) end
+  local osName = Compat.osName()
+  if osName ~= "Android" and osName ~= "iOS" and not consumed then
+    notifyDramaticShape(game)
+  end
   return consumed and true or false
 end
 
@@ -245,29 +259,27 @@ local function invokeRow(row, game)
 end
 
 local function startAndroidPicker()
-  if not (love and love.system and type(love.system.pickFile) == "function"
-      and love.filesystem and type(love.filesystem.write) == "function") then
+  local f = Compat.fs()
+  if not (f and type(f.write) == "function") then
     setStatus("NO PICKER")
     return false
   end
 
-  -- Mark ownership before opening Android's external Files/Documents activity.
-  -- If Android kills and recreates the app while that activity is open, the
-  -- flag survives and the next mod load can still consume picked_rom.gb.
-  pcall(love.filesystem.write, PENDING_FLAG, "stadium\n")
+  -- Own the generic mobile ROM pick before opening the engine bridge. Current
+  -- Gen1Recomp sandboxes hide love.system / love.filesystem from mod code, so
+  -- EngineCompat asks the engine-owned RomImporter to open its native picker.
+  -- The bridge returns the selection as picked_rom.gb; our poller validates it
+  -- as N64 data and feeds the bytes directly to StadiumInstall.
+  pcall(f.write, PENDING_FLAG, "stadium\n")
   safeRemove(PICKED_ROM)
   safeRemove(PICKED_STADIUM)
   setStatus("PICK...")
 
-  -- Gen1Recomp currently recognizes rom/mod/sav kinds.  "rom" opens the
-  -- general Android document picker and copies the chosen file to
-  -- picked_rom.gb.  The original file may be .z64/.v64/.n64; our validator
-  -- above identifies its actual byte order after the picker returns.
-  local ok, launched = pcall(love.system.pickFile, "rom")
+  local ok, launched, why = pcall(Compat.openMobileRomPicker)
   if not ok or not launched then
     safeRemove(PENDING_FLAG)
     setStatus("NO PICKER")
-    return false
+    return false, ok and why or launched
   end
   return true
 end
@@ -277,10 +289,10 @@ function M.choose(game)
   -- Its action opens the in-game "PUT STADIUM US 1.0 HERE" instruction screen
   -- seen in older builds. the recomp engine's love.system.pickFile instead launches
   -- Android's real Storage Access Framework / Files app.
-  local osName = love and love.system and love.system.getOS and love.system.getOS() or nil
-  if osName == "Android" then
+  local osName = Compat.osName()
+  if osName == "Android" or osName == "iOS" then
     if startAndroidPicker() then return true end
-    setStatus("NO ANDROID PICKER")
+    setStatus("NO MOBILE PICKER")
     return false
   end
 

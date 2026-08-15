@@ -50,6 +50,7 @@
 local V = ...
 
 local StadiumInstall = V.require("StadiumInstall")
+local Compat = V.require("EngineCompat")
 
 local StadiumRomPick = {}
 
@@ -77,24 +78,23 @@ StadiumRomPick.LABEL = label()
 
 -- ------- the host, at arm's length
 --
--- Everything below is read through pcall and a presence test. The mod loader
--- hands a mod the real `io` and `os` today, but a mod that TAKES that for
--- granted is one that stops loading the day a sandbox arrives -- and this is
--- a convenience on top of a folder scan that works without any of it.
+-- Everything below goes through EngineCompat. Current Gen1Recomp deliberately
+-- sandboxes raw io and love.system/love.filesystem away from mod chunks, while
+-- engine-owned Platform / SaveData / HostShell still provide the same services
+-- safely. Older builds fall back through the same guarded compatibility layer.
 
 local function haveShell()
-  local ok, popen = pcall(function() return io and io.popen end)
-  return (ok and popen) and true or false
+  local shell = Compat.hostShell()
+  return shell and type(shell.popen) == "function"
 end
 
 local function haveFiles()
-  local ok, open = pcall(function() return io and io.open end)
-  return (ok and open) and true or false
+  local f = Compat.fs()
+  return f and type(f.read) == "function" and type(f.getInfo) == "function"
 end
 
 local function osName()
-  local ok, name = pcall(function() return love.system.getOS() end)
-  return ok and name or nil
+  return Compat.osName()
 end
 
 -- Run a command and return its trimmed stdout, or nil for anything that did
@@ -102,13 +102,7 @@ end
 -- is not there.
 local function commandOutput(cmd)
   if not haveShell() then return nil end
-  local ok, pipe = pcall(io.popen, cmd)
-  if not (ok and pipe) then return nil end
-  local okRead, out = pcall(pipe.read, pipe, "*a")
-  pcall(pipe.close, pipe)
-  if not (okRead and type(out) == "string") then return nil end
-  out = out:gsub("^%s+", ""):gsub("%s+$", "")
-  return (out ~= "") and out or nil
+  return Compat.pipeOutput(Compat.hostShell(), cmd)
 end
 
 -- ------- can this machine open a DIALOG
@@ -189,10 +183,11 @@ end
 -- bytes, or nil plus a reason short enough to fit the loading screen.
 function StadiumRomPick.read(path)
   if not haveFiles() then return nil, "no file access" end
-  local ok, fp = pcall(io.open, path, "rb")
-  if not (ok and fp) then return nil, "could not open that file" end
-  local okRead, bytes = pcall(fp.read, fp, "*a")
-  pcall(fp.close, fp)
+  local okStage, relOrErr = Compat.stageExternal(path, StadiumRomPick.PICKED)
+  if not okStage then return nil, relOrErr or "could not open that file" end
+  local f = Compat.fs()
+  local okRead, bytes = pcall(f.read, StadiumRomPick.PICKED)
+  if type(f.remove) == "function" then pcall(f.remove, StadiumRomPick.PICKED) end
   if not (okRead and type(bytes) == "string" and #bytes > 0) then
     return nil, "could not read that file"
   end
@@ -300,24 +295,28 @@ end
 -- would be imported again on the next boot, and kept forever if the import
 -- failed.
 function StadiumRomPick.poll(game)
-  local f = love and love.filesystem
-  if not (f and f.getInfo) then return false end
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function") then return false end
   if StadiumInstall.status.state == "building" then return false end
   local ok, info = pcall(f.getInfo, StadiumRomPick.PICKED, "file")
   if not (ok and info) then return false end
 
   local okRead, bytes = pcall(f.read, StadiumRomPick.PICKED)
-  pcall(f.remove, StadiumRomPick.PICKED)
+  if type(f.remove) == "function" then pcall(f.remove, StadiumRomPick.PICKED) end
   if not (okRead and type(bytes) == "string") then return false end
 
-  local StadiumScreen = V.require("StadiumScreen")
-  local started, err = StadiumInstall.beginFrom(bytes, StadiumRomPick.PICKED)
-  if not started then
+  local okScreen, StadiumScreen = pcall(V.require, "StadiumScreen")
+  local okBegin, started, err = pcall(StadiumInstall.beginFrom, bytes, StadiumRomPick.PICKED)
+  if not okBegin then
+    StadiumInstall.status.state = "failed"
+    StadiumInstall.status.error = tostring(started)
+  elseif not started then
     StadiumInstall.status.state = "failed"
     StadiumInstall.status.error = tostring(err)
   end
-  if game and game.stack then
-    game.stack:push(StadiumScreen.new(game, true))
+  if okScreen and StadiumScreen and game and game.stack
+      and type(StadiumScreen.new) == "function" then
+    pcall(function() game.stack:push(StadiumScreen.new(game, true)) end)
   end
   return true
 end

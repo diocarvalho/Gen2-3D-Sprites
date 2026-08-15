@@ -439,6 +439,7 @@ end
 -- The last live-set key, so eviction only runs when the neighbourhood
 -- actually changes (a map crossing), not every frame.
 local lastLiveKey = nil
+local lastOpenWorld = nil
 
 -- Request everything `state`'s frame wants and evict what it no longer
 -- does; returns the current map's terrain mesh (or nil while it builds)
@@ -449,6 +450,45 @@ local lastLiveKey = nil
 -- the destination's build: the map swaps behind the fade, and waiting
 -- for the first visible frame to request meshes would show the flat
 -- fallback while the first slices run.
+-- OPEN WORLD is not a flat overview. Every connected map is meshed with the
+-- same FULL voxel geometry the current map uses. Internal seams are masked by
+-- the bodies of the map's own cardinal neighbours, while the outside edge keeps
+-- the normal 32-tile voxel border/apron. That gives the whole stitched region a
+-- continuous 3D perimeter instead of exposing sky/void between or around maps.
+local function openWorldFullMasks(state, rec)
+  if not (state and state._stadiumOpenWorldNeighbors) then return nil end
+  local placements = { [state.map.id] = { map = state.map, ox = 0, oy = 0 } }
+  for _, nb in ipairs(state.neighbors or {}) do
+    placements[nb.map.id] = { map = nb.map, ox = nb.ox, oy = nb.oy }
+  end
+  local here = rec or placements[state.map.id]
+  if not (here and here.map and here.map.def) then return nil end
+  local masks = {}
+  for _, conn in pairs(here.map.def.connections or {}) do
+    local id = conn and (conn.mapId or conn.map)
+    local other = id and placements[id]
+    if other and other.map and other.map.def then
+      -- ChunkMesher masks are LOCAL to the map being built. Convert the other
+      -- body's solved world rectangle back into this map's local coordinates.
+      local ox = (tonumber(other.ox) or 0) - (tonumber(here.ox) or 0)
+      local oy = (tonumber(other.oy) or 0) - (tonumber(here.oy) or 0)
+      masks[#masks + 1] = {
+        ox, oy,
+        ox + other.map.def.width * 32,
+        oy + other.map.def.height * 32,
+      }
+    end
+  end
+  return masks
+end
+
+local function readyNeighbor(state, i)
+  local ready = state and state._stadiumNeighborReady
+  return ready == nil or ready[i] ~= nil
+end
+
+VoxelScene.openWorldFullMasks = openWorldFullMasks
+
 function VoxelScene.prefetch(state)
   local Voxel = V.require("VoxelState")
 
@@ -458,27 +498,40 @@ function VoxelScene.prefetch(state)
   -- is evicted -- meshes released, analysis dropped -- so memory stays
   -- bounded by the neighbourhood instead of growing with every area
   -- ever visited.
-  local liveKey = state.map.id
+  local liveKey = (state._stadiumOpenWorldNeighbors and "open|" or "stream|")
+    .. state.map.id
   local live = { [state.map.id] = true }
   for _, nb in ipairs(state.neighbors or {}) do
     live[nb.map.id] = true
     liveKey = liveKey .. "|" .. nb.map.id
   end
   if liveKey ~= lastLiveKey then
+    local openWorld = state._stadiumOpenWorldNeighbors == true
+    local trimFarNow = lastOpenWorld == true and not openWorld
     lastLiveKey = liveKey
-    ChunkMesher.setLive(live)
+    lastOpenWorld = openWorld
+    ChunkMesher.setLive(live, trimFarNow)
     -- RED++ bakes one atlas per map, so its animated copy is per map too
     -- and is bounded by the same neighbourhood
     TerrainAtlas.setLive(live)
   end
 
-  -- masks: where connected neighbour BODIES sit, so the border ring is
-  -- suppressed under them (see runGeometry)
-  local masks = {}
-  for _, nb in ipairs(state.neighbors or {}) do
-    masks[#masks + 1] = { nb.ox, nb.oy,
-                          nb.ox + nb.map.def.width * 32,
-                          nb.oy + nb.map.def.height * 32 }
+  -- masks: where connected neighbour BODIES sit, so each full map's border
+  -- ring is suppressed under the maps touching it. In OPEN WORLD every map is
+  -- a full voxel island with its own outside apron; in streaming mode this is
+  -- the historical current-map-only full mesh.
+  local masks
+  if state._stadiumOpenWorldNeighbors then
+    masks = openWorldFullMasks(state, { map = state.map, ox = 0, oy = 0 })
+  else
+    masks = {}
+    for _, nb in ipairs(state.neighbors or {}) do
+      if nb.depth == nil or nb.depth <= 1 then
+        masks[#masks + 1] = { nb.ox, nb.oy,
+                              nb.ox + nb.map.def.width * 32,
+                              nb.oy + nb.map.def.height * 32 }
+      end
+    end
   end
 
   -- Builds are asynchronous (ChunkMesher.pump runs in the pipeline's
@@ -501,17 +554,37 @@ function VoxelScene.prefetch(state)
     terrain, water = ChunkMesher.pair(state.map, true)
   end
   local nbMesh, nbWater = {}, {}
+  local openWorld = state._stadiumOpenWorldNeighbors == true
   for i, nb in ipairs(state.neighbors or {}) do
-    -- Gold v0.2.04 streams one real connected map ahead in every cardinal
-    -- direction.  All neighbour jobs begin in the background; the destination
-    -- nearest an approached edge is promoted to the current-map time slice so
-    -- the player is much less likely to outrun its body mesh.
-    ChunkMesher.request(nb.map, true, nil, nb.urgent == true)
-    nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
-    if not nbMesh[i] then
+    if openWorld then
+      -- Full meshes on ALL connected maps. This is the important difference
+      -- from the old one-ring streamer: body-only meshes have no border/apron,
+      -- so a world-scale camera exposes empty void at the outside perimeter.
+      -- Each map gets masks for its own connected seams and retains its outer
+      -- voxel ring everywhere else.
+      local nbMasks = openWorldFullMasks(state, nb)
+      ChunkMesher.request(nb.map, false, nbMasks, nb.urgent == true)
       nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, false)
+      if not nbMesh[i] then
+        -- A previously cached body mesh is still useful while the full variant
+        -- cooks; use it temporarily instead of dropping the ENTIRE scene back
+        -- to native 2D. The full ring replaces it automatically when ready.
+        nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
+      end
+    else
+      ChunkMesher.request(nb.map, true, nil, nb.urgent == true)
+      nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
+      if not nbMesh[i] then
+        nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, false)
+      end
     end
   end
+  -- Record exactly which far maps have drawable terrain THIS frame. Every
+  -- later terrain/figure/grass/shadow loop consults this, so one map still
+  -- building (or one bad far-map asset) cannot take the proven current 3D
+  -- world down with it. This directly prevents the all-flat fallback seen in
+  -- v0.2.46 while the full region is warming.
+  state._stadiumNeighborReady = nbMesh
   Voxel.ready = terrain ~= nil
   return terrain, nbMesh, water, nbWater
 end
@@ -655,11 +728,13 @@ local function drawCast(state, posed, atlasFor)
     Voxel3D.draw(mesh, atlasFor(state.map), model, figPull,
                  ShadowMap.snug(caster))
   end)
-  for _, nb in ipairs(state.neighbors or {}) do
-    eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
-      Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull,
-                   ShadowMap.snug(caster))
-    end)
+  for i, nb in ipairs(state.neighbors or {}) do
+    if readyNeighbor(state, i) then
+      eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
+        Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull,
+                     ShadowMap.snug(caster))
+      end)
+    end
   end
   -- and the seams are back on for the terrain art that follows: grass and
   -- flowers are the world's own drawing, not people
@@ -837,8 +912,10 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
 
   ShadowMap.draw(terrain, atlasFor(state.map), nil)
   for i, nb in ipairs(state.neighbors or {}) do
-    ShadowMap.draw(nbMesh[i], atlasFor(nb.map),
-                   Mat4.translate(nb.ox, 0, nb.oy))
+    if nbMesh[i] then
+      ShadowMap.draw(nbMesh[i], atlasFor(nb.map),
+                     Mat4.translate(nb.ox, 0, nb.oy))
+    end
   end
   -- The water surface, which the terrain mesh no longer carries (it is its
   -- own reflective pass now -- see Water). The sun still has to see it, or
@@ -846,8 +923,10 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- far plane answers for the surface a shoreline tree's shadow falls on.
   ShadowMap.draw(water, atlasFor(state.map), nil)
   for i, nb in ipairs(state.neighbors or {}) do
-    ShadowMap.draw(nbWater and nbWater[i], atlasFor(nb.map),
-                   Mat4.translate(nb.ox, 0, nb.oy))
+    if nbWater and nbWater[i] then
+      ShadowMap.draw(nbWater[i], atlasFor(nb.map),
+                     Mat4.translate(nb.ox, 0, nb.oy))
+    end
   end
   -- flower billboards live outside the terrain mesh (they draw after the
   -- characters, pulled -- see render), but the sun still sees them: a
@@ -857,9 +936,11 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- of starting a bias-width away.
   ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
                  ShadowMap.snug(nil))
-  for _, nb in ipairs(state.neighbors or {}) do
-    ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                   ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+  for i, nb in ipairs(state.neighbors or {}) do
+    if readyNeighbor(state, i) then
+      ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+    end
   end
   -- From here down it is the CAST, marked as such in the map (see
   -- ShadowMap.sprites) so water can decline them: everything the world casts
@@ -871,10 +952,12 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   eachFigure(state.map, 0, 0, function(mesh, _, caster)
     ShadowMap.draw(mesh, atlasFor(state.map), ShadowMap.snug(caster))
   end)
-  for _, nb in ipairs(state.neighbors or {}) do
-    eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
-      ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
-    end)
+  for i, nb in ipairs(state.neighbors or {}) do
+    if readyNeighbor(state, i) then
+      eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
+        ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
+      end)
+    end
   end
   for _, p in ipairs(posed) do
     local def = p.sprite.def
@@ -951,8 +1034,20 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   local g = VoxelScene.glintStep(glint, cx, cy)
   Voxel3D.glassPhase, Voxel3D.glassGlint = g.phase, g.amp
 
+  local atlasCache = {}
   local function atlasFor(map)
-    return TerrainAtlas.forMap(map, modeColors(paletteFor, map))
+    if not map then return nil end
+    local key = map.id or tostring(map)
+    if atlasCache[key] ~= nil then return atlasCache[key] or nil end
+    local ok, atlas = pcall(TerrainAtlas.forMap, map, modeColors(paletteFor, map))
+    if not ok or not atlas then
+      -- GoldVoxelBridge already attached the exact live Gen-2 tileset atlas to
+      -- map.renderer.image. It is a safe static texture fallback if an animated
+      -- per-map atlas cannot be created for one distant map.
+      atlas = map.renderer and map.renderer.image or nil
+    end
+    atlasCache[key] = atlas or false
+    return atlas
   end
 
   -- sprite palettes only exist in the SGB modes; under RED++ the OBP bake
@@ -1037,8 +1132,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   if liveBattleArena then Voxel3D.battleOcclusion(liveBattleArena, liveBattleGround) end
   Voxel3D.draw(terrain, atlasFor(state.map), nil)
   for i, nb in ipairs(state.neighbors or {}) do
-    Voxel3D.draw(nbMesh[i], atlasFor(nb.map),
-                 Mat4.translate(nb.ox, 0, nb.oy))
+    if nbMesh[i] then
+      Voxel3D.draw(nbMesh[i], atlasFor(nb.map),
+                   Mat4.translate(nb.ox, 0, nb.oy))
+    end
   end
   if liveBattleArena then Voxel3D.battleOcclusion(nil) end
 
@@ -1195,9 +1292,11 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   local pull = VoxelScene.pull(lean)
   if liveBattleArena then Voxel3D.battleOcclusion(liveBattleArena, liveBattleGround) end
   Voxel3D.draw(ChunkMesher.grass(state.map), atlasFor(state.map), nil, pull)
-  for _, nb in ipairs(state.neighbors or {}) do
-    Voxel3D.draw(ChunkMesher.grass(nb.map), atlasFor(nb.map),
-                 Mat4.translate(nb.ox, 0, nb.oy), pull)
+  for i, nb in ipairs(state.neighbors or {}) do
+    if readyNeighbor(state, i) then
+      Voxel3D.draw(ChunkMesher.grass(nb.map), atlasFor(nb.map),
+                   Mat4.translate(nb.ox, 0, nb.oy), pull)
+    end
   end
   -- flower billboards: pulled like the characters and the grass, MINUS
   -- the depth of 8 world pixels along the view (8 sin a -- the camera
@@ -1214,10 +1313,12 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- through the same snugged transform the sun stored them with
   Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil,
                fpull, ShadowMap.snug(nil))
-  for _, nb in ipairs(state.neighbors or {}) do
-    Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                 Mat4.translate(nb.ox, 0, nb.oy), fpull,
-                 ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+  for i, nb in ipairs(state.neighbors or {}) do
+    if readyNeighbor(state, i) then
+      Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                   Mat4.translate(nb.ox, 0, nb.oy), fpull,
+                   ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+    end
   end
   if liveBattleArena then Voxel3D.battleOcclusion(nil) end
 

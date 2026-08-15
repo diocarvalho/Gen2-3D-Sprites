@@ -32,7 +32,7 @@ if detectedGeneration == 2 then
   mod.log:info("Gold/Silver standalone build: Pokemon Generation 2 detected; Stadium 2 importer targets National Dex 1-251")
 else
   mod.log:warn("STADIUM2_OVERWORLD_MODELS requires Pokemon Gold or Silver. Active game reports Pokemon Generation %s; this Gen 2 port will stay inactive.", tostring(detectedGeneration))
-  mod.exports.version = "0.2.35"
+  mod.exports.version = "0.2.81"
   mod.exports.targetGeneration = 2
   mod.exports.generation = detectedGeneration
   mod.exports.gen2Compatible = true
@@ -89,12 +89,12 @@ local function bootEmbeddedWilds()
   return wilds
 end
 
--- Gold/Silver renderer bootstrap (v0.2.35: custom Stadium PACK/PKMN battle selectors; prior live-scene/controller/camera/Lugia fixes retained)
+-- Gold/Silver renderer bootstrap (v0.2.70: current drawWorld + compose coexistence)
 --
--- Current Gold exposes a supported whole-window `render.compose` hook.  The
--- embedded voxel bridge is now a renderer PROVIDER only; it does not patch any
--- Gen-2 World method and does not register the inert Gen-1 drawWorld pipeline.
--- GoldComposeBridge invokes it from the live Gold frame seam later below.
+-- GoldVoxelBridge is the renderer provider only: it prepares the embedded voxel
+-- scene and exposes renderFrame(world, ctx). GoldPipelineBridge connects it to
+-- current Gen1Recomp's engine-owned drawWorld seam, while GoldComposeBridge
+-- remains the older-host and Character Selector coexistence path.
 local function bootGoldVoxelBridge()
   local source, readErr = mod:read("lib/GoldVoxelBridge.lua")
   if not source then return nil, nil, tostring(readErr or "Gold voxel bridge is missing") end
@@ -120,10 +120,10 @@ local ds, dramaticShapeId
 if GoldVoxelBridge and BaseV then
   ds = mod
   dramaticShapeId = "STADIUM2_GOLD_COMPOSE"
-  mod.log:info("Gold/Silver voxel renderer provider loaded; official render.compose hook will own Gold world frames and redraw overlay UI above voxels")
+  mod.log:info("Gold/Silver voxel renderer provider loaded; current Gold drawWorld pipeline will own world frames when available, with render.compose retained as fallback")
 else
   mod.log:error("Gold/Silver voxel renderer provider failed: %s", tostring(bridgeErr))
-  mod.exports.version = "0.2.35"
+  mod.exports.version = "0.2.81"
   mod.exports.rendererInstalled = false
   mod.exports.rendererError = "Gold/Silver voxel renderer provider failed: " .. tostring(bridgeErr)
   mod.exports.hostDetected = false
@@ -137,7 +137,8 @@ else
 end
 
 -- v0.1.89 is a Gen-2-only runtime. Legacy Yellow/Followers-EX glue was
--- intentionally removed; Gold's native party follower is installed below.
+-- intentionally removed. The embedded Wilds trailer mover owns the visible
+-- Gold follower; the native Gen-2 follower bridge below is cleanup/fallback only.
 
 local function loadLocal(rel, arg)
   local source, readErr = mod:read(rel)
@@ -149,23 +150,55 @@ local function loadLocal(rel, arg)
   return chunk(arg)
 end
 
+-- v0.2.64 recovery guard: optional post-v0.2.45 helpers must never be able to
+-- abort Gold's boot. Their installers patch presentation/settings seams only;
+-- if one is incompatible with a particular Gen1Recomp build, log it and keep
+-- the proven core voxel/world renderer alive.
+local function safeInstall(label, module)
+  if not (module and type(module.install) == "function") then
+    return false, label .. " has no install()"
+  end
+  local ok, installed, err = pcall(module.install)
+  if not ok then
+    local message = tostring(installed)
+    mod.log:warn("%s disabled after install error: %s", label, message)
+    return false, message
+  end
+  if installed == false then
+    local message = tostring(err or "installer returned false")
+    mod.log:warn("%s not installed: %s", label, message)
+    return false, message
+  end
+  return true, err
+end
+
+local function safeLoadLocal(label, rel, arg)
+  local ok, module = pcall(loadLocal, rel, arg)
+  if ok and type(module) == "table" then return module end
+  local message = tostring(ok and "module did not return a table" or module)
+  mod.log:warn("%s disabled after load error: %s", label, message)
+  return {
+    install = function() return false, message end,
+    status = function() return { installed = false, lastError = message } end,
+  }
+end
+
 -- Load our configuration first, then make a tiny namespace that delegates all
 -- Dramatic Shape modules to Dramatic Shape while intercepting our own config.
 local Config = loadLocal("lib/OverworldStadiumConfig.lua", BaseV)
 local PokemonHeights = loadLocal("lib/PokemonHeights.lua", BaseV)
 local PokemonLocomotion = loadLocal("lib/PokemonLocomotion.lua", BaseV)
 
--- Gold now exposes an engine-owned party-follower surface whose spawn gate is
--- opt-in for mods. Enable party slot #1 by default and let the native Gen-2
--- follower trail own movement, map seams, and NPC integration. The Stadium
--- renderer resolves the live party lead on that entity, so changing party order
--- changes the follower model without rebuilding the map.
-local GoldPartyFollower = loadLocal("lib/GoldPartyFollower.lua", { mod = mod })
-local goldPartyFollowerInstalled, goldPartyFollowerErr = GoldPartyFollower.install()
+-- Gold exposes an engine-owned party-follower surface, but embedded Wilds
+-- already owns a map-safe trailer mover and follower selection. v0.2.73 keeps
+-- Wilds as the single visible follower owner (including slot #1); this bridge
+-- disables/cleans native Gold copies and retains the engine follower only as a
+-- fallback if the embedded Wilds follower runtime ever fails to boot.
+local GoldPartyFollower = safeLoadLocal("Gold party follower bridge", "lib/GoldPartyFollower.lua", { mod = mod })
+local goldPartyFollowerInstalled, goldPartyFollowerErr =
+  safeInstall("Gold party follower bridge", GoldPartyFollower)
 if goldPartyFollowerInstalled then
-  mod.log:info("Gold party-slot-1 follower enabled through src.world.gen2.Follower")
-else
-  mod.log:warn("Gold party follower not installed: %s", tostring(goldPartyFollowerErr))
+  mod.log:info("Gold follower ownership bridge installed; embedded Wilds owns slot #1 with native Gen-2 fallback only")
 end
 
 -- Put Stadium ROM selection inside THIS MOD'S Mod Manager -> Options screen.
@@ -176,6 +209,89 @@ local RomMenuV = { require = BaseV.require }
 local StadiumRomMenu = loadLocal("lib/StadiumRomMenu.lua", RomMenuV)
 local managerOptionsInstalled = StadiumRomMenu.installModManagerOptions(mod)
 
+-- v0.2.38: patch Gold's REAL Gen-2 START / pause screen (src.ui.gen2.StartMenu),
+-- the PACK / PokéGEAR / player / SAVE menu visible during gameplay.  Its
+-- engine-owned update/choose/close logic stays intact; only draw() is replaced
+-- with the exact custom PACK/PKMN battle-selector visual language.
+local PauseMenuBattleStyle = safeLoadLocal("Battle-style pause menu UI", "lib/PauseMenuBattleStyle.lua", { mod = mod })
+local pauseStyleInstalled, pauseStyleErr =
+  safeInstall("Battle-style pause menu UI", PauseMenuBattleStyle)
+
+-- v0.2.39: the pause menu now grows tall enough to expose its normal complete
+-- row set, and every built-in Gold screen launched from it receives the same
+-- custom battle-selector presentation.  The constructors are tagged only when
+-- StartMenu is the caller, so Party/Pack/Pokedex/Pokegear screens used by
+-- battles, scripts and other engine flows keep their native presentation.
+-- v0.2.41 introduced PartyModelPreview. v0.2.42 makes Party/Summary skinning
+-- deterministic on Gen1Recomp v0.1.83 (not dependent on StartMenu constructor
+-- timing) and BattleControllerUI now uses the same preview in its live 3D PKMN
+-- selector. Pass the renderer namespace so both paths share StadiumMon/Voxel3D.
+local GoldSubmenuBattleStyle = safeLoadLocal("Battle-style Gold pause submenus", "lib/GoldSubmenuBattleStyle.lua", BaseV)
+local submenuStyleInstalled, submenuStyleErr =
+  safeInstall("Battle-style Gold pause submenus", GoldSubmenuBattleStyle)
+
+-- v0.2.77: split character presentation into independent Pokemon-model and
+-- human-player-model switches. Stadium Pokemon geometry remains controlled by
+-- stadium3dSprites; red_3d_player's selected Gold skin is controlled separately
+-- by player3dModel so either layer can fall back to its 2D Gold card alone.
+-- v0.2.76: extend the same Stadium glass language to ordinary Gold dialogue
+-- and YES/NO prompts. TextBox/ChoiceBox keep all engine timing, paging and
+-- input; only their draw methods are replaced while CUSTOM UI / MENUS is ON.
+local TextBoxBattleStyle = safeLoadLocal(
+  "Battle-style dialogue boxes", "lib/TextBoxBattleStyle.lua", { mod = mod })
+local textBoxStyleInstalled, textBoxStyleErr =
+  safeInstall("Battle-style dialogue boxes", TextBoxBattleStyle)
+
+-- v0.2.76: widen both this renderer's continuous diorama range and the
+-- engine-native survey ladder used by Character Selector/native ZOOM. The
+-- official zoom.range hook adds one 0.25-scale whole-region rung in OPEN WORLD.
+local OpenWorldZoom = safeLoadLocal(
+  "OPEN WORLD extended zoom", "lib/OpenWorldZoom.lua", { mod = mod })
+local openWorldZoomInstalled, openWorldZoomErr =
+  safeInstall("OPEN WORLD extended zoom", OpenWorldZoom)
+
+-- v0.2.40: MODS now opens a fully matching glass submenu.  The Mod Manager's
+-- installed-mod list, per-mod detail menu, OPTIONS submenu, permissions,
+-- errors, profiles, apply/restart prompts and confirmation overlays all use
+-- the same battle-selector visual language.  Any mod using options_schema is
+-- covered automatically.  A screen.pushed watcher also skins conventional
+-- list-like menus opened by hook-injected START-menu rows while leaving custom
+-- renderers it cannot safely understand untouched.
+local ModMenuBattleStyle = safeLoadLocal("Battle-style mod menus", "lib/ModMenuBattleStyle.lua", { mod = mod })
+local modMenuStyleInstalled, modMenuStyleErr =
+  safeInstall("Battle-style mod menus", ModMenuBattleStyle)
+
+-- v0.2.55: Gen-2 ManagerState writes live option values correctly but the
+-- v0.1.83 Gold path persists through Game2:persistOptions rather than the
+-- writeOptions name ManagerState probes. Bridge that seam so every toggle and
+-- choice on this mod's MOD SETTINGS page survives a restart.
+local ModSettingsPersistence = safeLoadLocal("Gold mod-settings persistence bridge", "lib/ModSettingsPersistence.lua", { mod = mod })
+local persistenceInstalled, persistenceErr =
+  safeInstall("Gold mod-settings persistence bridge", ModSettingsPersistence)
+
+-- v0.2.56: this mod now has enough controls that one flat ManagerState list is
+-- awkward on phones. Keep ManagerState as the value/persistence owner, but
+-- present this mod through category submenus (world/performance, camera/display,
+-- battle, 3D models, wild Pokemon, followers/behavior, developer).
+local CategorizedModSettings = safeLoadLocal("Categorized mod settings", "lib/CategorizedModSettings.lua", { mod = mod })
+local categorizedInstalled, categorizedErr =
+  safeInstall("Categorized mod settings", CategorizedModSettings)
+
+-- v0.2.56: screenFlip is no longer a render.compose-only transform. Gold draws
+-- HUD/touch controls after compose, so the compatibility flip now wraps the
+-- entire Game2:draw frame and inversely remaps Android touch coordinates.
+local AndroidFullFrameFlip = safeLoadLocal("Android whole-frame flip", "lib/AndroidFullFrameFlip.lua", { mod = mod })
+local fullFrameFlipInstalled, fullFrameFlipErr =
+  safeInstall("Android whole-frame flip", AndroidFullFrameFlip)
+
+-- v0.2.52: put THIS mod's settings directly on Gold's START menu immediately
+-- below OPTION.  It uses the official ui.start_menu.items hook and opens the
+-- existing ManagerState options page, so option persistence/events remain
+-- engine-owned.  B from that direct page returns straight to the pause menu.
+local DirectModSettingsMenu = safeLoadLocal("Direct pause-menu MOD SETTINGS shortcut", "lib/DirectModSettingsMenu.lua", { mod = mod })
+local directSettingsInstalled, directSettingsErr =
+  safeInstall("Direct pause-menu MOD SETTINGS shortcut", DirectModSettingsMenu)
+
 -- Compatibility fallback only for much older builds without per-mod options.
 -- On current builds this never runs, so the ROM row lives only under this
 -- mod's own Options screen rather than the game's general OPTIONS menu.
@@ -183,10 +299,25 @@ if not managerOptionsInstalled then
   StadiumRomMenu.installOptionsHook(mod)
 end
 
--- Gold voxel renderer status.  The `voxel3d` option is read inside
--- GoldVoxelBridge.renderFrame() on every compose frame; no engine class is
--- monkey-patched and src.render.Pipelines is untouched.
-local voxelPipelineState = GoldVoxelBridge
+-- Gold voxel renderer status. v0.2.73 targets current Gen1Recomp's official
+-- render_pipelines.drawWorld seam again, while preserving render.compose as a
+-- real compatibility/coexistence fallback. In particular, red_3d_player owns
+-- the engine's public `voxel` pipeline ladder; when that selector is installed
+-- GoldPipelineBridge intentionally stays OFF so the selector is not disabled by
+-- Gen1Recomp's one-world-pipeline rule. GoldComposeBridge then owns the window
+-- and OverworldStadium draws the selector's chosen skin into the voxel scene.
+local GoldPipelineBridge = safeLoadLocal(
+  "Gold drawWorld voxel pipeline", "lib/GoldPipelineBridge.lua",
+  { mod = mod, VoxelBridge = GoldVoxelBridge })
+local goldPipelineInstalled, goldPipelineErr =
+  safeInstall("Gold drawWorld voxel pipeline", GoldPipelineBridge)
+local voxelPipelineState = goldPipelineInstalled and GoldPipelineBridge or GoldVoxelBridge
+if goldPipelineInstalled then
+  mod.log:info("Gold drawWorld voxel pipeline registered; render.compose remains fallback/Character Selector coexistence path")
+else
+  mod.log:warn("Gold drawWorld voxel pipeline unavailable; using render.compose: %s",
+    tostring(goldPipelineErr))
+end
 
 -- Android may recreate the app while the native document picker is open.
 -- Finish a pending Stadium selection as soon as the live Gold service owner is
@@ -266,37 +397,33 @@ do
   end
 end
 
-local BattleStadiumAnimations = loadLocal("lib/BattleStadiumAnimations.lua", V)
-local battleAnimationsInstalled, battleAnimationsErr = BattleStadiumAnimations.install()
+local BattleStadiumAnimations = safeLoadLocal("Pokemon Stadium Stage 1 battle performances", "lib/BattleStadiumAnimations.lua", V)
+local battleAnimationsInstalled, battleAnimationsErr =
+  safeInstall("Pokemon Stadium Stage 1 battle performances", BattleStadiumAnimations)
 if battleAnimationsInstalled then
   mod.log:info("Pokemon Stadium Stage 1 battle performances enabled")
-else
-  mod.log:warn("Pokemon Stadium Stage 1 battle performances not installed: %s",
-               tostring(battleAnimationsErr))
 end
 
 -- Phase 2 + Phase 3 + Phase 4 battle effects: common elemental families, dedicated
 -- signature-move renderers, and safe visual hit-stop/shake/impact polish
 -- drawn on the recomp engine's own move-animation layer. Dramatic Shape already maps
 -- that layer onto the 3D arena, so this does not touch battle model lifecycle.
-local BattleStadiumEffects = loadLocal("lib/BattleStadiumEffects.lua", V)
-local battleEffectsInstalled, battleEffectsErr = BattleStadiumEffects.install()
+local BattleStadiumEffects = safeLoadLocal("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation", "lib/BattleStadiumEffects.lua", V)
+local battleEffectsInstalled, battleEffectsErr =
+  safeInstall("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation",
+    BattleStadiumEffects)
 if battleEffectsInstalled then
   mod.log:info("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation enabled")
-else
-  mod.log:warn("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation not installed: %s",
-               tostring(battleEffectsErr))
 end
 
 -- Phase 5: real world-space procedural effects. This wraps Dramatic Shape's
 -- exported Stadium begin/update/draw functions, so the particles are drawn
 -- inside the active Voxel3D scene and follow camera orbit/depth naturally.
-local BattleStadium3DFx = loadLocal("lib/BattleStadium3DFx.lua", V)
-local battle3DInstalled, battle3DErr = BattleStadium3DFx.install()
+local BattleStadium3DFx = safeLoadLocal("Pokemon Stadium Phase 5 world-space effects", "lib/BattleStadium3DFx.lua", V)
+local battle3DInstalled, battle3DErr =
+  safeInstall("Pokemon Stadium Phase 5 world-space effects", BattleStadium3DFx)
 if battle3DInstalled then
   mod.log:info("Pokemon Stadium Phase 5 world-space battle effects enabled")
-else
-  mod.log:warn("Pokemon Stadium Phase 5 world-space effects not installed: %s", tostring(battle3DErr))
 end
 
 -- Patch only structural seams in the exact VoxelScene source from the installed
@@ -416,10 +543,11 @@ if GoldVoxelBridge and GoldWildsBridge
   end
 end
 
--- Official Gold frame hook.  This is the first v0.1.74 path that does NOT rely
--- on a Gen-1 pipeline or a Gen-2 class mutation.  Voxel gets first chance on a
--- free-roam frame.  When it is unavailable/pending/broken, the already-drawn
--- Gold scene is preserved and visible Wilds sprites are overlaid independently.
+-- Gold compose fallback/coexistence path. Current Gold normally reaches voxels
+-- earlier through GoldPipelineBridge/render_pipelines.drawWorld. Older hosts,
+-- and installations with red_3d_player (whose own public `voxel` pipeline must
+-- remain untouched), deliberately render here instead. When voxel is unavailable,
+-- the already-drawn Gold scene is preserved.
 local GoldComposeBridge, goldComposeBridgeErr
 do
   local source, readErr = mod:read("lib/GoldComposeBridge.lua")
@@ -428,7 +556,7 @@ do
     local chunk, compileErr = loadcode(source,
       "@" .. mod.path .. "/lib/GoldComposeBridge.lua")
     if chunk then
-      local okLoad, bridgeOrErr = pcall(chunk, mod, GoldVoxelBridge, GoldWildsBridge)
+      local okLoad, bridgeOrErr = pcall(chunk, mod, GoldVoxelBridge, GoldWildsBridge, GoldPipelineBridge)
       if okLoad and type(bridgeOrErr) == "table" then
         GoldComposeBridge = bridgeOrErr
         local okInstall, installErr = GoldComposeBridge.install()
@@ -504,8 +632,23 @@ if wildsExports and type(wildsExports.logic) == "table" then
 end
 
 -- Companion mods can tag a Pokemon entity explicitly through this mod.
-mod.exports.version = "0.2.35"
+mod.exports.version = "0.2.81"
+mod.exports.pauseMenuBattleStyle = PauseMenuBattleStyle
+mod.exports.goldSubmenuBattleStyle = GoldSubmenuBattleStyle
+mod.exports.textBoxBattleStyle = TextBoxBattleStyle
+mod.exports.textBoxBattleStyleStatus = function()
+  return TextBoxBattleStyle and TextBoxBattleStyle.status and TextBoxBattleStyle.status() or {
+    installed = false, error = textBoxStyleErr,
+  }
+end
+mod.exports.openWorldZoom = OpenWorldZoom
+mod.exports.openWorldZoomStatus = function()
+  return OpenWorldZoom and OpenWorldZoom.status and OpenWorldZoom.status() or {
+    installed = false, error = openWorldZoomErr,
+  }
+end
 mod.exports.overworld = Stadium
+mod.exports.modelsEnabled = BaseV.modelsEnabled
 mod.exports.red3dPlayerCompat = true
 mod.exports.red3dPlayerCompatStatus = function()
   local selector = mod.find and mod.find("red_3d_player") or nil
@@ -522,6 +665,18 @@ mod.exports.red3dPlayerCompatStatus = function()
   }
 end
 mod.exports.romMenu = StadiumRomMenu
+mod.exports.modOptionsBattleStyle = ModMenuBattleStyle
+mod.exports.modMenuBattleStyle = ModMenuBattleStyle
+mod.exports.directModSettingsMenu = DirectModSettingsMenu
+mod.exports.modSettingsPersistence = ModSettingsPersistence
+mod.exports.categorizedModSettings = CategorizedModSettings
+mod.exports.androidFullFrameFlip = AndroidFullFrameFlip
+mod.exports.categorizedModSettingsStatus = function()
+  return CategorizedModSettings and CategorizedModSettings.status and CategorizedModSettings.status() or nil
+end
+mod.exports.androidFullFrameFlipStatus = function()
+  return AndroidFullFrameFlip and AndroidFullFrameFlip.status and AndroidFullFrameFlip.status() or nil
+end
 mod.exports.chooseStadiumRom = function(game)
   if game then return StadiumRomMenu.choose(game) end
   local okGame2, Game2 = pcall(require, "src.core.Game2")
@@ -548,7 +703,7 @@ mod.exports.rendererError = rendererErr
 mod.exports.voxelHostId = dramaticShapeId
 mod.exports.voxelHostGeneration = 2
 mod.exports.voxelPipelineState = voxelPipelineState
-mod.exports.voxelDirectWorldHook = false
+mod.exports.voxelDirectWorldHook = goldPipelineInstalled == true
 mod.exports.voxelComposeHook = GoldComposeBridge ~= nil
 -- Legacy default target remains FULL/diorama level 1. v0.1.89 can select the
 -- live first/third-person levels through GoldVoxelBridge without changing this
@@ -621,6 +776,12 @@ mod.exports.goldWildsDrawBridgeInstalled = GoldWildsBridge ~= nil
 mod.exports.goldWildsDrawBridgeError = goldWildsBridgeErr
 mod.exports.goldWildsDrawBridgeStatus = function()
   return GoldWildsBridge and GoldWildsBridge.status and GoldWildsBridge.status() or nil
+end
+mod.exports.goldPipelineBridge = GoldPipelineBridge
+mod.exports.goldPipelineBridgeInstalled = goldPipelineInstalled == true
+mod.exports.goldPipelineBridgeError = goldPipelineErr
+mod.exports.goldPipelineBridgeStatus = function()
+  return GoldPipelineBridge and GoldPipelineBridge.status and GoldPipelineBridge.status() or nil
 end
 mod.exports.goldComposeBridgeInstalled = GoldComposeBridge ~= nil
 mod.exports.goldComposeBridgeError = goldComposeBridgeErr

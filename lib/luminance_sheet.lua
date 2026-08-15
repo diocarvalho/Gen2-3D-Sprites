@@ -33,6 +33,7 @@
 -- Headless / no-LÖVE environments fall back to the original colored path
 -- (callers then keep trueColor = true); derivation is a rendering nicety.
 local V = ...
+local EngineCompat = V.require("EngineCompat")
 
 local LuminanceSheet = {}
 
@@ -78,10 +79,11 @@ local lumaCache = {}
 local siloCache = {}
 
 function LuminanceSheet.available()
+  local fs = EngineCompat.fs()
   return love and love.image and love.image.newImageData
     and love.graphics and love.graphics.newImage
-    and love.filesystem and love.filesystem.getInfo
-    and love.filesystem.createDirectory
+    and fs and type(fs.getInfo) == "function"
+    and type(fs.createDirectory) == "function"
 end
 
 -- Derived PNG filename for a source path: sanitized, truncated (absolute
@@ -148,14 +150,15 @@ end
 function LuminanceSheet.pathFor(coloredPath)
   if type(coloredPath) ~= "string" or coloredPath == "" then return nil end
   if not LuminanceSheet.available() then return nil end
+  local fs = EngineCompat.fs()
   if lumaCache[coloredPath] then return lumaCache[coloredPath] end
 
   local ok, result = pcall(function()
-    if not love.filesystem.getInfo(CACHE_DIR) then
-      love.filesystem.createDirectory(CACHE_DIR)
+    if not fs.getInfo(CACHE_DIR) then
+      fs.createDirectory(CACHE_DIR)
     end
     local out = CACHE_DIR .. "/" .. cacheFileName(coloredPath)
-    if not love.filesystem.getInfo(out) then
+    if not fs.getInfo(out) then
       local id = love.image.newImageData(coloredPath)
       local bins, opaque = shadeHistogram(id)
       local levels = realLevels(bins, opaque)
@@ -193,14 +196,15 @@ end
 function LuminanceSheet.silhouetteFor(coloredPath)
   if type(coloredPath) ~= "string" or coloredPath == "" then return nil end
   if not LuminanceSheet.available() then return nil end
+  local fs = EngineCompat.fs()
   if siloCache[coloredPath] then return siloCache[coloredPath] end
 
   local ok, result = pcall(function()
-    if not love.filesystem.getInfo(CACHE_DIR) then
-      love.filesystem.createDirectory(CACHE_DIR)
+    if not fs.getInfo(CACHE_DIR) then
+      fs.createDirectory(CACHE_DIR)
     end
     local out = CACHE_DIR .. "/" .. siloCacheFileName(coloredPath)
-    if not love.filesystem.getInfo(out) then
+    if not fs.getInfo(out) then
       local id = love.image.newImageData(coloredPath)
       id:mapPixel(function(_, _, r, g, b, a)
         if a <= 0 then return r, g, b, a end

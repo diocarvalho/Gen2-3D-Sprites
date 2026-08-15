@@ -8,7 +8,15 @@
 --
 -- This keeps the voxel overworld visible while START/dialog/menu overlays are
 -- open without painting Gold's already-composited vanilla 2D world back over it.
-local mod, VoxelBridge, WildsBridge = ...
+local mod, VoxelBridge, WildsBridge, PipelineBridge = ...
+
+local function customUIEnabled()
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return true end
+  local ok, value = pcall(options.get, options, "customUI")
+  if not ok or value == nil then return true end
+  return value ~= false
+end
 
 local Bridge = {
   installed = false,
@@ -25,6 +33,7 @@ local Bridge = {
   passthroughFrames = 0,
   battleFrames = 0,
   battleFallbackFrames = 0,
+  pipelineFrames = 0,
   lastVoxelError = nil,
   lastOverlayError = nil,
   lastWildError = nil,
@@ -75,6 +84,31 @@ local function stackTop(game)
   local ok, top = pcall(stack.top, stack)
   if ok then return top end
   return nil
+end
+
+-- Gold marks OPTIONS / PACK / POKEGEAR / TRAINER CARD / SAVE and several other
+-- pages as widescreen/full-screen screens. That makes Game2 report
+-- ctx.worldActive=false even after our pause skin sets the instance non-opaque,
+-- so the compose hook used to receive the page's black surround instead of the
+-- live overworld. A pause-skin chain is an explicit promise from our menu
+-- patcher that this page belongs over the paused world. Detect that chain on
+-- the stack and render the voxel world behind it exactly like MOD SETTINGS.
+local function pauseBackdropRequested(game)
+  if not customUIEnabled() then return false end
+  local stack = game and game.stack
+  local states = stack and stack.states
+  if type(states) ~= "table" then return false end
+  for i = #states, 1, -1 do
+    local state = states[i]
+    if type(state) == "table" and state._stadium2PauseSkinChain == true then
+      return true
+    end
+    -- Stop at a genuinely opaque unrelated page. We never tunnel through a
+    -- battle/title/cutscene just because an old hidden state lower in the stack
+    -- happened to have been opened from pause earlier.
+    if state and state.isOpaque == true then return false end
+  end
+  return false
 end
 
 local function drawCanvasFull(canvas, ctx)
@@ -266,20 +300,26 @@ local function drawGoldBattleFrame(shot, ctx, game)
   return true
 end
 
-local function compose(nextFn, host, ctx)
+local function composeCore(nextFn, host, ctx)
   Bridge.frames = Bridge.frames + 1
 
   -- Battle updates must run even though Game2 reports worldActive=false for an
-  -- opaque BattleState. Bind the live Game2 owner and render the encounter-site
-  -- shot before deciding whether this is a free-roam frame.
+  -- opaque BattleState. Pause-skinned full-screen Gold pages are a different
+  -- case: they intentionally want the live voxel overworld behind their glass
+  -- UI even though Game2's widescreen-page branch reports worldActive=false.
   local game = resolveGame(host, ctx)
+  local pauseBackdrop = pauseBackdropRequested(game)
+  local worldActive = (ctx and ctx.worldActive == true) or pauseBackdrop
+  if pauseBackdrop then
+    Bridge.pauseBackdropFrames = (Bridge.pauseBackdropFrames or 0) + 1
+  end
   if VoxelBridge and type(VoxelBridge.setGame) == "function" then
     pcall(VoxelBridge.setGame, game)
   end
   if VoxelBridge and type(VoxelBridge.updateBattle) == "function" then
     pcall(VoxelBridge.updateBattle, 1 / 60)
   end
-  if not (ctx and ctx.worldActive == true) and VoxelBridge
+  if not worldActive and VoxelBridge
      and type(VoxelBridge.battleShot) == "function" then
     local okShot, shot = pcall(VoxelBridge.battleShot)
     if okShot and shot and shot.canvas then
@@ -291,9 +331,29 @@ local function compose(nextFn, host, ctx)
     end
   end
 
+  -- Current desktop Gold renders the voxel world earlier through the official
+  -- render_pipelines drawWorld seam. In that case sceneCanvas already contains
+  -- the 3D world plus Gold's normal overlay stack; rendering VoxelScene again
+  -- here would double the GPU work and can overwrite the pipeline composite.
+  -- Older Gold builds never call the drawWorld callback, so this bit stays
+  -- false and the long-standing compose renderer below remains the fallback.
+  if PipelineBridge and type(PipelineBridge.consumeRenderedFrame) == "function" then
+    local okPipeline, rendered = pcall(PipelineBridge.consumeRenderedFrame)
+    if okPipeline and rendered then
+      Bridge.pipelineFrames = Bridge.pipelineFrames + 1
+      Bridge.voxelFrames = Bridge.voxelFrames + 1
+      Bridge.lastVoxelError = nil
+      local result = nextFn(host, ctx)
+      if VoxelBridge and type(VoxelBridge.drawCameraSlider) == "function" then
+        pcall(VoxelBridge.drawCameraSlider, ctx)
+      end
+      return result
+    end
+  end
+
   -- Game2 marks only its live overworld branch worldActive=true.  Opaque/full-
   -- screen Gold pages are already excluded by Game2 before this hook runs.
-  if not (ctx and ctx.worldActive == true) then
+  if not worldActive then
     Bridge.passthroughFrames = Bridge.passthroughFrames + 1
     return nextFn(host, ctx)
   end
@@ -384,6 +444,60 @@ local function compose(nextFn, host, ctx)
   return nextFn(host, ctx)
 end
 
+local function isAndroid()
+  -- love.system is a blocked proxy member in current mod sandboxes, so even
+  -- reading it must be protected. Engine Platform is the authoritative path.
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okDetect, info = pcall(Platform.detect)
+    if okDetect and type(info) == "table" and type(info.os) == "string" then
+      return string.lower(info.os) == "android"
+    end
+  end
+  local ok, name = pcall(function()
+    local sys = love and love.system
+    return sys and sys.getOS and sys.getOS()
+  end)
+  if ok and type(name) == "string" then return string.lower(name) == "android" end
+  local okGlobal, platform = pcall(rawget, _G, "PLATFORM")
+  return okGlobal and type(platform) == "string"
+    and string.lower(platform) == "android"
+end
+
+local function screenFlipEnabled()
+  if not isAndroid() then return false end
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return false end
+  local ok, value = pcall(options.get, options, "screenFlip")
+  return ok and value == true
+end
+
+local flipCanvas, flipW, flipH
+local function ensureFlipCanvas(w, h)
+  if flipCanvas and flipW == w and flipH == h then return flipCanvas end
+  local G = love and love.graphics
+  if not (G and type(G.newCanvas) == "function") then return nil end
+  local ok, canvas = pcall(G.newCanvas, w, h)
+  if not ok or not canvas then return nil end
+  flipCanvas, flipW, flipH = canvas, w, h
+  if type(canvas.setFilter) == "function" then pcall(canvas.setFilter, canvas, "nearest", "nearest") end
+  return canvas
+end
+
+-- Screen flip is applied around the *entire* render.compose chain. This makes
+-- the setting rotate the finished Android presentation rather than only the
+-- voxel world, so Gold menus, Stadium battle HUD and fallback 2D screens all
+-- keep the same orientation. It is intentionally a presentation transform:
+-- when the physical device itself is held in reverse-landscape, Android's
+-- locked coordinate frame already maps touches to the corresponding rotated
+-- on-screen controls.
+local function compose(nextFn, host, ctx)
+  -- v0.2.56: Android screenFlip is owned by AndroidFullFrameFlip around the
+  -- entire Game2:draw call.  Keeping a second rotation here would double-flip
+  -- the world while leaving Game2's later HUD/touch layer inconsistent.
+  return composeCore(nextFn, host, ctx)
+end
+
 function Bridge.install()
   if Bridge.installed then return true end
   if not (mod.hooks and type(mod.hooks.wrap) == "function") then
@@ -416,13 +530,18 @@ function Bridge.status()
     wildSpritesDrawn = Bridge.wildSpritesDrawn,
     battleFrames = Bridge.battleFrames,
     battleFallbackFrames = Bridge.battleFallbackFrames,
+    pipelineFrames = Bridge.pipelineFrames,
     passthroughFrames = Bridge.passthroughFrames,
     lastVoxelError = Bridge.lastVoxelError,
     lastOverlayError = Bridge.lastOverlayError,
     lastWildError = Bridge.lastWildError,
     lastBattleError = Bridge.lastBattleError,
+    pauseBackdropFrames = Bridge.pauseBackdropFrames or 0,
+    flipFrames = Bridge.flipFrames or 0,
+    lastFlipError = Bridge.lastFlipError,
   }
 end
 
 Bridge._compose = compose
+Bridge._pauseBackdropRequested = pauseBackdropRequested
 return Bridge

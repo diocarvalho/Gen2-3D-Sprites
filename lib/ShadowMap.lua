@@ -33,6 +33,27 @@ local Quality = V.require("Quality")
 
 local ShadowMap = {}
 
+-- v0.2.69: Android/iOS render the whole Game2 frame into an outer canvas
+-- before presentation, so helper passes must restore that caller.  Desktop
+-- Gold's confirmed-working voxel path (v0.2.45) instead expects these passes
+-- to return to the physical screen; restoring an engine intermediate canvas
+-- there lets the later native 2D composite cover the voxel frame.
+local function preserveCallerCanvas()
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okInfo, info = pcall(Platform.detect)
+    if okInfo and type(info) == "table" and type(info.os) == "string" then
+      return info.os == "Android" or info.os == "iOS"
+    end
+  end
+  local ok, name = pcall(function()
+    local sys = love and love.system
+    return sys and sys.getOS and sys.getOS()
+  end)
+  return ok and (name == "Android" or name == "iOS") or false
+end
+
+
 -- The sun, as the shear a shadow takes: a point `y` world-pixels above the
 -- ground drops its shadow (KX*y, KZ*y) away from the point under it. Both
 -- negative hangs the sun in the SOUTHEAST, so every shadow falls northwest
@@ -156,6 +177,7 @@ local drawing = false
 local ready = false
 local lastSig = nil
 local prevBlend, prevAlphaMode = nil, nil
+local prevCanvas = nil
 
 local IDENTITY = Mat4.identity()
 
@@ -489,6 +511,10 @@ end
 
 -- Begin the sun pass. Returns false when it could not start, in which case
 -- the caller must not draw into it or call finish.
+function ShadowMap.canvasRestorePolicy()
+  return preserveCallerCanvas() and "nested-caller" or "physical-screen"
+end
+
 function ShadowMap.begin(cx, cy, vw, vh)
   local sh = getShader()
   if not sh then return false end
@@ -496,9 +522,23 @@ function ShadowMap.begin(cx, cy, vw, vh)
   fit(cx, cy, vw, vh)
   local c = getCanvas(ShadowMap.res)
   if not c then return false end
+  -- Preserve whatever compositor owns the frame. On Android screen-flip this
+  -- is the final-frame canvas, not the physical screen; unbinding here would
+  -- make the following voxel pass render outside the frame that gets rotated.
+  if preserveCallerCanvas() then
+    local okPrev, value = pcall(love.graphics.getCanvas)
+    prevCanvas = okPrev and value or nil
+  else
+    prevCanvas = nil
+  end
   local ok = pcall(love.graphics.setCanvas, { c, depth = true })
   if not ok then
-    pcall(love.graphics.setCanvas)
+    if preserveCallerCanvas() and prevCanvas ~= nil then
+      pcall(love.graphics.setCanvas, prevCanvas)
+    else
+      pcall(love.graphics.setCanvas)
+    end
+    prevCanvas = nil
     return false
   end
   prevBlend, prevAlphaMode = love.graphics.getBlendMode()
@@ -557,7 +597,14 @@ function ShadowMap.finish(sig)
   drawing = false
   love.graphics.setShader()
   love.graphics.setDepthMode()
-  love.graphics.setCanvas()
+  local target = prevCanvas
+  prevCanvas = nil
+  if preserveCallerCanvas() and target ~= nil then
+    pcall(love.graphics.setCanvas, target)
+  else
+    -- Desktop: exact v0.2.45 pass-exit behavior.
+    pcall(love.graphics.setCanvas)
+  end
   love.graphics.setBlendMode(prevBlend or "alpha", prevAlphaMode)
   love.graphics.setColor(1, 1, 1, 1)
   lastSig = sig

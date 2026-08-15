@@ -46,6 +46,7 @@ local V = ...
 local StadiumPack = V.require("StadiumPack")
 
 local StadiumInstall = {}
+local Compat = V.require("EngineCompat")
 
 -- Where a ROM is looked for, and where the built packs are kept.
 StadiumInstall.ROM_DIR = "baseroms"
@@ -54,13 +55,14 @@ StadiumInstall.MARKER = StadiumInstall.DIR .. "/pack.info"
 
 -- Bumped whenever the .dsm format changes, so an old cache is rebuilt rather
 -- than misread. Must track StadiumPack's magic.
-StadiumInstall.FORMAT = "DSM5"
+StadiumInstall.FORMAT = "DSM7"
 
 -- Bumped when the packs' CONTENT changes without the byte layout moving.
--- DSM5 itself is the v0.2.16 structural fix: each bone now retains geo command
--- 0x1D's transform flags, so an old DSM4 cache MUST be rebuilt from the
--- player's Stadium 2 ROM instead of being heuristically repaired at runtime.
-StadiumInstall.REV = 3
+-- DSM7 keeps the DSM5/6 structural/material data and changes the extracted
+-- CONTENT again so SetTileSize origin/window semantics are baked into UVs and
+-- per-material texture variants.  FORMAT (not REV) changes because an older
+-- pack cannot supply those discarded tile fields.
+StadiumInstall.REV = 1
 
 local function gameGeneration()
   local ok, GameVersion = pcall(require, "src.core.GameVersion")
@@ -107,7 +109,7 @@ local function namedRoms()
 end
 
 local function fs()
-  return love and love.filesystem
+  return Compat.fs()
 end
 
 local function isFile(path)
@@ -184,15 +186,12 @@ local readyCache = nil
 function StadiumInstall.ready()
   if readyCache ~= nil then return readyCache end
   local m = readMarker()
-  -- v0.2.19 recovery contract. v0.2.18 wrote DSM5 content revision 2
-  -- after changing geo-layout flattening globally; those packs may contain
-  -- bad parent/transform relationships even after the runtime renderer is
-  -- rolled back. Reject rev2 so affected installs cannot keep serving that
-  -- poisoned cache. Known-good DSM5 rev1 and DSM4 rev2 remain accepted,
-  -- while a clean rebuild from this release is marked DSM5 rev3.
-  local formatOk = m and (((m.format == StadiumInstall.FORMAT) and
-                            (m.rev == StadiumInstall.REV or m.rev == 1))
-                           or (m.format == "DSM4" and m.rev == 2))
+  -- v0.2.79 / DSM7 adds the missing SetTileSize origin/clamp-window semantics
+  -- and rebuilds texture variants to the RDP's effective sampling window.
+  -- DSM6 has the SetTile flags but not enough information to recover SL/TL or
+  -- SH/TH after extraction, so it must rebuild once from the Stadium 2 ROM.
+  local formatOk = m and m.format == StadiumInstall.FORMAT
+    and m.rev == StadiumInstall.REV
   readyCache = (formatOk and m.count >= targetCount()) and true or false
   return readyCache
 end

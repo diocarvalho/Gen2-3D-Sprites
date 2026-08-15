@@ -158,6 +158,20 @@ local function vrOn()
   return ok and vr and vr.enabled and vr.enabled() or false
 end
 
+local function modelsEnabled()
+  if type(V.modelsEnabled) == "function" then
+    local ok, value = pcall(V.modelsEnabled)
+    if ok then return value ~= false end
+  end
+  local mod = V.mod
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return true end
+  local ok, value = pcall(options.get, options, "stadium3dSprites")
+  if not ok or value == nil then return true end
+  return not (value == false or value == 0 or value == "0"
+    or value == "false" or value == "off")
+end
+
 local function goldWorldBattleEnabled()
   if not (V.game and V.game.world) then return nil end
   local mod = V.mod
@@ -182,6 +196,7 @@ end
 -- describes. Required lazily: Stadium sits above this file and requires it
 -- back (for the row), which a load-time require would deadlock.
 function OverworldBattle.stadium()
+  if not modelsEnabled() then return false end
   local gold = goldWorldBattleEnabled()
   if gold ~= nil then return gold and Voxel3D.available() end
   local ok, stadium = pcall(V.require, "Stadium")
@@ -466,7 +481,21 @@ end
 local session = nil
 
 local function isIOS()
-  return love.system and love.system.getOS and love.system.getOS() == "iOS"
+  -- Current mod sandboxes reject direct love.system access. Use the same
+  -- engine-owned platform seam as the voxel/compose bridges and keep legacy
+  -- LÖVE detection fully protected for older hosts.
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okDetect, info = pcall(Platform.detect)
+    if okDetect and type(info) == "table" and type(info.os) == "string" then
+      return info.os == "iOS"
+    end
+  end
+  local ok, name = pcall(function()
+    local sys = love and love.system
+    return sys and sys.getOS and sys.getOS()
+  end)
+  return ok and name == "iOS" or false
 end
 
 local function game()
@@ -791,7 +820,11 @@ function OverworldBattle.update(dt)
     local host = (session.arena and session.arena.map) or session.state.map
     local stadium = V.require("Stadium")
     local groundY = BattleScene.groundY(host, session.arena)
-    if gold and type(stadium.updateGen2) == "function" then
+    if not modelsEnabled() then
+      -- Keep the live voxel battlefield, but release Stadium combatants and let
+      -- Gold's original battle pics represent the Pokemon.
+      if type(stadium.finish) == "function" then pcall(stadium.finish) end
+    elseif gold and type(stadium.updateGen2) == "function" then
       stadium.updateGen2(dt, session.battle, groundY)
     else
       stadium.update(dt, session.battle, groundY)
@@ -1482,6 +1515,13 @@ local function installGoldBattleState()
         -- second flat trainer, so suppress it explicitly even though Stadium
         -- correctly reports the PLAYER POKEMON as not visible until send-out.
         if playerSide and self.showPlayerTrainer then return end
+
+        -- 3D SPRITES OFF keeps the voxel battle world but restores Gold's
+        -- original Pokemon battle pics. The live-world trainer card above is
+        -- still the reason the duplicate trainer back-pic remains suppressed.
+        if not modelsEnabled() then
+          return innerPic(self, mon, playerSide, ...)
+        end
 
         local side = playerSide and "player" or "enemy"
         local stadium = V.require("Stadium")

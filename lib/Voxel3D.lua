@@ -333,6 +333,37 @@ local activeShader = nil      -- the variant this pass bound
 local slots = {}
 local canvas, canvasW, canvasH = nil, 0, 0   -- the slot this pass bound
 local held = nil                             -- and the whole record for it
+-- Canvas that was active when beginScene started. Historically endScene()
+-- always unbound to the physical screen, which is fine for a top-level frame
+-- but breaks composability: Android's whole-frame 180° compatibility mode
+-- renders Game2 into an outer canvas, and the voxel pass escaped that canvas
+-- mid-frame. Keep/restore the caller's target instead.
+local returnCanvas = nil
+
+-- v0.2.69 platform split. v0.2.45, confirmed working on current Windows,
+-- always ended a voxel scene on the physical window. v0.2.58 changed that to
+-- restore the caller's outer canvas for Android whole-frame composition. Keep
+-- that nesting fix only on mobile; on desktop the outer Gold present canvas is
+-- later replaced by the native 2D scene, which hides the voxel result.
+local function preserveCallerCanvas()
+  local okPlatform, Platform = pcall(require, "src.core.Platform")
+  if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
+    local okInfo, info = pcall(Platform.detect)
+    if okInfo and type(info) == "table" and type(info.os) == "string" then
+      return info.os == "Android" or info.os == "iOS"
+    end
+  end
+  local ok, name = pcall(function()
+    local sys = love and love.system
+    return sys and sys.getOS and sys.getOS()
+  end)
+  return ok and (name == "Android" or name == "iOS") or false
+end
+
+function Voxel3D.canvasRestorePolicy()
+  return preserveCallerCanvas() and "nested-caller" or "physical-screen"
+end
+
 local active = false
 
 -- A READABLE depth canvas, so a later pass in the same frame can ask the
@@ -880,6 +911,14 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   end
   held = slotHeld
   canvas, canvasW, canvasH = held.canvas, w, h
+  -- Remember the target owned by the caller. This is usually the real screen,
+  -- but it can be Game2's final-frame canvas (Android flip) or a temporary UI
+  -- preview target. Restoring it in endScene is the only safe behavior for a
+  -- renderer that can be nested inside another compositor.
+  do
+    local okPrev, prev = pcall(love.graphics.getCanvas)
+    returnCanvas = okPrev and prev or nil
+  end
   -- a depth buffer is what makes occlusion real: walk behind a building and
   -- the building wins, with no y-sorting anywhere
   local ok = pcall(love.graphics.setCanvas, depthTarget())
@@ -891,7 +930,13 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
     ok = pcall(love.graphics.setCanvas, depthTarget())
   end
   if not ok then
-    pcall(love.graphics.setCanvas)
+    if preserveCallerCanvas() and returnCanvas ~= nil then
+      pcall(love.graphics.setCanvas, returnCanvas)
+    else
+      -- Desktop: exact v0.2.45 exit behavior.
+      pcall(love.graphics.setCanvas)
+    end
+    returnCanvas = nil
     return false
   end
   -- Ahead of the clear, because the sky's bands are placed off the ground
@@ -1486,13 +1531,79 @@ function Voxel3D.endScene()
       pcall(Weather.paintOverlay, canvasW, canvasH)
     end
   end
-  love.graphics.setCanvas()
+  -- Restore the compositor that opened this pass instead of always escaping
+  -- to the physical screen. With no outer target this is identical to the old
+  -- setCanvas() behavior; with Android whole-frame flip it keeps every voxel
+  -- pixel inside the frame that will be rotated at the end.
+  local target = returnCanvas
+  returnCanvas = nil
+  if preserveCallerCanvas() and target ~= nil then
+    -- Mobile keeps the nested-canvas fix needed by whole-frame presentation.
+    pcall(love.graphics.setCanvas, target)
+  else
+    -- Desktop intentionally restores the confirmed-working v0.2.45 behavior.
+    pcall(love.graphics.setCanvas)
+  end
   active, activeShader = false, nil
   return canvas
 end
 
 function Voxel3D.canvas()
   return canvas
+end
+
+-- v0.2.42: temporary nested 3D previews (party / summary UI) need to borrow
+-- the renderer without stealing the live world/battle scene's bookkeeping.
+-- LOVE's canvas binding is intentionally NOT part of this snapshot; the caller
+-- owns that binding and restores it separately. This only preserves Voxel3D's
+-- private slot pointer / active state and the public camera-projection fields
+-- that beginScene rewrites.
+function Voxel3D.captureSceneState()
+  return {
+    held = held,
+    returnCanvas = returnCanvas,
+    canvas = canvas,
+    canvasW = canvasW,
+    canvasH = canvasH,
+    active = active,
+    activeShader = activeShader,
+    camera = Voxel3D.camera,
+    tint = Voxel3D.tint,
+    vp = Voxel3D.vp,
+    cell = Voxel3D.cell,
+    skyEdge = Voxel3D.skyEdge,
+    skyRayLive = Voxel3D.skyRayLive,
+    fovY = Voxel3D.fovY,
+    eye = Voxel3D.eye,
+    focus = Voxel3D.focus,
+    focusW = Voxel3D.focusW,
+    lookFlat = Voxel3D.lookFlat,
+    descent = Voxel3D.descent,
+  }
+end
+
+function Voxel3D.restoreSceneState(state)
+  if type(state) ~= "table" then return false end
+  held = state.held
+  returnCanvas = state.returnCanvas
+  canvas = state.canvas
+  canvasW = state.canvasW or 0
+  canvasH = state.canvasH or 0
+  active = state.active and true or false
+  activeShader = state.activeShader
+  Voxel3D.camera = state.camera
+  Voxel3D.tint = state.tint
+  Voxel3D.vp = state.vp
+  Voxel3D.cell = state.cell
+  Voxel3D.skyEdge = state.skyEdge
+  Voxel3D.skyRayLive = state.skyRayLive
+  Voxel3D.fovY = state.fovY
+  Voxel3D.eye = state.eye
+  Voxel3D.focus = state.focus
+  Voxel3D.focusW = state.focusW
+  Voxel3D.lookFlat = state.lookFlat
+  Voxel3D.descent = state.descent
+  return true
 end
 
 -- The bound canvas's pixel size, for a pass that has to work in screen

@@ -6,6 +6,7 @@
 -- (see SpawnLogic:shouldSuppressClassicEncounter / canSuppressVanilla).
 -- The Pokédex is never a spawn gate. The player is never teleported.
 local V = ...
+local EngineCompat = V.require("EngineCompat")
 local Config = V.require("config")
 local LuminanceSheet = V.require("luminance_sheet")
 local EncounterPick = V.require("encounter_pick")
@@ -249,10 +250,8 @@ function SpawnLogic:resolveWaterSprite(speciesId, isShiny, form, opts)
         local ok, p = pcall(function() return self.mod.assets:path(rel) end)
         if ok and type(p) == "string" then loadPath = p end
       end
-      if (love and love.filesystem and love.filesystem.getInfo
-          and love.filesystem.getInfo(loadPath))
-         or (love and love.filesystem and love.filesystem.getInfo
-             and love.filesystem.getInfo(rel)) then
+      if EngineCompat.exists(self.mod, loadPath)
+         or EngineCompat.exists(self.mod, rel) then
         local luma = LuminanceSheet.pathFor(loadPath)
         local image = luma or loadPath
         return {
@@ -290,10 +289,8 @@ function SpawnLogic:resolveWaterSprite(speciesId, isShiny, form, opts)
         local ok, p = pcall(function() return self.mod.assets:path(rel) end)
         if ok and type(p) == "string" then loadPath = p end
       end
-      if (love and love.filesystem and love.filesystem.getInfo
-          and love.filesystem.getInfo(loadPath))
-         or (love and love.filesystem and love.filesystem.getInfo
-             and love.filesystem.getInfo(rel)) then
+      if EngineCompat.exists(self.mod, loadPath)
+         or EngineCompat.exists(self.mod, rel) then
         return {
           image = loadPath,
           frames = 6,

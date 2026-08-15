@@ -147,9 +147,29 @@ local POSES = [====[local function posesOf(state, spriteColors)
         local stand = arena and arena.trainerStand
         if stand then
           px, py = stand[1], stand[2]
-          cellX, cellY = math.floor(px / 16), math.floor(py / 16)
-          local okStandGround, standGh = pcall(groundAt, state.map, cellX, cellY)
+
+          -- IMPORTANT: trainerStand is a presentation-only X/Z offset.  It can
+          -- legitimately land over a tree, cliff, roof edge, water lip, or some
+          -- other raised voxel even though the REAL Gold player is standing on
+          -- ordinary walkable ground.  Sampling groundAt() from trainerStand
+          -- therefore hoisted the trainer onto that scenery and made them look
+          -- like they were floating higher and higher as the battle camera
+          -- exposed the mismatch.
+          --
+          -- Keep the horizontal battle composition, but pin the trainer's feet
+          -- to the ACTUAL encounter/player ground.  arena.trainer is the real
+          -- pre-battle player position captured before the visual displacement.
+          local groundAnchor = arena.trainer or stand
+          local groundCellX = math.floor((tonumber(groundAnchor[1]) or px) / 16)
+          local groundCellY = math.floor((tonumber(groundAnchor[2]) or py) / 16)
+          local okStandGround, standGh = pcall(groundAt, state.map,
+                                                groundCellX, groundCellY)
           if okStandGround then gh = standGh end
+
+          -- Battle trainer placement is static.  Never carry a half-finished
+          -- overworld step/ledge-hop lift into the displaced battle pose.
+          lift = 0
+          cellX, cellY = math.floor(px / 16), math.floor(py / 16)
           -- Face the battle line rather than the trainer's stale overworld facing.
           local mon = arena.player
           local foe = arena.enemy
@@ -174,6 +194,14 @@ local POSES = [====[local function posesOf(state, spriteColors)
       if e == state.player then
         me = posed[#posed]
         me.isPlayer = true
+        if state._stadiumLiveBattle then
+          -- Freeze every visual-walk bridge while the battle owns the pose.
+          -- Otherwise a movement bit captured on the encounter frame can keep
+          -- feeding bob/step animation to external 3D trainer skins.
+          me.stadiumBattleGrounded = true
+          me.stadiumVisualMoving = false
+          me.stadiumVisualAnimDist = 0
+        end
       end
     end
   end

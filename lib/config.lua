@@ -34,7 +34,7 @@ Config.DEFAULTS = {
   -- Follower control (built-in; replaces FOLLOWERS_EX options).
   follow_control = "trainer", -- trainer | pokemon
   trainer_trail = false,
-  follower_count = 1, -- 0–6 extra party trailers
+  follower_count = 1, -- 0–6 visible party followers (Wilds owns Gold slot #1)
   -- Peaceful ambient NPCs in towns / safe interiors (not wild battles).
   town_pokemon = true,
   -- Legacy key kept for save migration only (Mon Sprites toggle).
@@ -1199,44 +1199,25 @@ function Config.spriteColor(_mod)
   return "colored"
 end
 
---- trueColor flag for the mod's SpriteRenderer defs, decided per mode.
+--- trueColor flag for this mod's Pokémon SpriteRenderer defs.
 ---
---- Luminance-based shading: in every COLORS mode EXCEPT ADVANCED (RED++),
---- the mod serves the luminance-encoded (-grayscale) sheets with
---- trueColor = false, so the ENGINE's native non-trueColor path handles them
---- exactly like a vanilla DMG sprite — SpriteRenderer bakes rOBP0 = $D0
---- (PaletteFX.dmgObj) and the whole-canvas zone shader colors the result out
---- of the mode's own palette.  Followers therefore conform to whichever
---- COLORS mode is active: SGB tints them with the map palette, OG RED/BLUE
---- with the boot-ROM object palette (green/pink), OG YELLOW with its
---- CGBBasePalettes zones, CLASSIC / OG / OG INV with their green/gray ramps,
---- SGB INV with the permuted palette — luminance (brightness) decides the
---- shade, the engine decides the colors.
+--- This package is Gen-2-only. Gold's overworld is CGB-native and does not run
+--- the Gen-1 whole-canvas SGB/DMG zone recolor pass that the old Wilds code
+--- expected. Serving a generated luminance sheet with trueColor=false therefore
+--- leaves a custom follower visibly black-and-white. The bundled follower,
+--- Wilds, water and party art is already full RGBA color, so keep it raw in
+--- every Gold display mode and let the engine's COLOR/GBC post-processing act
+--- on the finished frame instead of pretending the Pokémon is a DMG OBJ.
 ---
---- The luminance sheets are derived at load from the colored art (see
---- luminance_sheet.lua) as 3-shade ramps whose lightest shade is clamped to
---- r = 0.8 (< the 0.83 the OBP bake keys transparent), so no interior pixel
---- ever punches through — no separate -grayscale asset files are shipped.
----
---- ADVANCED (redpp) is the one mode whose world is true-color: there the
---- mod serves the ORIGINAL colored sheets with trueColor = true (SpriteRenderer
---- draws raw + markTrueColor re-blits unshaded), exactly like the engine's own
---- full-color art.  Feeding colored sheets through the non-trueColor path in
---- any mode would hit the OBP0 bake, which keys every pixel with r > 0.83
---- transparent — it is only designed for the engine's 4-shade DMG sheets.
---- Callers that serve art whose trueColor they know explicitly (external
---- PokePC packs, water runtime sheets) set def.trueColor themselves; this
---- helper is for the built-in follower/wild sheets, whose art is luma in
---- every non-ADVANCED mode.
+--- This also matches the public Sprite Color setting above: the old
+--- Colored/Classic switch was removed and legacy saves are migrated to colored.
 function Config.spriteTrueColor(_mod)
-  return Config.paletteFxRedpp()
+  return true
 end
 
 -- PaletteFX mode gate: the genuinely monochrome modes (CLASSIC / OG /
--- OG INV), which colorize through the whole-screen shade/zone pass.  Kept
--- for diagnostics and the water registry's grayscaleTarget selection; the
--- follower/wild art gate is paletteFxRedpp (every non-ADVANCED mode serves
--- the luminance sheets, not just these three).
+-- OG INV). Kept for diagnostics and water/silhouette behavior only; Gen-2
+-- follower/wild RGBA art no longer switches to luminance sheets here.
 function Config.paletteFxMonochrome()
   local ok, PaletteFX = pcall(require, "src.render.PaletteFX")
   if ok and type(PaletteFX) == "table" and PaletteFX.mode ~= nil then
@@ -1246,11 +1227,9 @@ function Config.paletteFxMonochrome()
   return false
 end
 
--- ADVANCED (RED++) mode: the engine bakes real per-tile color onto
--- overworld sprites and its world pass runs unshaded.  Art selection and
--- the trueColor flag gate on this: non-ADVANCED modes serve luminance
--- (-grayscale) sheets through the engine's zone pass, ADVANCED serves the
--- original colored sheets raw.
+-- ADVANCED (RED++) mode gate retained for the systems that genuinely care
+-- about that display mode. Gen-2 Pokémon follower art no longer uses it to
+-- decide between color and luminance sheets.
 function Config.paletteFxRedpp()
   local ok, PaletteFX = pcall(require, "src.render.PaletteFX")
   if ok and type(PaletteFX) == "table" and PaletteFX.mode ~= nil then

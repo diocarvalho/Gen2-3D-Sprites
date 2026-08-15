@@ -6,6 +6,7 @@ local V = ...
 local JsonDecode = V.require("json_decode")
 local Config = V.require("config")
 local RuntimeSheets = V.require("runtime_sheets")
+local EngineCompat = V.require("EngineCompat")
 
 local WaterSpriteRegistry = {}
 WaterSpriteRegistry.__index = WaterSpriteRegistry
@@ -98,19 +99,8 @@ function WaterSpriteRegistry:_readBytes(rel)
     if ok and data ~= nil and data ~= false then return data end
   end
   local loadPath = self:_modPath(rel)
-  if love and love.filesystem and love.filesystem.read and loadPath then
-    local ok, data = pcall(love.filesystem.read, loadPath)
-    if ok and type(data) == "string" and data ~= "" then return data end
-  end
-  local f = io.open(rel, "rb")
-  if not f and V.path then
-    f = io.open((V.path or ".") .. "/" .. rel, "rb")
-  end
-  if f then
-    local data = f:read("*a")
-    f:close()
-    if type(data) == "string" and data ~= "" then return data end
-  end
+  local data = EngineCompat.read(self.mod, loadPath or rel)
+  if type(data) == "string" and data ~= "" then return data end
   return nil
 end
 

@@ -1,4 +1,190 @@
-**Current release: v0.2.35**
+## v0.2.81 — Party Leader Follower Rebind
+
+Gold trainer FOLLOW mode now follows the **selected party slot**, not the Pokemon identity that used to occupy that slot. The default selected slot is **party slot #1**, so when PARTY -> SWITCH puts a different Pokemon at the top of the list, the visible follower changes to that Pokemon immediately. The selection fingerprint, 2D/3D sprite/model binding, shiny state, and land/water follower art are reconciled before the trailer sync. Same-species swaps are detected by party object identity as well, so two copies of the same species cannot leave the old follower cached. **No Stadium model-cache rebuild is needed for v0.2.81.**
+
+## v0.2.80 — Full-Color Gen-2 2D Followers
+
+Gold's 2D Pokemon follower fallback now keeps the bundled RGBA follower art in full color in every display mode. The old Wilds luminance path was a Gen-1 compatibility technique that depended on a later zone recolor shader; Gold's CGB-native world does not provide that recolor step for custom follower entities, which is why turning 3D Pokemon models OFF could expose black-and-white followers. v0.2.80 removes that stale branch for normal, shiny and submerged follower sheets and keeps the same true-color contract in party icons. **No Stadium model-cache rebuild is needed for v0.2.80.**
+
+## v0.2.79 — Stadium 2 Symmetric Eye / Tile-Origin Fix
+
+DSM6 restored `G_SETTILE` address modes, but Stadium 2 also relies on `G_SETTILESIZE`: SL/TL shift the render tile origin and SH/TH define the clamp window. Ignoring that state can make a symmetric face texture sample correctly on one side and pull the wrong eye/edge on the mirrored side. v0.2.79 rebuilds the local packs as **DSM7**, subtracts the real tile origin before wrap/mirror, forces clamp when the N64 mask is zero, and stores a texture variant cropped to the RDP's effective sampling window.
+
+**Important:** DSM7 needs one more one-time rebuild from your Stadium 2 ROM. DSM6 cannot be upgraded in place because SL/TL/SH/TH were not stored. No ROM or extracted model data is shipped with the mod.
+
+## v0.2.78 — Stadium 2 Material Recovery + Numbered Pokédex
+
+This release upgrades the local Stadium model cache to **DSM6**. The ROM extractor now keeps the N64 material state that DSM5 discarded: palette bank, wrap/mirror/clamp addressing, coordinate masks/shifts, lighting state and neutral material tint. The fix is central and applies roster-wide rather than hard-coding the reported problem species. Textureless material pieces are also rendered for every species instead of using a Lugia-only exception.
+
+**Important:** the first run after v0.2.78 must rebuild the Stadium packs from your own Stadium 2 ROM. DSM5 cannot be upgraded in place because the lost material bits are not present in those files. No ROM or extracted model data is shipped with the mod.
+
+The custom Pokédex now keeps its actual row array in strict **National Dex #001–#251 order**, so the list, cursor, selected model and displayed number cannot disagree. Turning `CUSTOM UI / MENUS` OFF still returns to Gold's native NEW / OLD / A-Z Pokédex behavior.
+
+## v0.2.77 — Independent Pokémon + Player 3D Toggles
+
+The **3D MODELS** settings category now has two independent presentation switches. **3D POKéMON MODELS** controls Stadium 2 Pokémon only (wilds, followers, battles and model previews). **3D PLAYER MODEL** controls only the human Gold player skin supplied by `red_3d_player` / 3D Character Selector. This lets you keep all Pokémon in Stadium 3D while using Gold's normal 2D player sprite/card, or keep the 3D player while returning Pokémon to 2D.
+
+The voxel world, 3D scenery, OPEN WORLD, camera and weather systems remain independent of both switches. Existing saves keep their old `stadium3dSprites` value as the Pokémon setting; the new player switch defaults ON.
+
+## v0.2.76 — Stadium Dialogue + Whole-World Zoom
+
+Ordinary Gold dialogue and YES/NO prompts now use the same translucent dark-glass visual language as the custom pause, Pokédex, party and battle interfaces. The engine's TextBox/ChoiceBox still owns substitution, typewriter speed, paging, auto text, YES/NO selection and callbacks; this release only replaces presentation while `CUSTOM UI / MENUS` is enabled.
+
+A new **OPEN WORLD ZOOM LIMIT** setting adds four camera ceilings: **STANDARD 2.2X**, **FAR 4X**, **WORLD 8X** (default) and **EXTREME 12X**. Your game still starts at the normal 1X view, but wheel/trackpad/pinch can now pull the diorama much farther back. When OPEN WORLD is active, FAR/WORLD/EXTREME also widen Gen1Recomp's native survey ladder through `zoom.range`, adding a 0.25-scale whole-region view for native/Character Selector ZOOM compatibility.
+
+## v0.2.75 — Battle Layout + Full Pokédex Model Framing
+
+The controller battle-command overlay now has dedicated vertical lanes for its title, command diamond, command labels and footer, so `PACK / DOWN` cannot collide with the stick hints at the bottom of the panel.
+
+The Pokédex/party Stadium preview camera now measures the **current animated 3D pose** and fits that pose against both the vertical and horizontal field of view. Tall portrait preview boxes therefore keep wide wings/tails and tall heads/feet completely visible instead of clipping the model at the viewer edges.
+
+## v0.2.74 — Automatic Battle UI Startup
+
+Connected outdoor Gold map seams now reattach preserved Wilds followers synchronously, eliminating the one-frame follower pop/flash.
+
+The custom live Gold battle HUD now reaches the command panel without requiring a physical controller press. Ordinary battle-intro PromptButton pages auto-advance after a brief hold, and direct FIGHT / PACK / PKMN / RUN shortcuts remain disarmed until the command panel has actually been rendered at least once. A held button used during the intro is latched until release so it cannot also trigger an invisible command on the first menu frame.
+
+## v0.2.73 — Moving Follower Ownership Fix
+
+v0.2.72 removed the duplicate but reserved follower slot #1 for Gold's native follower even though the embedded Wilds control engine still suppresses that stock/native mover in normal FOLLOW mode. The result was exactly the reported regression: the active Wilds trailer disappeared and a stale native transition copy could remain standing in the old spot.
+
+v0.2.73 restores the **Wilds trailer as the one authoritative moving follower on Gold**, including slot #1. Native Gold `pikachuFollower` copies are suppressed and cleaned instead of being chosen as the primary. `FOLLOWER COUNT = 1` therefore means one moving follower again, while larger counts add only intentional extra Wilds followers.
+
+## v0.2.72 — Gold Follower Zone-Transition Fix
+
+Gold now uses one authoritative primary follower: the engine-owned `src.world.gen2.Follower`. The embedded Wilds follower controller reserves slot #1 for that native entity instead of creating another party trailer for the same Pokémon. This prevents a second follower from being left frozen behind after changing zones/maps. Follower counts above 1 still add intentional extra Wilds trailers, and stale native duplicates are removed during transition cleanup.
+
+## v0.2.71 — Wild Pokémon Sandbox Recovery
+
+Current Gen1Recomp blocks raw `love.filesystem` from mod-owned Lua. The embedded Wilds runtime still used that API during runtime-sheet and sprite probes, which could abort Wilds before map initialization even while the voxel world and 3D skin selector were healthy. v0.2.71 routes those checks through `mod:read`, `mod:info`, and the engine compatibility filesystem so roaming Pokémon can spawn, walk, chase, and render in grass/bushes again.
+
+**Current release: v0.2.81**
+
+## v0.2.70 — Current Gen1Recomp Voxel + Character Selector Recovery
+
+Current Gen1Recomp now sandboxes mod-owned code more strictly. v0.2.70 removes the remaining direct `love.system` dereferences from the live Gold voxel/compose bridges, restores the engine-supported Gold `render_pipelines.drawWorld` path, and keeps a deliberate `render.compose` coexistence path whenever `red_3d_player` / 3D Character Selector is installed so its skin/camera pipeline is not disabled.
+
+## v0.2.69 — Desktop Voxel Compositor Recovery
+
+Two independent Windows PCs reproduced the same result: the option said **3D VOXEL WORLD = ON**, but Gold stayed native 2D, while Android still rendered voxels. v0.2.69 restores the desktop canvas-exit behavior from v0.2.45, the build confirmed to render 3D on the same current PC setup.
+
+On desktop, the **voxel scene, shadow-map pass, and anti-alias resolve** now all finish on the physical window instead of restoring an intermediate compositor canvas introduced in v0.2.58. Android/iOS keep the nested-canvas behavior because their whole-frame presentation path needs it. The experimental v0.2.68 Gold `drawWorld` pipeline is also disabled so there is only one world owner: the proven `render.compose` path. This also restores the render path used by the optional 3D Character/Skin Selector integration, which is drawn inside the voxel scene.
+
+
+The 3D Pokémon viewer boxes are unchanged, but the Stadium preview camera is now much tighter and vertically re-centered. Pokémon appear substantially larger while keeping heads, feet, wings and tails inside the viewer. The same framing is used by the Pokédex, Party/Summary and battle selectors.
+
+## v0.2.58 — Cache Safety + Android Flip + 3D Preview Overscan
+- **VOXEL DISK CACHE** is now restricted to distant OPEN WORLD visuals. The map the player is actually standing/colliding on is always rebuilt from live Gold map data; a cached far map is discarded/rebuilt the moment it becomes current. Cache entries are revisioned again and incomplete terrain streams are rejected.
+- **FLIP SCREEN 180 DEGREES** on Android now keeps the entire gameplay render inside the final-frame canvas: voxel scene, shadow prepass and anti-alias resolve all restore the compositor target instead of escaping to the physical screen. Touch remapping from v0.2.56 remains.
+- Stadium model previews render to a larger internal overscan canvas and use a wider safety camera. The Pokédex gets extra headroom for birds/flying/extreme animations such as Pidgey without enlarging the glass UI box.
+
+
+
+## v0.2.55 — Persistent Voxel Cache + Saved Settings + 3D Pokédex
+- **VOXEL DISK CACHE** is ON by default. The first map build is unchanged; later launches can restore cached FULL voxel terrain directly, making repeated OPEN WORLD starts much faster on weaker phones.
+- MOD SETTINGS now persist through Gold/Gen2's actual options writer, so toggles and choices survive a restart.
+- The custom POKéDEX list and entry pages now show the highlighted seen Pokémon's live Stadium 2 3D model preview. Unseen species stay hidden and the 3D POKéMON / SPRITES toggle still controls model use.
+
+## v0.2.54 — Native Tilt + Live Pause Backdrops
+Gold/Recomp's built-in OPTIONS `TILT` setting now directly changes the voxel diorama camera pitch; the separate mod DIORAMA TILT row is removed. Pause-launched OPTIONS, POKéDEX, POKéMON, PACK, POKéGEAR, AJ/Trainer Card and SAVE keep the live voxel overworld visible behind their custom glass UI, matching MOD SETTINGS.
+
+## v0.2.52 — direct pause MOD SETTINGS
+- The Gold START/pause menu now shows **MOD SETTINGS** directly below **OPTION**.
+- It opens this mod's real ManagerState options page, including 3D VOXEL WORLD, OPEN WORLD, 3D POKéMON / SPRITES, battle, camera and other settings.
+- Press B/Circle from the direct settings page to return straight to the pause menu.
+
+## v0.2.51
+- Added **3D POKéMON / SPRITES** in Mod Options.
+- ON (default): current Stadium/3D model presentation.
+- OFF: keeps the voxel renderer, OPEN WORLD, 3D terrain, trees, buildings, grass, props, weather and cameras, but restores Gold-style 2D sprite/card characters and Pokemon.
+- OFF also disables Stadium model previews in the custom party/battle PKMN menus and releases live-battle Stadium combatants so Gold's normal 2D battle pics can render over the voxel battlefield.
+- The lead party follower and visible Wilds Pokemon remain functional using their 2D sprite providers.
+
+## v0.2.50
+- Live battle trainer grounding fix: the battle-only trainer stand can still move horizontally for composition, but its vertical height is now anchored to the real player/encounter ground instead of whatever raised tree/cliff voxel happens to sit under the displaced stand point.
+- Clears stale step/ledge lift and disables the free-roam visual walking/bobbing bridge while battle mode owns the trainer pose, preventing the trainer from drifting or floating above the ground during camera movement.
+- OPEN WORLD full-3D rendering and v0.2.49 tree void filling are otherwise unchanged.
+
+## v0.2.49
+- OPEN WORLD tree void-fill refinement: remaining stitched white gaps are now filled by side-aware edge tree sampling, reducing missed holes and making the synthetic forest apron follow the nearby map edge more closely.
+- Keeps the open-world + voxel/3D combination intact; this update only refines how remaining outdoor void patches are forest-filled.
+
+v0.2.48 note: OPEN WORLD now backfills remaining outdoor stitched voids with matching tree/forest filler instead of leaving white rectangular holes.
+
+## v0.2.47 — true OPEN WORLD + voxel 3D
+
+This build changes OPEN WORLD from a residency experiment into the literal combination requested: the large stitched Gold world and this mod's normal voxel/Stadium renderer are the **same scene**. With OPEN WORLD ON, every cardinally connected outdoor map is adapted into the shared coordinate space and requested as full voxel geometry. Internal connection seams are masked; outside edges retain the normal voxel border/apron instead of opening to empty sky. Trees, buildings, props, tall grass, flowers, NPCs and roaming/Stadium Pokemon keep using the normal 3D paths.
+
+The renderer is also incremental and fail-soft now. A far map that is still building simply waits; all already-ready maps continue drawing in 3D. One distant tileset/atlas problem no longer makes GoldComposeBridge abandon the entire voxel frame and show the flat native overview. OPEN WORLD itself keeps the voxel provider active, so an older save cannot accidentally combine `openWorld=true` with `voxel3d=false` and get only the 2D map.
+
+This mode is intentionally expensive. Switch OPEN WORLD OFF to go back to the normal current-map + direct-neighbour streamer and release distant meshes.
+
+
+## v0.2.46 OPEN WORLD + full 3D renderer fix
+
+v0.2.45 had a runtime regression in the new connected-map adapter: it still called the direct-neighbour urgency helper after that helper had accidentally been removed. That exception forced GoldComposeBridge onto its flat fallback, which is why OPEN WORLD could appear to change map coverage while the voxel terrain, 3D trees/grass/props and Stadium Pokemon presentation disappeared.
+
+v0.2.46 restores that helper and keeps OPEN WORLD as a residency extension of the normal 3D scene. With OPEN WORLD ON, the complete cardinally connected map graph is still loaded/retained, but it goes through the same VoxelScene that draws voxel terrain, structures, grass, flowers, NPCs, roaming Pokemon and Stadium models. With OPEN WORLD OFF, the renderer immediately returns to current-map + direct-neighbour streaming and releases the far residency set.
+
+The toggle is read every frame and also listens for the Mod Manager's live `mod.options_changed` event, so changing ON/OFF no longer leaves a stale full-world graph behind.
+
+## v0.2.45 OPEN WORLD toggle
+
+Mod Options now includes **OPEN WORLD**. It defaults **OFF** so the current streaming renderer keeps its normal performance profile. OFF loads the current Gold map and its directly connected cardinal neighbours.
+
+Turn **OPEN WORLD = ON** to traverse the complete cardinally connected map graph from the current area. Every reachable route/town/outdoor connection is positioned in the same world coordinate space, its voxel mesh is queued in the background, and completed maps remain resident and are rendered together. This is deliberately connections-only: warp destinations such as houses, caves and other interiors are separate spaces and are not pasted into the outdoor plane.
+
+This mode is intentionally expensive. Large connected regions can consume much more RAM, GPU memory, CPU build time and draw time. You can switch it back **OFF** live; the far-map mesh/atlas live set is then released and normal one-map-ahead streaming resumes. Direct edge destinations keep priority over far-map background jobs so nearby terrain still loads first.
+
+## v0.2.44 BATTLE COMMANDS native-UI fallback
+
+The **BATTLE COMMANDS** Mod Option is now a complete battle-presentation switch. **ON** keeps the custom Stadium HUD, command diamond, custom battle selectors and direct command shortcuts. **OFF** gives battle presentation and battle-menu input back to Gold, so the original Gen-2 battle screen, command box, move menu and native PACK/PKMN flow are shown instead of merely hiding the custom command panel. The 3D overworld, pause menus and other mod features are unaffected.
+
+
+## v0.2.42 3D Party runtime fix + battle PKMN preview
+
+v0.2.42 fixes the v0.2.41 party-model feature against the actual Gen1Recomp v0.1.83 runtime. `Gen2PartyMenu` and `Gen2SummaryMenu` now receive the custom 3D presentation deterministically instead of depending on the START-menu state still being detectable while their constructor runs. The live Stadium battle `PKMN` selector now also shows the highlighted party member's Stadium 2 model on the left, and the item-target party selector uses the same preview.
+
+The preview renderer now saves/restores Voxel3D's scene bookkeeping around its temporary canvas so opening a party preview cannot steal the current overworld/battle render target. Eggs and unavailable packs still fail open to an in-theme text fallback.
+
+## v0.2.41 3D Pokémon Party screen
+
+Opening **POKéMON** from the custom Gold pause menu now turns the left side of the interface into a live Stadium 2 showcase for the highlighted party member. The imported model idles in place and slowly turns toward each side while the full party list, HP bars and normal Gold navigation stay on the right.
+
+The preview card also shows the selected Pokémon's species/Dex identity, level, HP and status in the same translucent battle-menu language. Choosing **STATS** keeps that model visible and replaces Gold's summary presentation with matching STATUS/EXP, MOVES/ITEM, STATS/TRAINER and move-detail pages. Eggs get an Egg-specific card, and a missing/unbuilt Stadium 2 model gets a readable in-theme fallback rather than breaking the party menu. The preview is pause-scoped: battle party pickers, item-target party lists and scripted PartyMenu uses keep their original presentation/behavior.
+
+This is still Gold's real `Gen2PartyMenu` underneath. STATS, SWITCH, MOVE, ITEM/MAIL, field moves, item targeting and every party mutation remain owned by Gen1Recomp; v0.2.41 only adds the 3D presentation layer and releases its preview rig when the party screen closes.
+
+
+## v0.2.40 matching MODS + third-party menu bridge
+
+- The pause-menu **MODS** row now opens a matching translucent Stadium-style **MOD MANAGER** submenu over the voxel world instead of dropping into the old white/black manager UI.
+- Selecting any installed mod opens a matching detail submenu; that mod's **OPTIONS** row opens another matching submenu for its `options_schema`. This applies to every installed mod using Gen1Recomp's standard Mod Manager, not only this mod.
+- Profiles, permissions, errors, apply/restart prompts and Mod Manager confirmation overlays use the same glass panels, rounded rows, white outlines and footer language.
+- A pause-chain `screen.pushed` bridge also auto-skins conventional third-party list-like menus opened by mod-injected START rows. Unknown bespoke renderers are deliberately left native instead of being guessed at, but their descendants remain eligible for the bridge.
+- All menu action/update/persistence logic remains engine- or third-party-owned; this release replaces presentation only.
+
+## v0.2.39 tall pause menu + custom pause submenus
+
+The Gold START panel now expands vertically to show the normal complete list at once instead of forcing the custom battle-style presentation into four visible rows. The common eight-entry layout fits in one panel; only unusually large lists injected by other mods scroll.
+
+Selecting the built-in Gold entries now keeps the same **custom battle UI made by this mod** instead of falling back to white Game Boy menus. POKéDEX, POKéMON, PACK, PokéGEAR, the trainer/status card, SAVE and OPTION are pause-scoped custom overlays using the same translucent navy glass, rounded rows and bright selected outline as the in-battle custom PACK/PKMN selectors. Party/Pack action popups, Save YES/NO, Pokegear phone actions and Pokedex entry actions receive the same treatment. Gold still owns every underlying action and state transition.
+
+A START row injected by a different mod (for example MOUNTS) still appears and works, but that mod's private screen is not force-skinned because its internal state/layout is not part of this package.
+
+
+## v0.2.38 custom battle-style Gold pause menu
+
+The replacement now targets Gold's **real Gen-2 START menu** (`src.ui.gen2.StartMenu`) — the menu with POKéDEX / POKéMON / PACK / PokéGEAR / player / SAVE / OPTION and mod-added entries such as MOUNTS. v0.2.37 mistakenly targeted the Gen-1 StartMenu path, which is why the original white Gold menu could still appear.
+
+The Gold pause menu now uses the **same custom UI made for this mod's in-battle PACK/PKMN selectors**: the same dark translucent navy panel, thin white outline, four visible rounded rows, selected-row glow/outline, title/meta typography and battle-selector footer. MENU ACCOUNT descriptions are kept in a matching battle-message panel on the left, and the quit confirmation uses the same custom selector styling. Gold still owns the actual menu actions and input underneath.
+
+The Android options remain unchanged: **ANDROID CAMERA SLIDER** can completely hide/release the DIORAMA/3RD/1ST strip, and **FLIP SCREEN 180 DEGREES** rotates the final composed Android frame.
+
+## v0.2.36 Android/UI update
+
+The mod settings now include an **ANDROID CAMERA SLIDER** toggle that fully releases the hidden slider's touch area, plus **FLIP SCREEN 180 DEGREES** for reverse-landscape Android use. v0.2.36 also introduced a custom Mod Options skin; v0.2.37 supersedes that UI target and restores normal Mod Settings while moving the Stadium treatment to the actual pause menu.
+
 
 **v0.2.35 custom battle selectors:** Triangle/PKMN and Cross/PACK now stay on the live Stadium battlefield instead of opening Gold's full-screen menus. Both use the same four-row glass list style as the move picker. Party-target items remain in the custom HUD, and Ether-style single-move PP restoration gets a matching move-target list. Gold still owns the actual switch/item/catch/heal rules underneath.
 
@@ -47,7 +233,7 @@ Lugia (National Dex 249) now intentionally bypasses the unstable ROM-derived Sta
 
 Lugia is no longer repaired by guessing a compact hierarchy. The actual Stadium geo-layout joint flags are now preserved in the local model pack and replayed at runtime. Those flags choose between Stadium's separate-scale matrix path and its normal full-TRS path; DSM4 discarded them, which is why Lugia's rigid body pieces could never assemble correctly even when the pose looked compact.
 
-**Important:** v0.2.16 changes the local Stadium model cache from `DSM4` to `DSM5`. Re-import/select your Pokemon Stadium 2 ROM once after installing this version so all 251 local packs are rebuilt with the missing joint flags. The mod still does not ship Stadium model data.
+**Cache format history:** v0.2.16 moved DSM4 → DSM5 for joint flags; v0.2.78 moves DSM5 → DSM6 for N64 material state; v0.2.79 moves DSM6 → DSM7 so render-tile SL/TL/SH/TH and zero-mask clamp semantics are also baked correctly. Re-import/select your Pokémon Stadium 2 ROM once after v0.2.79 so all 251 local packs are rebuilt. The mod still does not ship Stadium model data.
 
 The v0.2.15 harder Poké Ball aim/timing/miss-flight changes and all prior camera/open-world/battle work remain.
 
@@ -334,3 +520,7 @@ This release intentionally leaves the v0.1.71 Wilds/encounter behavior unchanged
 
 ## v0.1.82 Weather
 Use **3D WEATHER** to select Auto, Clear, Rain, Fog, or Rain + Fog. **MOVING CLOUDS** controls the background cloud layer. The day/night sky continues to show the sun and moon. Weather only appears outdoors.
+
+
+### v0.2.67 desktop voxel recovery
+A fresh Gold options block defaults native `TILT` to OFF/0. While `3D VOXEL WORLD` is enabled, that OFF value now selects the voxel renderer's normal 35-degree diorama camera rather than a literal 0-degree/flat camera. Gold TILT 15/35/50 continue to map directly to those voxel pitches; disable `3D VOXEL WORLD` for the native 2D overworld.

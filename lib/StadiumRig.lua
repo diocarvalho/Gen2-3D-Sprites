@@ -30,7 +30,7 @@
 -- ------- the two matrix chains
 --
 -- Stadium has TWO joint scale modes (func_800143C0), selected by the raw
--- command-0x1D flags preserved in DSM5. Mode 0 keeps scale OUT of the matrix
+-- command-0x1D flags preserved in DSM5/6. Mode 0 keeps scale OUT of the matrix
 -- chain: a separate stack pre-scales child translations and the accumulated
 -- scale is applied only to the finished draw matrix. Mode 1 builds a normal
 -- local TRS matrix, so scale propagates through descendants. Modes 2/3 are
@@ -80,6 +80,30 @@ local SHADE_BASE = 0.7725
 local SHADE_X = 0.06
 local SHADE_Y = 0.225
 local SHADE_Z = 0.11
+
+-- N64 tile address modes -> LOVE sampler modes. CLAMP wins when its bit is
+-- present; MIRROR without CLAMP is mirrored repeat; zero is ordinary wrap.
+local function wrapName(mode)
+  mode = tonumber(mode) or 2
+  if mode == 0 then return "repeat" end
+  if mode == 1 then return "mirroredrepeat" end
+  return "clamp"
+end
+StadiumRig.wrapName = wrapName
+
+local function preparePart(part, tint)
+  local texture = part and part.texture
+  if not texture then return end
+  local prim = part.prim or {}
+  if texture.setWrap then
+    pcall(texture.setWrap, texture, wrapName(prim.wrapS), wrapName(prim.wrapT))
+  end
+  if tint and love.graphics and love.graphics.setColor then
+    local c = prim.tint or { 255, 255, 255, 255 }
+    love.graphics.setColor((c[1] or 255) / 255, (c[2] or 255) / 255,
+      (c[3] or 255) / 255, (c[4] or 255) / 255)
+  end
+end
 
 -- ------- an instance
 
@@ -647,6 +671,14 @@ local function poseBounds(self)
   return lo1, lo2, lo3, hi1, hi2, hi3
 end
 
+-- Public read-only bounds for preview cameras.  These are the current posed
+-- mesh bounds in raw Stadium model units, after skeletal animation/anchoring
+-- and before the caller's model matrix.  Keeping the scan here means preview
+-- code never has to reach into rig internals or duplicate skinning math.
+function StadiumRig:posedBounds()
+  return poseBounds(self)
+end
+
 local function finite(v)
   return type(v) == "number" and v == v and v > -1e12 and v < 1e12
 end
@@ -1115,9 +1147,16 @@ function StadiumRig:skin(yaw)
       local wx = piv[o + 1] * ax + piv[o + 2] * ay + piv[o + 3] * az
       local wy = piv[o + 5] * ax + piv[o + 6] * ay + piv[o + 7] * az
       local wz = piv[o + 9] * ax + piv[o + 10] * ay + piv[o + 11] * az
-      -- the model matrix's yaw, by hand: (x, z) turned, y untouched
-      row[6] = SHADE_BASE + SHADE_X * (cy * wx + sy * wz) + SHADE_Y * wy
-               + SHADE_Z * (cy * wz - sy * wx)
+      -- With G_LIGHTING disabled Vtx bytes 12..14 are colour rather than a
+      -- normal. DSM6/7 store that as prim.tint, so do not apply directional
+      -- lighting a second time.
+      if prim.lit == false then
+        row[6] = 1
+      else
+        -- the model matrix's yaw, by hand: (x, z) turned, y untouched
+        row[6] = SHADE_BASE + SHADE_X * (cy * wx + sy * wz) + SHADE_Y * wy
+                 + SHADE_Z * (cy * wz - sy * wx)
+      end
     end
     pcall(part.mesh.setVertices, part.mesh, rows)
   end
@@ -1203,6 +1242,7 @@ function StadiumRig:draw(matrix, pull)
       additive = additive or {}
       additive[#additive + 1] = part
     elseif part.texture then
+      preparePart(part, true)
       Voxel3D.draw(part.mesh, part.texture, matrix, pull)
     end
   end
@@ -1210,11 +1250,13 @@ function StadiumRig:draw(matrix, pull)
     Voxel3D.blend("add")
     for _, part in ipairs(additive) do
       if part.texture then
+        preparePart(part, true)
         Voxel3D.draw(part.mesh, part.texture, matrix, pull)
       end
     end
     Voxel3D.blend(nil)
   end
+  if love.graphics and love.graphics.setColor then love.graphics.setColor(1, 1, 1, 1) end
   Voxel3D.glass(true)
   Voxel3D.seams(true)
 end
@@ -1226,6 +1268,7 @@ end
 function StadiumRig:caster(shadowMap, matrix)
   for _, part in ipairs(self.parts) do
     if part.texture and not part.prim.additive then
+      preparePart(part, false)
       shadowMap.draw(part.mesh, part.texture, matrix)
     end
   end

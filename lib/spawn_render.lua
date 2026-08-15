@@ -31,6 +31,7 @@ local RenderDiagnostics = V.require("render_diagnostics")
 local SpriteProviders = V.require("sprite_providers")
 local WaterSpriteRegistry = V.require("water_sprite_registry")
 local SpriteResolver = V.require("sprite_resolver")
+local EngineCompat = V.require("EngineCompat")
 
 local SpawnRender = {}
 SpawnRender.__index = SpawnRender
@@ -77,12 +78,7 @@ end
 
 local function fsExists(path)
   if type(path) ~= "string" or path == "" then return false end
-  local fs = love and love.filesystem
-  if fs and fs.getInfo then
-    local ok, info = pcall(fs.getInfo, path)
-    if ok and info then return true end
-  end
-  return false
+  return EngineCompat.exists(V.mod, path)
 end
 
 local function isOsAbsolutePath(path)
@@ -142,20 +138,26 @@ local function bakeSheet(species, sourcePath, log)
   local canvasOk, canvas = pcall(love.graphics.newCanvas, CELL, CELL)
   if not canvasOk or not canvas then return nil end
 
+  local prevCanvas = love.graphics.getCanvas and love.graphics.getCanvas() or nil
   love.graphics.setCanvas(canvas)
   love.graphics.clear(0, 0, 0, 0)
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.draw(src, 0, 0, 0, CELL / sw, CELL / sh)
-  love.graphics.setCanvas()
+  if prevCanvas ~= nil then love.graphics.setCanvas(prevCanvas)
+  else love.graphics.setCanvas() end
 
   local idata = canvas:newImageData()
   canvas:release()
 
-  if not (love.filesystem and idata.encode and love.filesystem.write) then
+  local fs = EngineCompat.fs()
+  if not (fs and idata.encode and type(fs.write) == "function") then
     return nil
   end
 
-  local dirOk, dirErr = pcall(love.filesystem.createDirectory, CACHE_DIR)
+  local dirOk, dirErr = true, nil
+  if type(fs.createDirectory) == "function" then
+    dirOk, dirErr = pcall(fs.createDirectory, CACHE_DIR)
+  end
   if not dirOk and log then
     log("cache dir create failed: %s", tostring(dirErr))
   end
@@ -164,8 +166,9 @@ local function bakeSheet(species, sourcePath, log)
   local fileData = idata:encode("png")
   if not fileData then return nil end
 
-  local writeOk, writeErr = love.filesystem.write(rel, fileData:getString())
-  if not writeOk then
+  local writeCallOk, writeOk, writeErr = pcall(fs.write, rel, fileData:getString())
+  if not writeCallOk or not writeOk then
+    writeErr = writeCallOk and writeErr or writeOk
     if log then log("cache write failed for %s: %s", tostring(species), tostring(writeErr)) end
     return nil
   end
@@ -190,14 +193,9 @@ local function probeImageLoad(path)
     return false, "OS absolute path rejected (use love.filesystem virtual path): " .. path, nil, nil
   end
 
-  local fs = love and love.filesystem
+  -- Do not probe raw love.filesystem here: current mod sandboxes block it.
+  -- Assets/newImage is the authoritative loader for engine and mod virtual paths.
   local infoKnownMissing = false
-  if fs and fs.getInfo then
-    local okInfo, info = pcall(fs.getInfo, path)
-    if okInfo and info == nil then
-      infoKnownMissing = true
-    end
-  end
 
   if not (love and love.graphics and love.graphics.newImage) then
     if infoKnownMissing then

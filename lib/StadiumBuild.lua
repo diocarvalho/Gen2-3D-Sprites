@@ -125,7 +125,7 @@ local function restSample(bones)
   end
 end
 
--- Every bone's draw matrix at one instant, as 3x4 rows. DSM5 preserves each
+-- Every bone's draw matrix at one instant, as 3x4 rows. DSM7 preserves each
 -- joint's command-0x1D flags because Stadium does not use one universal scale
 -- rule: mode 0 uses the separate accumulated-scale stack, while mode 1 uses a
 -- conventional full local TRS matrix. The bind measurement must replay the
@@ -159,7 +159,7 @@ local function scaleColumns(m, sx, sy, sz)
 end
 
 -- v0.2.17: pack-wide stance/idle measurements intentionally use the proven
--- legacy Stadium transform walk.  DSM5 still stores raw node flags for Lugia
+-- legacy Stadium transform walk.  DSM7 still stores raw node flags for Lugia
 -- diagnostics/runtime, but an unverified Stadium-2 flag interpretation must
 -- never be allowed to invalidate the other 250 species again.
 local function bindMatrices(bones, sample)
@@ -560,7 +560,7 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   local idle = (idleIndex ~= NONE16) and anims[idleIndex + 1] or nil
   local static = idleIsBroken(data, idle)
 
-  w:raw("DSM5")
+  w:raw("DSM7")
   w:u16(species)
   w:u16(#bones)
   w:u16(#prims)
@@ -588,7 +588,7 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   for i = 1, #bones do
     local b = bones[i]
     w:i16(b.parent)
-    -- DSM5 preserves geo command 0x1D's raw transform flags.  Lugia is the
+    -- DSM7 preserves geo command 0x1D's raw transform flags.  Lugia is the
     -- first Stadium-2 model that made dropping this byte visibly catastrophic.
     w:u8(tonumber(b.flags) or 1)
     for k = 1, 3 do w:i16(roundHalfEven(b.t[k])) end
@@ -611,6 +611,13 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
     -- the display list's own cull mode: 1024 is G_CULL_BACK
     w:u8((p.cull and p.cull ~= 0) and 1 or 0)
     w:u8((p.blend == "add") and 1 or 0)
+    -- DSM7: preserve the N64 render tile/material result per primitive.
+    -- 0=wrap, 1=mirror-wrap, 2/3=clamp, matching G_TX_*'s two-bit value.
+    w:u8(tonumber(p.wrapS) or 2)
+    w:u8(tonumber(p.wrapT) or 2)
+    w:u8(p.lit == false and 0 or 1)
+    local tint = p.tint or { 255, 255, 255, 255 }
+    for c = 1, 4 do w:u8(tonumber(tint[c]) or 255) end
     w:i16(p.texAnim or -1)
     -- sorted by the stream's own byte, which is what the reader keys on
     local keys = {}
