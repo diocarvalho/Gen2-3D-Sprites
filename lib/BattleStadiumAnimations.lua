@@ -20,6 +20,32 @@
 local V = ...
 local M = {}
 
+local function animationsEnabled()
+  local opts = V and V.mod and V.mod.options
+  if not (opts and type(opts.get) == "function") then return true end
+  local ok, value = pcall(opts.get, opts, "stadiumBattleAnimations")
+  if not ok or value == nil then return true end
+  return not (value == false or value == 0 or value == "0" or value == "false" or value == "off")
+end
+
+local function stadiumFxPort()
+  if V and type(V.StadiumBattleFXPort) == "table" then return V.StadiumBattleFXPort end
+  if V and type(V.require) == "function" then
+    local ok, value = pcall(V.require, "StadiumBattleFXPort")
+    if ok and type(value) == "table" then V.StadiumBattleFXPort=value; return value end
+  end
+end
+
+local function hitReactionsEnabled()
+  local Port=stadiumFxPort()
+  return not (Port and Port.hitReactionsEnabled and not Port.hitReactionsEnabled())
+end
+
+local function faintAnimationsEnabled()
+  local Port=stadiumFxPort()
+  return not (Port and Port.faintAnimationsEnabled and not Port.faintAnimationsEnabled())
+end
+
 local function safeLog(level, fmt, ...)
   local log = V and V.mod and V.mod.log
   local fn = log and log[level]
@@ -189,7 +215,7 @@ function M.install()
   if type(StadiumMon.matrix) == "function" and not StadiumMon._stage1RecoilMatrix then
     local innerMatrix = StadiumMon.matrix
     StadiumMon.matrix = function(self, x, groundY, z, faceX, faceZ, ...)
-      local recoil = tonumber(self._stage1Recoil) or 0
+      local recoil = hitReactionsEnabled() and (tonumber(self._stage1Recoil) or 0) or 0
       if recoil > 0 and faceX and faceZ then
         local len = math.sqrt(faceX * faceX + faceZ * faceZ)
         if len > 0.0001 then
@@ -218,7 +244,7 @@ function M.install()
     local innerGoldMove = GoldBattleState.animForMove
     GoldBattleState.animForMove = function(self, moveId, side, ...)
       local started = innerGoldMove(self, moveId, side, ...)
-      if moveId ~= nil and (side == "player" or side == "enemy") then
+      if animationsEnabled() and moveId ~= nil and (side == "player" or side == "enemy") then
         local def = goldMoveDef(self, moveId)
         local moveIndex = resolveMoveIndex(moveId, def)
 
@@ -226,12 +252,15 @@ function M.install()
         self._stadiumSkeletalMove = moveId
         self._stadiumSkeletalIndex = moveIndex
         self._stadiumSkeletalDef = def
+        local modelSide = (side == "player" and self._stadiumDuoPartnerEvent)
+          and "player2" or side
         self._stadiumSkeletalSide = side
+        self._stadiumSkeletalModelSide = modelSide
         self._stadiumSkeletalToken = goldMoveToken
         self._stadiumSkeletalAppliedToken = nil
 
         local session = getSession()
-        local mon = session and session[side] or nil
+        local mon = session and session[modelSide] or nil
         if mon and mon.rig and mon.state ~= "faint" then
           local played = false
           if moveIndex and type(mon.attackGen2) == "function" then
@@ -261,12 +290,13 @@ function M.install()
       local out = { innerUpdateGen2(dt, screen, groundY, ...) }
       local session = getSession()
       local battle = screen and screen.battle
-      if session and battle then
+      if session and battle and animationsEnabled() then
         local token = screen._stadiumSkeletalToken
         local moveSide = screen._stadiumSkeletalSide
+        local modelSide = screen._stadiumSkeletalModelSide or moveSide
         if token ~= nil and (moveSide == "player" or moveSide == "enemy")
             and screen._stadiumSkeletalAppliedToken ~= token then
-          local mon = session[moveSide]
+          local mon = session[modelSide]
           if mon and mon.rig and mon.state ~= "faint" then
             local moveIndex = tonumber(screen._stadiumSkeletalIndex)
             local def = screen._stadiumSkeletalDef
@@ -291,7 +321,7 @@ function M.install()
           local hp = battler and tonumber(battler.hp) or nil
           local prev = battler and goldLastHP[battler] or nil
           if hp ~= nil then
-            if prev ~= nil and hp < prev and hp > 0 and mon and mon.rig then
+            if prev ~= nil and hp < prev and hp > 0 and mon and mon.rig and hitReactionsEnabled() then
               mon._stage1Recoil = 1
             end
             goldLastHP[battler] = hp
@@ -321,6 +351,7 @@ function M.install()
       local innerMove = BattleState.performMove
       BattleState.performMove = function(self, user, target, moveInst, isCalled)
         local out = { innerMove(self, user, target, moveInst, isCalled) }
+        if not animationsEnabled() then return table.unpack(out) end
         local session = getSession()
         local side = sideOf(self, user)
         local mon = session and side and session[side]
@@ -375,7 +406,7 @@ function M.install()
                 pendingFaint[battle][side] = nil
               elseif barAtZero(battler) then
                 pendingFaint[battle][side] = nil
-                if mon and mon.rig and mon.state ~= "faint" then requestState(mon, "faint") end
+                if faintAnimationsEnabled() and mon and mon.rig and mon.state ~= "faint" then requestState(mon, "faint") end
               end
             end
           end

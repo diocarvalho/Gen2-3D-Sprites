@@ -201,14 +201,76 @@ function Follower:_installPartyLeaderItems()
         return out
       end
 
-      -- Strip existing follower rows to prevent duplicate/overflowing options.
+      local ride = mod and mod.exports and mod.exports.flyYourPokemon
+      local canFly = ride and type(ride.supportsFlight) == "function"
+        and ride.supportsFlight(mon) == true
+      local canSwim = ride and type(ride.supportsSurf) == "function"
+        and ride.supportsSurf(mon) == true
+
+      -- Strip our old follower rows.  When this Pokemon has a ride action, also
+      -- replace Gold's vanilla FLY/SURF field-move row: FLY here means free
+      -- overworld riding, not the town-map teleport, and SURF is presented as
+      -- the clearer SWIM action requested by this mod.
       local clean = {}
       for _, row in ipairs(out) do
-        if row and row.label ~= "FOLLOW" and row.label ~= "DISMISS" then
+        local label = row and tostring(row.label or "") or ""
+        local id = row and tostring(row.id or "") or ""
+        local replaceFly = canFly and (label == "FLY" or id == "FLY" or id == "FLY_RIDE")
+        local replaceSurf = canSwim and (label == "SURF" or label == "SWIM"
+          or id == "SURF" or id == "SWIM_RIDE")
+        if row and label ~= "FOLLOW" and label ~= "DISMISS"
+            and not replaceFly and not replaceSurf then
           clean[#clean + 1] = row
         end
       end
       out = clean
+
+      local function closeParty(selectedGame)
+        local stack = selectedGame and selectedGame.stack
+        if stack and type(stack.clear) == "function" then pcall(stack.clear, stack) end
+      end
+      local function showRideFailure(selectedGame, why)
+        if not why or why == "" then return end
+        if selectedGame and type(selectedGame.say) == "function" then
+          pcall(selectedGame.say, selectedGame, tostring(why))
+        elseif selectedGame and selectedGame.stack and mod and mod.ui and mod.ui.TextBox then
+          pcall(function() selectedGame.stack:push(mod.ui.TextBox.new(selectedGame, tostring(why))) end)
+        end
+      end
+
+      local rideRows = {}
+      if canFly then
+        rideRows[#rideRows + 1] = {
+          id = "FLY_RIDE", label = "FLY",
+          onSelect = function(selected, selectedGame)
+            closeParty(selectedGame)
+            local owner = mod and mod.exports and mod.exports.flyYourPokemon
+            if owner and type(owner.startFlightWith) == "function" then
+              local ok, why = owner.startFlightWith(selectedGame, selected)
+              if ok ~= true then showRideFailure(selectedGame, why) end
+            end
+          end,
+        }
+      end
+      if canSwim then
+        rideRows[#rideRows + 1] = {
+          id = "SWIM_RIDE", label = "SWIM",
+          onSelect = function(selected, selectedGame)
+            closeParty(selectedGame)
+            local owner = mod and mod.exports and mod.exports.flyYourPokemon
+            if owner and type(owner.startSurfWith) == "function" then
+              local ok, why = owner.startSurfWith(selectedGame, selected)
+              if ok ~= true then showRideFailure(selectedGame, why) end
+            end
+          end,
+        }
+      end
+      if #rideRows > 0 then
+        local combined = {}
+        for _, row in ipairs(rideRows) do combined[#combined + 1] = row end
+        for _, row in ipairs(out) do combined[#combined + 1] = row end
+        out = combined
+      end
 
       local party = (game and game.save and game.save.party) or {}
       local monIndex = findPartyIndex(mon, party, selection)
@@ -377,6 +439,7 @@ function Follower:onOptionsChanged(payload)
   local key = payload.key
   self.settings:onOptionsChanged(payload)
   if key == "follow_control" or key == "trainer_trail" or key == "follower_count"
+      or key == "follower_player_spacing" or key == "follower_pokemon_spacing"
       or key == "sprite_style" then
     local game = self.mod and self.mod.world and self.mod.world.game
     self.settings:alignSave(game)

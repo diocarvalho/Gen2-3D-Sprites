@@ -26,6 +26,19 @@ local live = { arena=nil, battle=nil, groundY=0, ready=false }
 local tex = {}
 local installed = false
 
+local function stadiumFxPort()
+  local existing = V and V.StadiumBattleFXPort
+  if type(existing) == "table" then return existing end
+  if V and type(V.require) == "function" then
+    local ok, value = pcall(V.require, "StadiumBattleFXPort")
+    if ok and type(value) == "table" then
+      V.StadiumBattleFXPort = value
+      return value
+    end
+  end
+  return nil
+end
+
 local function log(level, fmt, ...)
   local l = V and V.mod and V.mod.log
   local fn = l and l[level]
@@ -207,7 +220,8 @@ local function goldBattleAdapter(screen)
   local token = screen._stadium3DFxToken
   local elapsed = tonumber(screen._stadium3DFxElapsed)
   if moveId == nil or side == nil or token == nil or elapsed == nil then return nil end
-  if elapsed < 0 or elapsed > 1.10 then return nil end
+  local maxElapsed = tonumber(screen._stadium3DFxDuration) or 1.10
+  if elapsed < 0 or elapsed > maxElapsed + 0.18 then return nil end
 
   local data = (screen.game and screen.game.data)
     or (screen.battle and screen.battle.data) or {}
@@ -271,16 +285,44 @@ local FAMILY = {
   DARK="ghost", STEEL="rock",
 }
 
-local function phaseFor(battle, special)
+local function phaseFor(battle, special, spec)
   local duration = special and 52 or 42
+  local Port = stadiumFxPort()
+  if Port and type(Port.timing) == "function" and spec then
+    local ok, sourceDuration = pcall(Port.timing, spec, duration)
+    if ok and tonumber(sourceDuration) then duration = tonumber(sourceDuration) end
+  end
   local f = tonumber(battle and battle.frame) or 0
-  return (f % duration) / math.max(1,duration-1)
+  return clamp(f / math.max(1, duration - 1), 0, 1)
 end
 
 local function points()
   local arena, battle = live.arena, live.battle
   if not (arena and battle and arena.player and arena.enemy) then return nil end
   local playerAtk = battle.animAttackerIsPlayer and true or false
+  local attackerSide = playerAtk and "player" or "enemy"
+  local targetSide = playerAtk and "enemy" or "player"
+
+  -- v0.3.21: StadiumBattleFX effects can now follow the actual animated
+  -- Stadium 2 skeleton.  The existing Stadium renderer remains the model
+  -- owner; this is a read-only world-coordinate attachment query.
+  local Port = stadiumFxPort()
+  local spec = battle._goldScreen and battle._goldScreen._stadium3DFxSpec
+    or (Port and Port.moveSpec and Port.moveSpec(battle.animName, battle.def))
+  local okS, StadiumHost = pcall(function() return V.require("Stadium") end)
+  if okS and StadiumHost and type(StadiumHost.attachmentWorld) == "function" then
+    local attackerTag = Port and Port.attachmentTag
+      and Port.attachmentTag(spec, "attacker") or 0x64
+    local targetTag = Port and Port.attachmentTag
+      and Port.attachmentTag(spec, "target") or 0x64
+    local okA, ax, ay, az = pcall(StadiumHost.attachmentWorld, attackerSide, attackerTag)
+    local okB, bx, by, bz = pcall(StadiumHost.attachmentWorld, targetSide, targetTag)
+    if okA and okB and tonumber(ax) and tonumber(ay) and tonumber(az)
+        and tonumber(bx) and tonumber(by) and tonumber(bz) then
+      return {ax, ay, az}, {bx, by, bz}
+    end
+  end
+
   local a = playerAtk and arena.player or arena.enemy
   local b = playerAtk and arena.enemy or arena.player
   local ay = (live.groundY or 0) + (playerAtk and 8.5 or 10.0)
@@ -491,12 +533,23 @@ local function drawWorldFx(pull)
   local special=SPECIAL[name]
   local family=FAMILY[moveType(def)]
   local movePower=power(def)
+  -- v0.3.21: the StadiumBattleFX 2.1.7 source roster supplies the authored
+  -- visual family, delivery and timing for all 165 Gen-1 moves.  Keep our
+  -- depth-aware Gold primitives as the renderer so the effect sits correctly
+  -- inside the live Stadium2 world, but stop guessing which primitive/timing
+  -- the original move wanted when source data exists.
+  local Port = stadiumFxPort()
+  local spec = Port and Port.moveSpec and Port.moveSpec(battle.animName, def) or nil
+  if Port and Port.worldEffect and spec then
+    local okMap, mapped = pcall(Port.worldEffect, spec, special, moveType(def))
+    if okMap and mapped then special = mapped end
+  end
   -- v0.2.23 takes ownership of Gold's visible OBJ move layer while Stadium
   -- presentation is active, so EVERY move needs a world-space answer. Named
   -- status moves keep their dedicated effects; other zero-power moves get a
   -- restrained type-coloured aura instead of falling back to the old 2D OBJ
   -- sprites. Damaging unknowns get a generic impact below.
-  local phase=phaseFor(battle,special)
+  local phase=phaseFor(battle,special,spec)
   local a,b=points(); if not a then return false end
   local strength=clamp(.8+movePower/220,.8,1.5)
   local p=(pull or 0)-0.15 -- a tiny camera-ward bias keeps translucent cards off terrain
@@ -770,6 +823,18 @@ function M.install()
         self._stadium3DFxMove = moveId
         self._stadium3DFxSide = side
         self._stadium3DFxDef = resolveGoldMoveDef(self, moveId)
+        local Port = stadiumFxPort()
+        local spec = Port and Port.moveSpec and Port.moveSpec(moveId, self._stadium3DFxDef) or nil
+        self._stadium3DFxSpec = spec
+        local durationFrames = nil
+        if Port and Port.timing and spec then
+          local okTiming, d = pcall(Port.timing, spec, 52)
+          if okTiming then durationFrames = tonumber(d) end
+        end
+        self._stadium3DFxDuration = durationFrames and (durationFrames / 60) or 1.10
+        if Port and Port.noteMove then
+          pcall(Port.noteMove, moveId, self._stadium3DFxDef, side)
+        end
         self._stadium3DFxToken = goldToken
         self._stadium3DFxElapsed = 0
         self._stadium3DFxReadyToken = nil
@@ -829,10 +894,13 @@ function M.install()
         local elapsed = (tonumber(screen._stadium3DFxElapsed) or 0)
           + math.max(0, tonumber(dt) or 0)
         screen._stadium3DFxElapsed = elapsed
-        if elapsed > 1.10 then
+        local maxElapsed = tonumber(screen._stadium3DFxDuration) or 1.10
+        if elapsed > maxElapsed + 0.18 then
           screen._stadium3DFxMove = nil
           screen._stadium3DFxSide = nil
           screen._stadium3DFxDef = nil
+          screen._stadium3DFxSpec = nil
+          screen._stadium3DFxDuration = nil
           screen._stadium3DFxToken = nil
           screen._stadium3DFxElapsed = nil
           screen._stadium3DFxReadyToken = nil

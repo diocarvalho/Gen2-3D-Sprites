@@ -142,6 +142,7 @@ function Settings:onOptionsChanged(payload)
   if not payload then return end
   local key = payload.key
   if key ~= "follow_control" and key ~= "trainer_trail" and key ~= "follower_count"
+      and key ~= "follower_player_spacing" and key ~= "follower_pokemon_spacing"
       and key ~= "sprite_style" then
     return
   end

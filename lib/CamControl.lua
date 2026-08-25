@@ -288,14 +288,13 @@ function CamControl.install(game)
   -- and the two clicks are the only buttons a Gen 1 pad layout leaves free
   -- (SELECT already walks the angle ladder).
   --
-  -- Claimed for the two cameras a pad player can actually be looking at
-  -- while pressing them -- the third-person boom and a staged battle's lens
-  -- -- and forwarded untouched everywhere else, so a player who has rebound
-  -- either click keeps it on every other screen, a rebind capture included.
-  -- Not on the orbit rungs: the survey zoom has the OPTIONS row and the
-  -- wheel already, and taking a pad button for it would be taking one from
-  -- a player who never asked.
-  local CLICK_ZOOMS = { boom = true, battle = true }
+  -- Claimed for the three cameras a pad player can actually be looking at
+  -- while pressing them -- DIORAMA, the third-person boom and a staged
+  -- battle's lens -- and forwarded untouched everywhere else, so a player who
+  -- has rebound either click keeps it on every other screen, a rebind capture
+  -- included. Survey/orbit stays forwarded: it already has the OPTIONS row
+  -- and its native rung controls.
+  local CLICK_ZOOMS = { boom = true, diorama = true, battle = true }
   do
     local inner = Game.gamepadpressed
     function Game:gamepadpressed(joystick, button)

@@ -33,12 +33,15 @@ local Bridge = {
   cameraLevel = 1,
   cameraHotkeyCycles = 0,
   cameraHotkeyPollCycles = 0,
+  cameraStepHotkeyInstalled = false,
+  cameraStepHotkeyError = nil,
   f6Down = false,
   cameraSliderInstalled = false,
   cameraSliderTouches = 0,
   cameraSliderChanges = 0,
   cameraInputInstalled = false,
   cameraInputError = nil,
+  cameraModeStickHolds = 0,
   pinchZoomInstalled = false,
   pinchZoomError = nil,
   cameraMovementInstalled = false,
@@ -92,7 +95,9 @@ end
 Bridge.lib = V
 
 local Voxel, Voxel3D, VoxelScene, ChunkMesher, FirstPerson, CamControl, GoldCameraControls
-local OverworldBattle, OverworldCapture, GoldColorAtlas
+local EngineViewportCompat, PixelCanvas
+local OverworldBattle, OverworldCapture, GoldColorAtlas, TwinRegionWorld
+local Quality
 local GoldMap = nil
 local neighborMapCache = {}
 local openWorldGraphCache = { rootId = nil, maps = nil, specs = nil }
@@ -104,6 +109,14 @@ local function optionEnabled()
   return not (value == false or value == 0 or value == "0"
     or value == "false" or value == "off")
 end
+
+-- v0.4.16: one authoritative answer for the OVERWORLD renderer master switch.
+-- Other subsystems (camera input, weather presentation, zoom and 2D fallbacks)
+-- use this instead of guessing from a stale VoxelState rung or from OPEN WORLD.
+-- Kanto is deliberately NOT an exception here: a player who selects native 2D
+-- must remain in native 2D everywhere the Gold world is visible.
+V.world3DEnabled = optionEnabled
+Bridge.world3DEnabled = optionEnabled
 
 -- Independent model switches. Neither disables the voxel world, 3D terrain,
 -- buildings, trees, grass, props, weather, cameras or OPEN WORLD residency.
@@ -123,11 +136,35 @@ local function modelsEnabled()
 end
 
 local function playerModelsEnabled()
+  -- A selected AND enabled custom 2D trainer is an explicit visual override.
+  -- Ask the picker dynamically through exports so merely turning the setting
+  -- on before a valid sheet exists does not hide Character Selector's model.
+  local custom = mod and mod.exports and mod.exports.customPlayerSprite
+  if custom and type(custom.active) == "function" then
+    local ok, active = pcall(custom.active)
+    if ok and active then return false end
+  end
   return modelOptionEnabled("player3dModel", true)
 end
 
 V.modelsEnabled = modelsEnabled
 V.playerModelsEnabled = playerModelsEnabled
+
+local function graphicsQuality()
+  if type(Quality) == "table" then return Quality end
+  local ok, q = pcall(V.require, "Quality")
+  if ok and type(q) == "table" then Quality = q return q end
+  return nil
+end
+
+local function renderResolutionFactor()
+  local q = graphicsQuality()
+  if q and type(q.renderFactor) == "function" then
+    local ok, f = pcall(q.renderFactor)
+    if ok and tonumber(f) then return math.max(0.30, math.min(1.0, tonumber(f))) end
+  end
+  return 1.0
+end
 Bridge.modelsEnabled = modelsEnabled
 Bridge.playerModelsEnabled = playerModelsEnabled
 
@@ -151,11 +188,44 @@ local function optionOpenWorld()
   return toggleValue(value, false)
 end
 
+local function optionGen1Region()
+  -- Read the public option directly so this works during Bridge.install before
+  -- TwinRegionWorld has finished loading.  Once loaded, its helper remains the
+  -- authoritative normalization path.
+  if TwinRegionWorld and type(TwinRegionWorld.gen1Enabled) == "function" then
+    local ok, value = pcall(TwinRegionWorld.gen1Enabled)
+    if ok then return value == true end
+  end
+  local options = mod and mod.options
+  if not (options and type(options.get) == "function") then return false end
+  local ok, value = pcall(options.get, options, "gen1Region")
+  if not ok then return false end
+  return toggleValue(value, false)
+end
+
+local function kantoExcursionActive()
+  if not (optionGen1Region() and TwinRegionWorld
+      and type(TwinRegionWorld.excursionIsActive) == "function") then
+    return false
+  end
+  local ok, active = pcall(TwinRegionWorld.excursionIsActive)
+  return ok and active == true
+end
+
+local function effectiveOpenWorld()
+  -- v0.4.32: OPEN WORLD is the user's residency choice in BOTH Johto and the
+  -- detached Yellow/Kanto excursion. Kanto still owns its voxel renderer while
+  -- active, but simply entering Kanto no longer silently forces full-world
+  -- residency; OFF uses the normal sector streamer and ON expands to the whole
+  -- connected Kanto graph.
+  return optionOpenWorld()
+end
+
 local function voxelModeEnabled()
-  -- OPEN WORLD is defined as the full 3D world. It therefore keeps the voxel
-  -- provider and its camera controls alive even if the independent legacy
-  -- voxel3d option is false in an older save.
-  return optionEnabled() or optionOpenWorld()
+  -- 3D VOXEL WORLD is the renderer master switch. OPEN WORLD, camera mode,
+  -- Weather FX and the optional Kanto region are consumers of that renderer;
+  -- none of them may resurrect it after the player explicitly selects 2D.
+  return optionEnabled()
 end
 
 Bridge.voxelModeEnabled = voxelModeEnabled
@@ -172,6 +242,12 @@ local function applyOpenWorldMode(enabled)
   openWorldGraphCache = { rootId = nil, maps = nil, specs = nil }
   Bridge.openWorld = enabled
   Bridge.openWorldGraphError = nil
+  if TwinRegionWorld and type(TwinRegionWorld.invalidateOcean) == "function" then
+    -- The combined world bounds change when the residency mode changes. The
+    -- ocean is a four-vertex mesh, so dropping it here is cheap and prevents
+    -- one stale outer rectangle from surviving the first frame of the switch.
+    pcall(TwinRegionWorld.invalidateOcean)
+  end
   if not enabled then
     Bridge.openWorldMaps = 0
     if V then V.goldOpenWorldMaps = {} end
@@ -180,6 +256,8 @@ local function applyOpenWorldMode(enabled)
 end
 
 Bridge.optionOpenWorld = optionOpenWorld
+Bridge.optionGen1Region = optionGen1Region
+Bridge.effectiveOpenWorld = effectiveOpenWorld
 Bridge._applyOpenWorldMode = applyOpenWorldMode
 
 local CAMERA_ORDER = { "diorama", "third", "first" }
@@ -330,13 +408,33 @@ local function optionCameraMode()
     return normalizeCameraMode(Bridge.cameraOverride)
   end
   local external = selectorCameraMode()
-  if external then return external end
+
+  -- Right-stick LOOK is not a camera-mode selector. Some controller/mod stacks
+  -- briefly expose an external voxel pipeline's ordinary/OFF rung while its
+  -- right-stick handler is active; accepting that transient read here makes
+  -- Gold render native 2D/diorama for exactly as long as the stick is held.
+  -- While the free-roam camera is actively consuming analog look, retain the
+  -- already-selected 1ST/3RD mode. Explicit slider/F6 changes update
+  -- Bridge.cameraMode first, so they are not blocked by this latch.
+  local function stickStable(candidate)
+    local active = FirstPerson and type(FirstPerson.analogLookActive) == "function"
+      and FirstPerson.analogLookActive()
+    local current = normalizeCameraMode(Bridge.cameraMode)
+    if active and (current == "first" or current == "third")
+        and candidate ~= current then
+      Bridge.cameraModeStickHolds = (Bridge.cameraModeStickHolds or 0) + 1
+      return current
+    end
+    return candidate
+  end
+
+  if external then return stickStable(external) end
   Bridge.cameraProvider = "stadium"
   Bridge.externalCameraLevel = nil
   Bridge.externalCameraLabel = nil
   local ok, value = pcall(mod.options.get, mod.options, "cameraMode")
-  if not ok then return "diorama" end
-  return normalizeCameraMode(value)
+  if not ok then return stickStable("diorama") end
+  return stickStable(normalizeCameraMode(value))
 end
 
 local function cameraLevelForMode(mode)
@@ -532,14 +630,50 @@ end
 
 Bridge.pollCameraHotkey = pollCameraHotkey
 
+-- v0.3.03: also poll F6 from the engine-owned input.step hook. Newer Gold
+-- builds run host hotkeys before Input and other mods can replace Game2's
+-- instance key callback after game.ready. The old keypressed wrapper + render
+-- poll remain as latency/fallback paths; all three share Bridge.f6Down, so one
+-- physical press still advances exactly one camera mode.
+local function installCameraStepHotkey()
+  if Bridge.cameraStepHotkeyInstalled then return true end
+  if not (mod and mod.hooks and type(mod.hooks.wrap) == "function") then
+    Bridge.cameraStepHotkeyError = "mod input.step hook unavailable"
+    return false
+  end
+  local ok, err = pcall(mod.hooks.wrap, mod.hooks, "input.step",
+    function(nextFn, game, dt)
+      pcall(pollCameraHotkey, game)
+      return nextFn(game, dt)
+    end)
+  if not ok then
+    Bridge.cameraStepHotkeyError = tostring(err)
+    return false
+  end
+  Bridge.cameraStepHotkeyInstalled = true
+  Bridge.cameraStepHotkeyError = nil
+  return true
+end
+
 local function cameraSliderRect()
-  local G = love and love.graphics
-  if not (G and type(G.getDimensions) == "function") then return nil end
-  local ww, wh = G.getDimensions()
+  local ox, oy, ww, wh = 0, 0, nil, nil
+  if EngineViewportCompat and type(EngineViewportCompat.drawableLogicalRect) == "function" then
+    ox, oy, ww, wh = EngineViewportCompat.drawableLogicalRect()
+  elseif EngineViewportCompat and type(EngineViewportCompat.logicalDimensions) == "function" then
+    ww, wh = EngineViewportCompat.logicalDimensions()
+  else
+    local G = love and love.graphics
+    if not (G and type(G.getDimensions) == "function") then return nil end
+    ww, wh = G.getDimensions()
+  end
   if not (ww and wh and ww > 0 and wh > 0) then return nil end
-  local w = math.max(250, math.min(380, ww * 0.42))
-  local h = 70
-  return (ww - w) * 0.5, 12, w, h
+  -- Keep the Android camera selector inside the SAME gameplay rectangle the
+  -- engine reserved from TouchSkin. On portrait/handheld skins the old full-
+  -- window centering could put this control partly over the phone controls.
+  local w = math.min(380, math.max(180, ww * 0.42))
+  w = math.min(w, math.max(120, ww - 16))
+  local h = math.min(70, math.max(56, wh * 0.12))
+  return ox + (ww - w) * 0.5, oy + 12, w, h
 end
 
 local function optionCameraSlider()
@@ -661,6 +795,11 @@ local function updateCameraSliderTouches(game)
         found = true
         local okPos, x, y = pcall(T.getPosition, id)
         if okPos and type(x) == "number" and type(y) == "number" then
+          if EngineViewportCompat and type(EngineViewportCompat.toLocal) == "function" then
+            local lx, ly, inside = EngineViewportCompat.toLocal(x, y)
+            if not inside then Bridge._sliderPollId = nil return false end
+            x, y = lx, ly
+          end
           local mode = sliderModeAt(x)
           if mode and optionCameraMode() ~= mode then
             Bridge.selectCameraMode(mode, true, true)
@@ -679,7 +818,13 @@ local function updateCameraSliderTouches(game)
   -- their contacts; touches elsewhere remain normal game/look/pinch input.
   for _, id in ipairs(ids) do
     local okPos, x, y = pcall(T.getPosition, id)
-    if okPos and type(x) == "number" and type(y) == "number"
+    if okPos and type(x) == "number" and type(y) == "number" then
+      if EngineViewportCompat and type(EngineViewportCompat.toLocal) == "function" then
+        local lx, ly, inside = EngineViewportCompat.toLocal(x, y)
+        if inside then x, y = lx, ly else x, y = nil, nil end
+      end
+    end
+    if type(x) == "number" and type(y) == "number"
        and touchInsideSlider(x, y) then
       Bridge._sliderPollId = id
       Bridge.cameraSliderTouches = Bridge.cameraSliderTouches + 1
@@ -727,14 +872,19 @@ local function updateRightLookTouches(game, battleActive)
   end
 
   local T = love and love.touch
-  local G = love and love.graphics
-  if not (T and type(T.getTouches) == "function" and type(T.getPosition) == "function"
-       and G and type(G.getDimensions) == "function") then
+  if not (T and type(T.getTouches) == "function" and type(T.getPosition) == "function") then
     return false
   end
   local okIds, ids = pcall(T.getTouches)
   if not okIds or type(ids) ~= "table" then return false end
-  local ww, wh = G.getDimensions()
+  local drawX, drawY, ww, wh = 0, 0, nil, nil
+  if EngineViewportCompat and type(EngineViewportCompat.drawableLogicalRect) == "function" then
+    drawX, drawY, ww, wh = EngineViewportCompat.drawableLogicalRect()
+  elseif EngineViewportCompat and type(EngineViewportCompat.logicalDimensions) == "function" then
+    ww, wh = EngineViewportCompat.logicalDimensions()
+  else
+    ww, wh = love.graphics.getDimensions()
+  end
 
   local TouchControls = nil
   pcall(function() TouchControls = require("src.core.TouchControls") end)
@@ -744,11 +894,25 @@ local function updateRightLookTouches(game, battleActive)
     return ok and hit or nil
   end
   local function freeRight(id)
-    local ok, x, y = pcall(T.getPosition, id)
-    if not ok or type(x) ~= "number" or type(y) ~= "number" then return nil end
-    if x < ww * 0.45 then return nil end
+    local ok, rawX, rawY = pcall(T.getPosition, id)
+    if not ok or type(rawX) ~= "number" or type(rawY) ~= "number" then return nil end
+    -- TouchControls is OS-window chrome in current Gen1Recomp, so hit-test it
+    -- in raw window coordinates before converting the game touch to viewport
+    -- local space for camera steering.
+    if controlAt(rawX, rawY) then return nil end
+    local x, y = rawX, rawY
+    if EngineViewportCompat and type(EngineViewportCompat.toLocal) == "function" then
+      local lx, ly, inside = EngineViewportCompat.toLocal(rawX, rawY)
+      if not inside then return nil end
+      x, y = lx, ly
+    end
+    -- GameViewport.toLocal only removes the outer layout offset. TouchSkin may
+    -- reserve a second rectangle for the actual game picture; right-look must
+    -- ignore the phone-control surround and measure sensitivity against that
+    -- drawable, not against the full Android window.
+    if x < drawX or y < drawY or x >= drawX + ww or y >= drawY + wh then return nil end
+    if (x - drawX) < ww * 0.45 then return nil end
     if cameraSliderVisible(game or Bridge.game) and touchInsideSlider(x, y) then return nil end
-    if controlAt(x, y) then return nil end
     return x, y
   end
 
@@ -814,21 +978,40 @@ local function updateDioramaPinchTouches(game)
     Bridge._dioramaPinchGap = nil
     return false
   end
-  local T, G = love and love.touch, love and love.graphics
-  if not (T and type(T.getTouches) == "function" and type(T.getPosition) == "function"
-       and G and type(G.getDimensions) == "function") then return false end
+  local T = love and love.touch
+  if not (T and type(T.getTouches) == "function" and type(T.getPosition) == "function") then
+    return false
+  end
   local okIds, ids = pcall(T.getTouches)
   if not okIds or type(ids) ~= "table" then return false end
   local TouchControls = nil
   pcall(function() TouchControls = require("src.core.TouchControls") end)
+  local drawX, drawY, drawW, drawH = 0, 0, nil, nil
+  if EngineViewportCompat and type(EngineViewportCompat.drawableLogicalRect) == "function" then
+    drawX, drawY, drawW, drawH = EngineViewportCompat.drawableLogicalRect()
+  elseif EngineViewportCompat and type(EngineViewportCompat.logicalDimensions) == "function" then
+    drawW, drawH = EngineViewportCompat.logicalDimensions()
+  else
+    drawW, drawH = love.graphics.getDimensions()
+  end
   local function free(id)
-    local ok, x, y = pcall(T.getPosition, id)
-    if not ok or type(x) ~= "number" or type(y) ~= "number" then return nil end
-    if cameraSliderVisible(game or Bridge.game) and touchInsideSlider(x, y) then return nil end
+    local ok, rawX, rawY = pcall(T.getPosition, id)
+    if not ok or type(rawX) ~= "number" or type(rawY) ~= "number" then return nil end
     if TouchControls and type(TouchControls.hitTest) == "function" then
-      local okHit, hit = pcall(TouchControls.hitTest, TouchControls, x, y)
+      local okHit, hit = pcall(TouchControls.hitTest, TouchControls, rawX, rawY)
       if okHit and hit then return nil end
     end
+    local x, y = rawX, rawY
+    if EngineViewportCompat and type(EngineViewportCompat.toLocal) == "function" then
+      local lx, ly, inside = EngineViewportCompat.toLocal(rawX, rawY)
+      if not inside then return nil end
+      x, y = lx, ly
+    end
+    if drawW and drawH
+       and (x < drawX or y < drawY or x >= drawX + drawW or y >= drawY + drawH) then
+      return nil
+    end
+    if cameraSliderVisible(game or Bridge.game) and touchInsideSlider(x, y) then return nil end
     return { id=id, x=x, y=y }
   end
   local freeTouches = {}
@@ -999,13 +1182,44 @@ local function ensurePlayerPose()
   if not okPlayer or type(Player) ~= "table" then
     return false, tostring(Player or "Gen-2 Player unavailable")
   end
-  if type(Player.pose) ~= "function" then
-    function Player:pose()
-      local y = self.py + (self.spriteYOffset or 0)
-      return self.sprite, self.px, y, self.facing,
-        (self.walkPhase and self:walkPhase()) or 0,
-        self.stepFlip == true, false
+  if not Player._stadium2VoxelPosePatched then
+    local nativePose = type(Player.pose) == "function" and Player.pose or nil
+    Player.pose = function(self)
+      local sprite, vx, vy, facing, phase, flip, extra
+      if nativePose then
+        sprite, vx, vy, facing, phase, flip, extra = nativePose(self)
+      else
+        sprite = self.sprite
+        vx = self.px
+        vy = self.py + (self.spriteYOffset or 0)
+        facing = self.facing
+        flip = self.stepFlip == true
+      end
+
+      -- The voxel card must use the same live leg frame as Gold/Silver's 2D
+      -- Player:draw path.  Older bridges accepted a stale/standing phase from
+      -- pose(), which made the 2D trainer slide through DIORAMA/3RD PERSON.
+      if type(self.walkPhase) == "function" then
+        local okPhase, livePhase = pcall(self.walkPhase, self)
+        if okPhase and livePhase ~= nil then phase = livePhase end
+      end
+      phase = tonumber(phase) or 0
+      flip = flip == true or self.stepFlip == true
+
+      -- Silver and Gold both use the six-frame trainer sheet.  If an older
+      -- generated sprite definition omitted the `walker` hint, SpriteRenderer
+      -- quite correctly stayed on STAND even though phase was changing.  Mark
+      -- only the Gen-2 PLAYER renderer as a walker; NPC/icon definitions are
+      -- untouched.
+      local def = sprite and sprite.def
+      if type(def) == "table" and (tonumber(def.frames) or 1) > 1 then
+        def.walker = true
+      end
+
+      return sprite, vx or self.px, vy or (self.py + (self.spriteYOffset or 0)),
+        facing or self.facing, phase, flip, extra
     end
+    Player._stadium2VoxelPosePatched = true
   end
   return true
 end
@@ -1337,8 +1551,8 @@ local function adaptedNeighborMap(world, id)
 end
 
 local function adaptedNeighbors(world)
-  local openWorld = optionOpenWorld()
-  -- Read the public option every rendered frame, then apply it as a residency
+  local openWorld = effectiveOpenWorld()
+  -- Read the public options every rendered frame, then apply them as a residency
   -- mode change. v0.2.45 accidentally crashed below before this could produce
   -- a valid voxel state, which made ON/OFF look identical in game.
   applyOpenWorldMode(openWorld)
@@ -1386,6 +1600,27 @@ local function adaptedNeighbors(world)
       logOnce("neighbor-adapt:" .. tostring(spec.id) .. ":" .. tostring(err),
         "warn", "Gold connected-map voxel adapter skipped %s: %s",
         tostring(spec.id), tostring(err))
+    end
+  end
+
+  -- v0.2.82: a separately imported Gen-1 cache may contribute a second,
+  -- visual-only Kanto connection graph east of Gold. It enters the SAME
+  -- neighbor list, so ChunkMesher/VoxelScene treat it as ordinary voxel land
+  -- and all existing terrain/structure behavior remains centralized.
+  if openWorld and TwinRegionWorld
+      and type(TwinRegionWorld.regionRecords) == "function" then
+    local okRegion, foreign = pcall(TwinRegionWorld.regionRecords, world, out)
+    if okRegion and type(foreign) == "table" then
+      for _, rec in ipairs(foreign) do
+        if rec and rec.map then
+          out[#out + 1] = rec
+          byId[rec.id or rec.map.id] = rec
+        end
+      end
+    elseif not okRegion then
+      logOnce("gen1-region:" .. tostring(foreign), "warn",
+        "GEN-1 KANTO REGION could not join the voxel world this frame: %s",
+        tostring(foreign))
     end
   end
 
@@ -1444,6 +1679,18 @@ local function mergedEntities(world)
     for _, e in ipairs(world.entities) do add(e) end
   end
 
+  -- Fly Your Pokemon owns a presentation-only mount entity. Gold can rebuild
+  -- its auxiliary entity list during a seamless map handoff; explicitly merge
+  -- the active mount as well so the trainer can never cross a seam while the
+  -- Stadium Pokemon underneath vanishes for a frame (or permanently if a
+  -- provider replaced the list). add() de-duplicates the normal case.
+  local fly = V and V.mod and V.mod.exports and V.mod.exports.flyYourPokemon
+  local flyState = type(fly) == "table" and fly.state or nil
+  if flyState and flyState.world == world and flyState.mountEntity
+      and flyState.mountRenderActive == true then
+    add(flyState.mountEntity)
+  end
+
   Bridge.extraEntitiesMerged = 0
   local provider = Bridge.extraEntitiesProvider
   if type(provider) == "function" then
@@ -1462,10 +1709,97 @@ local function mergedEntities(world)
   return out
 end
 
+local function directKantoNeighbors(state)
+  if type(state) ~= "table" then return {}, false end
+  local direct = state._stadiumDirectNeighbors
+  if type(direct) == "table" then return direct, true end
+  direct = {}
+  for _, rec in ipairs(state.neighbors or {}) do
+    if (tonumber(rec.depth) or 50) <= 1 then direct[#direct + 1] = rec end
+  end
+  return direct, false
+end
+
+function Bridge._callKantoExcursionState(world, twin)
+  twin = twin or TwinRegionWorld
+  local fn = twin and twin.excursionState
+  if type(fn) ~= "function" then
+    return false, nil, "Kanto excursion-state helper is unavailable"
+  end
+  if Bridge._kantoExcursionStateFn ~= fn then
+    Bridge._kantoExcursionStateFn = fn
+    Bridge._kantoExcursionStateTrusted = false
+  end
+  if Bridge._kantoExcursionStateTrusted then
+    Bridge.kantoExcursionStateDirectCalls = (Bridge.kantoExcursionStateDirectCalls or 0) + 1
+    local state, err = fn(world)
+    return true, state, err
+  end
+  Bridge.kantoExcursionStateProtectedCalls = (Bridge.kantoExcursionStateProtectedCalls or 0) + 1
+  local ok, state, err = pcall(fn, world)
+  if ok then Bridge._kantoExcursionStateTrusted = true end
+  return ok, state, err
+end
+
 local function makeState(world)
   if not (world and world.map and world.camera and world.player) then
     return nil, "Gold world/map/player is not ready"
   end
+
+  -- v0.2.85: PALLET TELEPORT is a Yellow-backed Kanto sub-runtime. The live
+  -- Gold World stays resident and unchanged underneath while the voxel renderer
+  -- streams Yellow's current map + neighbour sectors, NPCs, roaming encounter
+  -- Pokemon and interior warps. RETURN TO JOHTO stays lossless because no
+  -- Yellow coordinate is ever written into Gold's save/world objects.
+  if TwinRegionWorld and type(TwinRegionWorld.excursionIsActive) == "function"
+      and TwinRegionWorld.excursionIsActive()
+      and type(TwinRegionWorld.excursionState) == "function" then
+    local okExcursion, state, err = Bridge._callKantoExcursionState(world)
+    if okExcursion and type(state) == "table" then
+      -- v0.3.60: TwinRegionWorld already knows direct-vs-second-ring depth while
+      -- filling its reusable neighbor records. Consume that frame-cache array
+      -- directly instead of allocating and filtering another table here.
+      local direct, reused = directKantoNeighbors(state)
+      if reused then
+        Bridge.kantoDirectNeighborReuses = (Bridge.kantoDirectNeighborReuses or 0) + 1
+      end
+      V.goldNeighbors = direct
+      V.goldOpenWorldMaps = state.neighbors or {}
+      local kantoOpenWorld = state._stadiumOpenWorldNeighbors == true
+      Bridge.openWorld = kantoOpenWorld
+      Bridge.openWorldMaps = kantoOpenWorld and (#(state.neighbors or {}) + 1) or 0
+      Bridge.openWorldDirectMaps = #direct
+
+      -- Kanto's excursionState owns its own base actor list, so the ordinary
+      -- mergedEntities(world) path is intentionally bypassed.  Still append
+      -- presentation-only provider entities (notably AmbientFlyers) to that
+      -- Kanto list. TwinRegionWorld trims this tail before cached actor reuse.
+      Bridge.extraEntitiesMerged = 0
+      local provider = Bridge.extraEntitiesProvider
+      if type(provider) == "function" and type(state.entities) == "table" then
+        local okExtra, extra = pcall(provider, state)
+        if okExtra and type(extra) == "table" then
+          local seen = {}
+          for _, e in ipairs(state.entities) do seen[e] = true end
+          local before = #state.entities
+          for _, e in ipairs(extra) do
+            if type(e) == "table" and not seen[e] then
+              seen[e] = true
+              state.entities[#state.entities + 1] = e
+            end
+          end
+          Bridge.extraEntitiesMerged = #state.entities - before
+        elseif not okExtra then
+          logOnce("kanto-extra-entities:" .. tostring(extra), "warn",
+            "Kanto ambient entity provider failed: %s", tostring(extra))
+        end
+      end
+      return state
+    end
+    if not okExcursion then err = state end
+    return nil, "Gen-1 Pallet excursion failed: " .. tostring(err or state)
+  end
+
   local attached, attachErr = attachRenderer(world, world.map)
   if not attached then return nil, attachErr end
 
@@ -1475,6 +1809,17 @@ local function makeState(world)
   -- adds CPU cost without changing the collision result near the player.
   V.goldNeighbors = directNeighbors
   V.goldOpenWorldMaps = neighbors
+
+  local ocean = nil
+  if TwinRegionWorld and type(TwinRegionWorld.oceanDescriptor) == "function" then
+    local okOcean, value = pcall(TwinRegionWorld.oceanDescriptor, world, neighbors)
+    if okOcean then
+      ocean = value
+    else
+      logOnce("world-ocean:" .. tostring(value), "warn",
+        "WORLD OCEAN could not be prepared this frame: %s", tostring(value))
+    end
+  end
 
   return {
     map = world.map,
@@ -1493,6 +1838,10 @@ local function makeState(world)
     _stadiumFreeAnimDist = tonumber(world._stadiumFreeAnimDist) or 0,
     _stadiumOpenWorldNeighbors = Bridge.openWorld == true,
     _stadiumOpenWorldMapCount = Bridge.openWorldMaps,
+    _stadiumOcean = ocean,
+    _stadiumTwinWorldStatus = TwinRegionWorld and TwinRegionWorld.status
+      and TwinRegionWorld.status() or nil,
+    _stadiumResidencyRegion = "johto",
   }
 end
 
@@ -1500,24 +1849,173 @@ end
 -- adapted state the free-roam renderer uses, including normalized tileset ids.
 V.goldStateForWorld = makeState
 
-local function pixelDimensions(ctx)
-  local pw, ph = tonumber(ctx and ctx.pw), tonumber(ctx and ctx.ph)
-  if pw and ph and pw > 0 and ph > 0 then return pw, ph end
-  local G = love.graphics
-  if G.getPixelDimensions then
-    local ok, w, h = pcall(G.getPixelDimensions)
-    if ok and w and h and w > 0 and h > 0 then return w, h end
+local normalizedFrameCanvas = nil
+local normalizedFrameW, normalizedFrameH = nil, nil
+
+-- Host-specific output geometry. Gold drawWorld owns a logical scene canvas
+-- and draws it directly; Gen1 worldOverride owns physical framebuffer pixels
+-- (plus an optional TouchSkin drawable). Internal-resolution rendering is
+-- normalized back to whichever output contract the active generation uses.
+local function frameGeometry(ctx, factor)
+  factor = math.max(0.05, math.min(1, tonumber(factor) or 1))
+
+  -- Gold's official World:drawPipeline contract is NOT Gen1 Renderer.worldOverride.
+  -- World.lua draws the returned canvas directly at (0,0), with no DPI
+  -- conversion or framebuffer normalization.  On Android, returning the
+  -- physical 2x/2.75x framebuffer here therefore shows only the upper-left
+  -- logical slice and looks massively zoomed.  Generation 2 must return the
+  -- exact logical Gold scene size supplied by the pipeline/compose context.
+  -- Older Gold render.compose also scales an arbitrary source to ctx.ww/wh,
+  -- so the same logical geometry is correct there too.
+  if tonumber(ctx and ctx.generation) == 2 then
+    local fw, fh = tonumber(ctx and ctx.ww), tonumber(ctx and ctx.wh)
+    if not (fw and fh and fw > 0 and fh > 0) then
+      local G = love and love.graphics
+      if G and type(G.getDimensions) == "function" then
+        local ok, w, h = pcall(G.getDimensions)
+        if ok then fw, fh = tonumber(w), tonumber(h) end
+      end
+    end
+    fw, fh = math.max(1, math.floor(tonumber(fw) or 1)),
+             math.max(1, math.floor(tonumber(fh) or 1))
+    return {
+      x = 0, y = 0, width = fw, height = fh,
+      frameWidth = fw, frameHeight = fh,
+      renderWidth = math.max(1, math.floor(fw * factor + 0.5)),
+      renderHeight = math.max(1, math.floor(fh * factor + 0.5)),
+      factor = factor, source = "gold-logical-pipeline", cropped = false,
+    }
   end
-  return G.getDimensions()
+
+  -- Gen 1's Renderer:endFrame worldOverride really is a physical-framebuffer
+  -- contract, including an optional TouchSkin gameplay rectangle. Keep the
+  -- v0.3.47 normalization only on that generation.
+  if EngineViewportCompat and type(EngineViewportCompat.renderGeometry) == "function" then
+    local ok, g = pcall(EngineViewportCompat.renderGeometry, factor)
+    if ok and type(g) == "table" then return g end
+  end
+
+  local G = love and love.graphics
+  local fullW, fullH
+  if G and type(G.getPixelDimensions) == "function" then
+    local ok, w, h = pcall(G.getPixelDimensions)
+    if ok then fullW, fullH = tonumber(w), tonumber(h) end
+  end
+  if not (fullW and fullH and fullW > 0 and fullH > 0) then
+    fullW, fullH = tonumber(ctx and ctx.pw), tonumber(ctx and ctx.ph)
+  end
+  if not (fullW and fullH and fullW > 0 and fullH > 0) and G then
+    fullW, fullH = G.getDimensions()
+  end
+  fullW, fullH = math.max(1, math.floor(tonumber(fullW) or 1)),
+                 math.max(1, math.floor(tonumber(fullH) or 1))
+  return {
+    x = 0, y = 0, width = fullW, height = fullH,
+    frameWidth = fullW, frameHeight = fullH,
+    renderWidth = math.max(1, math.floor(fullW * factor + 0.5)),
+    renderHeight = math.max(1, math.floor(fullH * factor + 0.5)),
+    factor = factor, source = "fallback", cropped = false,
+  }
 end
 
+Bridge._frameGeometry = frameGeometry
+
+local function ensureNormalizedFrame(w, h)
+  if normalizedFrameCanvas and normalizedFrameW == w and normalizedFrameH == h then
+    return normalizedFrameCanvas
+  end
+  if normalizedFrameCanvas and type(normalizedFrameCanvas.release) == "function" then
+    pcall(normalizedFrameCanvas.release, normalizedFrameCanvas)
+  end
+  normalizedFrameCanvas = nil
+  normalizedFrameW, normalizedFrameH = nil, nil
+
+  local ok, canvas
+  if PixelCanvas and type(PixelCanvas.new) == "function" then
+    ok, canvas = PixelCanvas.new(w, h)
+  else
+    ok, canvas = pcall(love.graphics.newCanvas, w, h, { dpiscale = 1 })
+  end
+  if not (ok and canvas) then return nil end
+  pcall(canvas.setFilter, canvas, "nearest", "nearest")
+  normalizedFrameCanvas = canvas
+  normalizedFrameW, normalizedFrameH = w, h
+  return canvas
+end
+
+-- VoxelScene may deliberately render below native resolution. Also, Android
+-- TouchSkin may reserve a gameplay rectangle smaller than the framebuffer.
+-- The engine does NOT scale a drawWorld worldOverride for us: it blits the
+-- returned framebuffer image 1:1 (modulo DPI). Therefore always return a full
+-- frame canvas and place/upscale the scene into the engine's drawable rect.
+local function normalizeFrame(scene, geometry)
+  if not (scene and geometry) then return scene end
+  local okDim, cw, ch = pcall(scene.getDimensions, scene)
+  if not okDim or not (cw and ch and cw > 0 and ch > 0) then return scene end
+  local fw, fh = tonumber(geometry.frameWidth), tonumber(geometry.frameHeight)
+  local x, y = tonumber(geometry.x) or 0, tonumber(geometry.y) or 0
+  local w, h = tonumber(geometry.width), tonumber(geometry.height)
+  if not (fw and fh and w and h and fw > 0 and fh > 0 and w > 0 and h > 0) then
+    return scene
+  end
+
+  -- True 100% full-frame path needs no copy at all.
+  if x == 0 and y == 0 and w == fw and h == fh and cw == fw and ch == fh then
+    Bridge.frameNormalized = false
+    return scene
+  end
+
+  local target = ensureNormalizedFrame(math.floor(fw), math.floor(fh))
+  if not target then return scene end
+  local G = love and love.graphics
+  if not G then return scene end
+  local previous = nil
+  if type(G.getCanvas) == "function" then
+    local okPrev, value = pcall(G.getCanvas)
+    if okPrev then previous = value end
+  end
+  local ok = pcall(function()
+    G.push("all")
+    G.origin()
+    G.setCanvas(target)
+    G.clear(0, 0, 0, 1)
+    G.setColor(1, 1, 1, 1)
+    G.draw(scene, x, y, 0, w / cw, h / ch)
+    G.setCanvas(previous)
+    G.pop()
+  end)
+  if not ok then
+    pcall(G.setCanvas, previous)
+    pcall(G.pop)
+    return scene
+  end
+  Bridge.frameNormalized = true
+  Bridge.frameNormalizeCopies = (Bridge.frameNormalizeCopies or 0) + 1
+  return target
+end
+
+Bridge._normalizeFrame = normalizeFrame
+
 local function viewDimensions(world, ctx)
-  local vw, vh = tonumber(world and world.viewW), tonumber(world and world.viewH)
+  -- The active drawWorld pipeline is the most precise authority: Gen1Recomp
+  -- passes the exact view it is about to composite. Prefer it over cached
+  -- world fields so a resized/rotated mobile frame cannot lag one tick behind.
+  local vw, vh = tonumber(ctx and ctx.vw), tonumber(ctx and ctx.vh)
+  if vw and vh and vw > 0 and vh > 0 then return vw, vh end
+
+  vw, vh = tonumber(world and world.viewW), tonumber(world and world.viewH)
   if vw and vh and vw > 0 and vh > 0 then return vw, vh end
 
   local ww, wh = tonumber(ctx and ctx.ww), tonumber(ctx and ctx.wh)
   if not (ww and wh and ww > 0 and wh > 0) then
-    ww, wh = love.graphics.getDimensions()
+    if EngineViewportCompat and type(EngineViewportCompat.drawableLogicalRect) == "function" then
+      local _, _, dw, dh = EngineViewportCompat.drawableLogicalRect()
+      ww, wh = dw, dh
+    elseif EngineViewportCompat and type(EngineViewportCompat.logicalDimensions) == "function" then
+      ww, wh = EngineViewportCompat.logicalDimensions()
+    else
+      ww, wh = love.graphics.getDimensions()
+    end
   end
   local scale = 1
   if world and type(world.zoomScale) == "function" then
@@ -1527,21 +2025,53 @@ local function viewDimensions(world, ctx)
   return math.max(1, math.ceil(ww / scale)), math.max(1, math.ceil(wh / scale))
 end
 
+local function release3DPresentation(reason)
+  Bridge.active = false
+  if Voxel and type(Voxel.setLevel) == "function" then
+    pcall(Voxel.setLevel, 0)
+    if type(Voxel.update) == "function" then pcall(Voxel.update, 0, 0) end
+  end
+  if FirstPerson then
+    if type(FirstPerson.forceRelease) == "function" then
+      pcall(FirstPerson.forceRelease, reason or "voxel disabled")
+    elseif type(FirstPerson.releaseBody) == "function" then
+      pcall(FirstPerson.releaseBody)
+    end
+  end
+  if GoldCameraControls and type(GoldCameraControls.release) == "function" then
+    pcall(GoldCameraControls.release, Bridge.game and Bridge.game.world)
+  end
+  -- The Yellow excursion is presentation-local over a hidden Johto world and
+  -- currently has no native Gold 2D map owner. Never force voxels back on to
+  -- keep it visible: leaving 3D while visiting Kanto returns losslessly to the
+  -- saved Johto anchor instead. Re-entering Kanto while 2D is selected is
+  -- refused explicitly in TwinRegionWorld.teleportToPalletTown().
+  if TwinRegionWorld and type(TwinRegionWorld.excursionIsActive) == "function"
+      and type(TwinRegionWorld.returnToJohto) == "function" then
+    local okActive, active = pcall(TwinRegionWorld.excursionIsActive)
+    if okActive and active then
+      pcall(TwinRegionWorld.returnToJohto)
+      Bridge.twoDForcedKantoReturns = (Bridge.twoDForcedKantoReturns or 0) + 1
+    end
+  end
+end
+
 function Bridge.install()
   if Bridge.installed then return true, V end
 
   local poseOK, poseErr = ensurePlayerPose()
   if not poseOK then return false, poseErr end
 
-  local ok, a, b, c, d, e, f, g = pcall(function()
+  local ok, a, b, c, d, e, f, g, h, i = pcall(function()
     return V.require("VoxelState"), V.require("Voxel3D"),
       V.require("VoxelScene"), V.require("ChunkMesher"),
       V.require("FirstPerson"), V.require("CamControl"),
-      V.require("GoldCameraControls")
+      V.require("GoldCameraControls"), V.require("EngineViewportCompat"),
+      V.require("PixelCanvas")
   end)
   if not ok then return false, tostring(a) end
-  Voxel, Voxel3D, VoxelScene, ChunkMesher, FirstPerson, CamControl, GoldCameraControls =
-    a, b, c, d, e, f, g
+  Voxel, Voxel3D, VoxelScene, ChunkMesher, FirstPerson, CamControl, GoldCameraControls,
+    EngineViewportCompat, PixelCanvas = a, b, c, d, e, f, g, h, i
 
   if not (type(Voxel) == "table" and type(Voxel.setLevel) == "function") then
     return false, "VoxelState renderer is unavailable"
@@ -1568,6 +2098,27 @@ function Bridge.install()
   if not (type(GoldCameraControls) == "table"
        and type(GoldCameraControls.install) == "function") then
     return false, "Gold camera-relative movement adapter is unavailable"
+  end
+
+  -- Install this before the first world frame so F6 works even if another
+  -- feature wraps Game2:keypressed after game.ready.
+  installCameraStepHotkey()
+
+  -- v0.2.82 twin-region/ocean layer. Keep it optional to the proven Gold
+  -- renderer: a missing Gen-1 cache should hide only the companion region,
+  -- never disable the current Gold terrain.
+  local okTwin, twinOrErr = pcall(V.require, "TwinRegionWorld")
+  if okTwin and type(twinOrErr) == "table" then
+    TwinRegionWorld = twinOrErr
+    -- Shared only inside this mod's private renderer namespace.  The input
+    -- adapter reads this dynamically so a Pallet excursion can freeze Gold's
+    -- hidden player without creating a dependency cycle at module load time.
+    V.TwinRegionWorld = TwinRegionWorld
+    Bridge.twinWorldAvailable = true
+    Bridge.twinWorldError = nil
+  else
+    Bridge.twinWorldAvailable = false
+    Bridge.twinWorldError = tostring(twinOrErr)
   end
 
   -- In-world battles are optional to the renderer's survival: install them
@@ -1607,20 +2158,46 @@ function Bridge.install()
       and mod and mod.events and type(mod.events.on) == "function" then
     local okListener = pcall(mod.events.on, mod.events, "mod.options_changed",
       function(payload)
-        if type(payload) ~= "table" or payload.key ~= "openWorld" then return end
+        if type(payload) ~= "table" then return end
         if payload.mod ~= nil and payload.mod ~= mod.id then return end
-        applyOpenWorldMode(payload.value)
+        if payload.key == "voxel3d" then
+          if optionEnabled() then
+            Bridge.active = true
+            applyOpenWorldMode(effectiveOpenWorld())
+          else
+            release3DPresentation("3D VOXEL WORLD disabled")
+          end
+        elseif payload.key == "openWorld" then
+          applyOpenWorldMode(payload.value)
+        elseif payload.key == "gen1Region" and TwinRegionWorld then
+          -- The Kanto switch now promotes residency by itself; no separate
+          -- OPEN WORLD toggle is required. Drop discovery state and immediately
+          -- apply the effective residency answer so the next frame can build it.
+          if type(TwinRegionWorld.invalidateRegion) == "function" then
+            pcall(TwinRegionWorld.invalidateRegion)
+          end
+          applyOpenWorldMode(effectiveOpenWorld())
+        elseif payload.key == "worldOcean" and TwinRegionWorld then
+          if type(TwinRegionWorld.invalidateOcean) == "function" then
+            pcall(TwinRegionWorld.invalidateOcean)
+          end
+        end
       end)
     Bridge.openWorldOptionListenerInstalled = okListener == true
   end
 
   Bridge.installed = true
-  -- OPEN WORLD is a 3D residency mode, not a second flat renderer.  If it is
-  -- enabled, keep the voxel provider alive even if an older save still has
-  -- the independent 3D VOXEL WORLD toggle off.  Turning OPEN WORLD off again
-  -- restores the ordinary voxel3d toggle's authority.
+  -- OPEN WORLD is residency only.  It may stay enabled while 3D VOXEL WORLD
+  -- is OFF, but it does not own renderer activation; turning voxel3d back ON
+  -- resumes the same open-world residency choice without rewriting it.
   Bridge.active = voxelModeEnabled()
-  applyOpenWorldMode(optionOpenWorld())
+  applyOpenWorldMode(effectiveOpenWorld())
+  if not Bridge.active then
+    -- A save can boot directly into native 2D. Do the same cleanup performed
+    -- by a live ON->OFF switch so stale camera/pipeline state from an earlier
+    -- session cannot capture mouse/right-stick input before the first frame.
+    release3DPresentation("3D VOXEL WORLD disabled at boot")
+  end
   logOnce("installed", "info",
     "Gen-2 voxel renderer provider ready for Gold render.compose")
   return true, V
@@ -1633,9 +2210,10 @@ end
 
 function Bridge.renderFrame(world, ctx)
   Bridge.framesAttempted = Bridge.framesAttempted + 1
-  -- OPEN WORLD always means OPEN WORLD *VOXELS*.  v0.2.45/46 could leave the
-  -- graph active while the voxel provider was disabled, which produced the
-  -- huge stitched native-2D overview shown in the user's screenshot.
+  -- Renderer activation belongs to 3D VOXEL WORLD.  OPEN WORLD may retain its
+  -- residency preference while this returns disabled; no stitched native-2D
+  -- overview is drawn because the neighbour graph is consumed only by the
+  -- voxel scene itself.
   Bridge.active = voxelModeEnabled()
   Bridge.mapId = world and world.map and world.map.id or nil
 
@@ -1671,6 +2249,11 @@ function Bridge.renderFrame(world, ctx)
     return nil, Bridge.lastError, "failed"
   end
 
+  -- During a Pallet excursion the visible root is a namespaced Gen-1 map, not
+  -- the hidden Gold map that still owns gameplay/save state. Keep diagnostics
+  -- and one-time mesh priming aligned to what is actually on screen.
+  Bridge.mapId = state.map and state.map.id or Bridge.mapId
+
   -- Prime the CURRENT Gold map synchronously once on entry.  The original
   -- renderer queues terrain through an async coroutine because Gen 1's normal
   -- pipeline has a dedicated update/pump cadence.  Gold's compose hook does
@@ -1681,36 +2264,53 @@ function Bridge.renderFrame(world, ctx)
     Bridge.syncBuildMapId = state.map.id
     Bridge.syncBuilds = Bridge.syncBuilds + 1
 
-    -- A destination that was already visible as a neighbour has a body mesh
-    -- waiting in cache.  Reuse it immediately on the seam instead of blocking
-    -- the crossing to synchronously rebuild the new current map.  On a cold
-    -- boot, prime the full map with neighbour masks already applied so the
-    -- 32-tile forest apron cannot grow up through connected route terrain.
-    local warm = (type(ChunkMesher.peek) == "function")
-      and (ChunkMesher.peek(state.map, false) or ChunkMesher.peek(state.map, true))
-    local okPrime, primeMeshOrErr = true, warm
-    if not warm then
-      okPrime, primeMeshOrErr = pcall(ChunkMesher.get, state.map, false,
-                                      currentMasks(state.neighbors))
-    end
-    if not okPrime then
-      Bridge.syncBuildFailures = Bridge.syncBuildFailures + 1
-      Bridge.framesFailed = Bridge.framesFailed + 1
-      Bridge.lastError = "Gen-2 voxel mesh prime crashed: " .. tostring(primeMeshOrErr)
-      logOnce("prime-crash:" .. tostring(state.map.id) .. ":" .. Bridge.lastError,
-        "error", "%s", Bridge.lastError)
-      return nil, Bridge.lastError, "failed"
-    end
-    if not primeMeshOrErr then
-      local meshErr = type(ChunkMesher.lastError) == "function"
-        and ChunkMesher.lastError(state.map.id) or nil
-      Bridge.syncBuildFailures = Bridge.syncBuildFailures + 1
-      Bridge.framesFailed = Bridge.framesFailed + 1
-      Bridge.lastError = meshErr and ("Gen-2 voxel mesh build failed: " .. tostring(meshErr))
-        or "Gen-2 voxel mesh build produced no terrain"
-      logOnce("prime-empty:" .. tostring(state.map.id) .. ":" .. Bridge.lastError,
-        "error", "%s", Bridge.lastError)
-      return nil, Bridge.lastError, "failed"
+    local sharedBodies = state._stadiumSharedWorldBodies == true
+    if sharedBodies then
+      -- v0.3.43 Kanto promotion path.  v0.3.42 correctly RENDERED BODY-only
+      -- sectors, but this legacy one-time prime still synchronously built a FULL
+      -- bordered/apron mesh whenever the current map id changed.  That mesh is
+      -- never drawn in shared Kanto and the blocking build caused a visible hitch
+      -- at sector handoffs.  A connected neighbour normally already has BODY in
+      -- RAM; a cold warp queues an urgent persistent-cache-first BODY upload and
+      -- lets the normal cooperative pump finish it without blocking this frame.
+      local body = type(ChunkMesher.peek) == "function"
+        and ChunkMesher.peek(state.map, true) or nil
+      if not body and type(ChunkMesher.request) == "function" then
+        ChunkMesher.request(state.map, true, nil, true)
+        Bridge.sharedBodyDeferred = (Bridge.sharedBodyDeferred or 0) + 1
+      else
+        Bridge.sharedBodyPromotions = (Bridge.sharedBodyPromotions or 0) + 1
+      end
+    else
+      -- Native Johto / non-shared worlds keep the historical synchronous prime:
+      -- a destination already visible as a neighbour is reused immediately; a
+      -- truly cold map is built once with its full neighbour masks.
+      local warm = (type(ChunkMesher.peek) == "function")
+        and (ChunkMesher.peek(state.map, false) or ChunkMesher.peek(state.map, true))
+      local okPrime, primeMeshOrErr = true, warm
+      if not warm then
+        okPrime, primeMeshOrErr = pcall(ChunkMesher.get, state.map, false,
+                                        currentMasks(state.neighbors))
+      end
+      if not okPrime then
+        Bridge.syncBuildFailures = Bridge.syncBuildFailures + 1
+        Bridge.framesFailed = Bridge.framesFailed + 1
+        Bridge.lastError = "Gen-2 voxel mesh prime crashed: " .. tostring(primeMeshOrErr)
+        logOnce("prime-crash:" .. tostring(state.map.id) .. ":" .. Bridge.lastError,
+          "error", "%s", Bridge.lastError)
+        return nil, Bridge.lastError, "failed"
+      end
+      if not primeMeshOrErr then
+        local meshErr = type(ChunkMesher.lastError) == "function"
+          and ChunkMesher.lastError(state.map.id) or nil
+        Bridge.syncBuildFailures = Bridge.syncBuildFailures + 1
+        Bridge.framesFailed = Bridge.framesFailed + 1
+        Bridge.lastError = meshErr and ("Gen-2 voxel mesh build failed: " .. tostring(meshErr))
+          or "Gen-2 voxel mesh build produced no terrain"
+        logOnce("prime-empty:" .. tostring(state.map.id) .. ":" .. Bridge.lastError,
+          "error", "%s", Bridge.lastError)
+        return nil, Bridge.lastError, "failed"
+      end
     end
   end
 
@@ -1754,11 +2354,65 @@ function Bridge.renderFrame(world, ctx)
     if OverworldCapture and type(OverworldCapture.afterCameraUpdate) == "function" then
       pcall(OverworldCapture.afterCameraUpdate)
     end
-    ChunkMesher.pump(false)
-    local pw, ph = pixelDimensions(ctx)
+    -- v0.3.58: a visible Kanto gameplay frame never gives persistent cache
+    -- warmers a multi-millisecond idle slice. Even while standing still, those
+    -- cache-only jobs can trigger a GC/CPU hitch on mobile or a 60-Hz desktop.
+    -- Pass the Kanto-visible hint for the whole excursion so background cooking
+    -- stays in the tiny cooperative budget. Current/urgent/visible terrain is
+    -- NOT throttled by ChunkMesher.pump; only cacheOnly jobs read this flag.
+    local kantoInteractive = state and state._stadiumYellowKanto == true
+    -- v0.4.31 also prewarms nearby Johto sectors. Mark every visible world
+    -- frame interactive so cache-only cooks use ChunkMesher's tiny gameplay
+    -- slice instead of stealing several milliseconds from player movement.
+    -- Real/current/visible terrain jobs do not use this flag.
+    local meshPumpHint = state and true or false
+    if kantoInteractive then
+      Bridge.kantoCacheThrottleFrames = (Bridge.kantoCacheThrottleFrames or 0) + 1
+      -- If the current shared Kanto body is already present, every real mesh job
+      -- left in the queue is neighbour/prefetch work. Give that work the smooth
+      -- Kanto-visible slice. A cold current body stays on the normal urgent
+      -- budget so a warp/toggle does not wait unnecessarily.
+      local currentReady = type(ChunkMesher.peek) == "function"
+        and ChunkMesher.peek(state.map, true) ~= nil
+      if currentReady then
+        meshPumpHint = "kanto-visible"
+        Bridge.kantoVisibleMeshThrottleFrames = (Bridge.kantoVisibleMeshThrottleFrames or 0) + 1
+      end
+    end
+    ChunkMesher.pump(false, meshPumpHint)
     local vw, vh = viewDimensions(world, ctx)
-    local canvas = VoxelScene.render(state, pw, ph, vw, vh, nil)
-    ChunkMesher.pump(false)
+    -- Kanto owns a presentation-local camera proxy. Center it with the SAME
+    -- logical world coverage VoxelScene is about to consume.
+    if state and state._stadiumYellowKanto == true and TwinRegionWorld
+        and type(TwinRegionWorld.centerExcursionCamera) == "function" then
+      pcall(TwinRegionWorld.centerExcursionCamera, state, vw, vh)
+    end
+
+    -- v0.3.48 host-correct framing. Gold's World:drawPipeline draws its
+    -- returned canvas directly in logical scene units, while Gen1's
+    -- Renderer.worldOverride expects physical framebuffer pixels. frameGeometry
+    -- separates those contracts instead of forcing Android Gold through the
+    -- Gen1 physical-frame path (the v0.3.47 cause of the giant zoom). Internal
+    -- graphics resolution is still normalized back to the host's required size.
+    local rf = renderResolutionFactor()
+    local geometry = frameGeometry(ctx, rf)
+    local rw = math.max(160, tonumber(geometry.renderWidth) or 160)
+    local rh = math.max(144, tonumber(geometry.renderHeight) or 144)
+    rw, rh = math.floor(rw), math.floor(rh)
+    Bridge.renderFactor, Bridge.renderWidth, Bridge.renderHeight = rf, rw, rh
+    Bridge.frameWidth, Bridge.frameHeight = geometry.frameWidth, geometry.frameHeight
+    Bridge.drawableX, Bridge.drawableY = geometry.x, geometry.y
+    Bridge.drawableWidth, Bridge.drawableHeight = geometry.width, geometry.height
+    Bridge.drawableSource = geometry.source
+    local canvas = VoxelScene.render(state, rw, rh, vw, vh, nil)
+    if canvas then canvas = normalizeFrame(canvas, geometry) end
+    -- v0.3.05: steady-state gets ONE visible-frame mesh-build slice. The old
+    -- bridge pumped immediately before AND after every render, effectively
+    -- doubling Quality.buildSlices() and allowing background meshing to eat a
+    -- full 16.7 ms frame by itself. If the current terrain is still missing,
+    -- keep the second emergency slice so enabling 3D / crossing a cold warp
+    -- does not take twice as many frames to become drawable.
+    if not canvas then ChunkMesher.pump(false, meshPumpHint) end
     return canvas
   end)
 
@@ -1856,6 +2510,18 @@ function Bridge.status()
     openWorld = Bridge.openWorld == true,
     pokemonModels = modelsEnabled(),
     playerModel = playerModelsEnabled(),
+    performance = (graphicsQuality() and type(graphicsQuality().status) == "function")
+      and graphicsQuality().status() or nil,
+    renderFactor = Bridge.renderFactor or 1,
+    cameraStepHotkeyInstalled = Bridge.cameraStepHotkeyInstalled == true,
+    cameraStepHotkeyError = Bridge.cameraStepHotkeyError,
+    renderWidth = Bridge.renderWidth, renderHeight = Bridge.renderHeight,
+    frameWidth = Bridge.frameWidth, frameHeight = Bridge.frameHeight,
+    drawableX = Bridge.drawableX, drawableY = Bridge.drawableY,
+    drawableWidth = Bridge.drawableWidth, drawableHeight = Bridge.drawableHeight,
+    drawableSource = Bridge.drawableSource,
+    frameNormalized = Bridge.frameNormalized == true,
+    frameNormalizeCopies = Bridge.frameNormalizeCopies or 0,
     openWorldMaps = Bridge.openWorldMaps or 0,
     openWorldDirectMaps = Bridge.openWorldDirectMaps or 0,
     openWorldGraphBuilds = Bridge.openWorldGraphBuilds or 0,
@@ -1863,6 +2529,10 @@ function Bridge.status()
     openWorldGraphError = Bridge.openWorldGraphError,
     openWorldFallbacks = Bridge.openWorldFallbacks or 0,
     openWorldOverlapRejects = Bridge.openWorldOverlapRejects or 0,
+    twinWorldAvailable = Bridge.twinWorldAvailable == true,
+    twinWorldError = Bridge.twinWorldError,
+    twinWorld = (TwinRegionWorld and type(TwinRegionWorld.status) == "function")
+      and TwinRegionWorld.status() or nil,
     openWorldLoadedMaps = (function()
       if not (Bridge.openWorld and ChunkMesher and type(ChunkMesher.peek) == "function") then
         return 0
@@ -1883,6 +2553,9 @@ function Bridge.status()
     syncBuilds = Bridge.syncBuilds,
     syncBuildFailures = Bridge.syncBuildFailures,
     meshPendingFrames = Bridge.meshPendingFrames,
+    kantoCacheThrottleFrames = Bridge.kantoCacheThrottleFrames or 0,
+    kantoVisibleMeshThrottleFrames = Bridge.kantoVisibleMeshThrottleFrames or 0,
+    kantoDirectNeighborReuses = Bridge.kantoDirectNeighborReuses or 0,
     cameraMode = Bridge.cameraMode,
     cameraLevel = Bridge.cameraLevel,
     cameraProvider = Bridge.cameraProvider,
@@ -1899,10 +2572,17 @@ function Bridge.status()
       and GoldCameraControls.status()) or nil,
     cameraHotkeyCycles = Bridge.cameraHotkeyCycles,
     cameraHotkeyPollCycles = Bridge.cameraHotkeyPollCycles,
+    cameraModeStickHolds = Bridge.cameraModeStickHolds or 0,
+    twoDForcedKantoReturns = Bridge.twoDForcedKantoReturns or 0,
+    shadowLookDeferrals = (VoxelScene and VoxelScene.shadowLookDeferrals) or 0,
+    shadowRefreshErrors = (VoxelScene and VoxelScene.shadowRefreshErrors) or 0,
+    lastShadowError = VoxelScene and VoxelScene.lastShadowError or nil,
     f6Down = Bridge.f6Down,
     cameraSliderInstalled = Bridge.cameraSliderInstalled,
     cameraSliderTouches = Bridge.cameraSliderTouches,
     cameraSliderChanges = Bridge.cameraSliderChanges,
+    viewport = EngineViewportCompat and type(EngineViewportCompat.status) == "function"
+      and EngineViewportCompat.status() or nil,
     platform = platformName(),
     battleInstalled = Bridge.battleInstalled,
     battleError = Bridge.battleError,
@@ -1923,6 +2603,7 @@ Bridge._mergedEntities = mergedEntities
 Bridge._adaptedNeighbors = adaptedNeighbors
 Bridge._currentMasks = currentMasks
 Bridge._makeState = makeState
+Bridge._directKantoNeighbors = directKantoNeighbors
 Bridge._directNeighborSpecs = directNeighborSpecs
 Bridge._allConnectedNeighborSpecs = allConnectedNeighborSpecs
 Bridge._neighborUrgent = neighborUrgent

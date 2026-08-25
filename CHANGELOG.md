@@ -1,3 +1,1221 @@
+# v0.4.33 — First-class Pokemon Crystal compatibility
+
+- Targets current Gen1Recomp where `games = ["gen2"]` expands to Gold, Silver, and Crystal.
+- Adds Crystal to the sandbox-safe Android/iOS native picker bridge and routes picker requests to the active Gen-2 edition.
+- Namespaces the persistent voxel mesh cache by active game (`gold`, `silver`, `crystal`) and includes the edition in mesh signatures, preventing cross-edition sector-cache thrash for maps sharing the same symbolic id.
+- Exposes `hostVersion`, `hostEngine`, and `crystalCompatible` in the mod runtime diagnostics.
+- Updates current runtime/user-facing host wording from Gold/Silver-only to Gold/Silver/Crystal or generic Gen-2 authority where appropriate.
+- Includes Crystal's `MYSTICALMAN` / Eusine trainer class in Stadium announcer boss-scope detection.
+- Keeps the current engine-owned player sprite authoritative, which preserves Crystal's Chris/Kris selection in the voxel card path.
+- Retains v0.4.32 Kanto OPEN WORLD + WORLD OCEAN, v0.4.31 persistent sector preloading, and all earlier UI/announcer/voxel work.
+- Version advances from v0.4.32 to v0.4.33.
+
+# v0.4.31 — Persistent sector preloading
+
+- Adds automatic persistent BODY-cache preloading for nearby native-Johto sectors.
+- Prioritizes directly connected sectors, then second/third-ring prepared sectors, so likely travel destinations are cached first.
+- Uses cache-only mesh derivation: sectors are written to persistent storage without keeping far GPU meshes resident.
+- Bounds the preload queue by platform/build mode: phones remain conservative while desktop can cook farther ahead.
+- Marks all visible Gold world frames interactive for cache-only pacing, preventing background preload work from taking the larger idle slice during movement.
+- Keeps Kanto on its existing dedicated whole-region cache warmer rather than double-scheduling it.
+- Adds Johto/Kanto warm-pending counters to voxel disk-cache status and `tests/sector_disk_preload_parity.lua`.
+- Retains the v0.4.30 UI text-size slider and all previous Pidgeotto, app-grid, announcer/Kanto, and voxel optimizations.
+- Version advances from v0.4.30 to v0.4.31.
+
+# v0.4.25 — Pidgeotto flight-safe loop fix
+
+- Removes the Dex-17 full animation-table scan that could choose a high-motion Stadium battle attack as the overworld flight loop.
+- Restricts Pidgeotto airborne selection to `idle_alt`, `idle_return`, and `entrance_alt`.
+- Rejects candidate animation indices that alias attack, struggle, faint, flinch, or reaction contexts, plus clips carrying combat labels.
+- Falls back to ordinary idle if no distinct non-combat alternate exists; an attack animation is never used as a flight fallback.
+- Restores the airborne clip playback rate to the authored 1.0× cadence.
+- Retains v0.4.24's restored PC/phone Mod Settings icon grid and all earlier announcer/Kanto/voxel changes.
+- Version advances from v0.4.24 to v0.4.25.
+
+# v0.4.24 — Restore the Mod Settings icon app grid
+
+- Keeps the **MOD SETTINGS homescreen-style category grid with icons** as the root UI on both PC and phone builds.
+- Removes v0.4.23's behavior that converted a custom-renderer error into Gen1Recomp's native flat options list.
+- Adds a compatibility **icon-grid renderer** that uses guarded, older/simple LOVE graphics calls if the full glass renderer fails.
+- Preserves all thirteen category/root rows, all twelve bundled PNG category icons, the RESET vector fallback, selection state, controller/keyboard navigation, and exact-category return behavior during degraded rendering.
+- Retains the responsive **5×3 phone landscape / 3×5 phone portrait** layout, `input.pointer` direct icon taps, and touch BACK target.
+- Keeps v0.4.23's portable `love.graphics.push()` handling and Pidgeotto airborne animation fix.
+- Updates the PC/phone crash regression so a synthetic graphics failure must remain in the icon grid and must never call native ManagerState drawing.
+- Complete test suite remains 68 tests.
+- Version advances from v0.4.23 to v0.4.24.
+
+# v0.4.23 — Crash-safe PC/phone Mod Settings + Pidgeotto flap fix
+
+- Wraps the custom MOD SETTINGS root build/input/draw paths so a renderer or backend exception cannot crash ManagerState.
+- Removes the `love.graphics.push("all")` dependency from the grid/reset-vector transform path and uses the older portable `push()` form, covering PC/mobile LÖVE builds that reject the stack-type argument.
+- Falls back to Gen1Recomp's native flat option rows for the current options session after a custom-grid failure and prevents the failed grid from being rebuilt every frame.
+- Replaces direct `Game`/`Game2.touchpressed` replacement with Gen1Recomp's supported `input.pointer` hook, preserving mobile TouchControls ownership.
+- Adds a full-surface phone layout: 5×3 category grid in landscape and 3×5 in portrait, with orientation-matched D-pad navigation, direct icon taps, and a touch BACK target.
+- Handles both OS-window pointer coordinates and GameViewport-local coordinates when the menu is drawn into a low-resolution game target.
+- Fixes Fly Your Pokémon Pidgeotto having its selected airborne clip overwritten by the ground locomotion bridge later in the same frame.
+- Makes all airborne Stadium presentations bypass ground gait selection.
+- For Dex 17, scores real Stadium skeletal track motion and scans species-specific authored animations when the generic context slots do not expose a visible flap.
+- Keeps static-safe Pidgeotto models eligible for the airborne-only alternate clip and restores bind/idle state after landing.
+- Adds `tests/custom_ui_pc_phone_crash_parity.lua` and expands the Pidgeotto regression coverage; complete suite is now 68 tests.
+- Retains v0.4.22 announcer, Kanto wild-population, and Kanto ambient-flyer changes.
+- Version advances from v0.4.22 to v0.4.23.
+
+# v0.4.22 — Stadium announcer + denser Kanto wilds and flyers
+
+- Fixes the remaining current-Gen1Recomp announcer playback failure: the in-memory WAV loader no longer directly touches sandbox-blocked `love.filesystem`; FileData lookup is protected and PCM `SoundData` remains the cross-platform fallback.
+- Prepares each voice source for one-shot full-volume playback and keeps the existing persisted 823-WAV ROM cache compatible.
+- Under the default **GYM / ELITE 4 / CHAMPION** scope, Gold/Johto boss battles without a Stadium 1-specific intro now still enter the announcer engine and receive reusable species/move/damage/faint/result voice calls.
+- Raises Yellow/Kanto visible encounter population from the old common two-body result to a five-body grass / three-body water baseline when map capacity allows, scaling modestly with encounter rate and map size.
+- Raises per-map Kanto caps to ten visible grass Pokemon and five water Pokemon, while retaining cell-capacity and distance culling safeguards.
+- Retries deterministic Kanto spawn cells when NPCs/static Pokemon occupy a selected position, preventing silent population loss from hash collisions.
+- Adds a lightweight `TwinRegionWorld.ambientFlyerWorld()` view so AmbientFlyers uses the real current Yellow map/encounter table without double-ticking the Kanto runtime.
+- Bridges ambient sky Pokemon into Kanto's excursion actor list; NORMAL Kanto sky density now targets roughly four to five flyers on medium performance, with lower caps on LOW.
+- Keeps v0.4.21's Pidgeotto authored airborne animation routing for the newly visible Kanto sky population.
+- Adds announcer sandbox, Kanto visible-population, and Kanto ambient-flyer regression coverage; complete suite is now 67 tests.
+- Version advances from v0.4.21 to v0.4.22.
+
+# v0.4.21 — Pidgeotto airborne Stadium animation fix
+
+- Fixes Dex 17 Pidgeotto looking frozen while moving through the 3D overworld sky.
+- Adds an airborne-only Stadium clip override that prefers Pidgeotto's authored `idle_alt` motion, then safely falls back to `struggle` / `attack_default` only when necessary.
+- Rejects alternate context names that resolve to the same primary idle animation, preventing a false fix when Stadium routing aliases two slots.
+- Applies the fix to both ambient flying Pidgeotto and Pidgeotto used by **Fly Your Pokémon**.
+- Restores the ordinary idle automatically when the mount leaves flight mode; all other flying species keep their existing animation routing.
+- Adds `tests/pidgeotto_airborne_animation_parity.lua`; complete suite is now 64 tests.
+- Version advances from v0.4.20 to v0.4.21.
+
+# v0.4.20 — Larger borderless Mod Settings icons
+
+- Removes the per-icon translucent rounded-square well from the MOD SETTINGS 4x4 homescreen grid.
+- Increases the icon allocation from the old 70% inner-art scale to 96% of a larger icon area, making both raster and fallback icons substantially bigger.
+- Tightens the vertical spacing between icon artwork and labels so the larger art still fits cleanly in each app cell.
+- Keeps the selected app's full-cell highlight/outline, all twelve bundled PNG icons, RESET ALL vector fallback, navigation, and option behavior unchanged.
+- Updates `tests/custom_ui_icon_grid_parity.lua` to reject reliance on per-icon well geometry while preserving packaged-icon coverage.
+- Retains v0.4.19 menu icon assets and v0.4.18 voxel hot-path optimizations.
+- Version advances from v0.4.19 to v0.4.20.
+
+# v0.4.19 — Remaining Mod Settings PNG icons
+
+- Uses the six newly supplied PNG icons for the remaining non-reset MOD SETTINGS root categories.
+- Adds bundled raster assets for **3D MODELS**, **FLY PKMN**, **WILD PKMN**, **FOLLOW BEHAVE**, **DEV TOOLS**, and **OTHER**.
+- Keeps the existing PNG icons for **UI**, **PERF/GFX**, **WORLD**, **WEATHR/FX**, **CAMERA/DISPLAY**, and **BATTLE**.
+- Leaves **RESET ALL** on the vector fallback renderer so the reset affordance still has a guaranteed icon path.
+- Extends `tests/custom_ui_icon_grid_parity.lua` so the packaged icon loader now verifies all twelve bundled PNG category icons on the single-page grid.
+- Retains v0.4.18 voxel hot-path optimizations unchanged.
+- Version advances from v0.4.18 to v0.4.19.
+# v0.4.17 — Performance optimization pass
+
+- Adds **AUTO / RECOMMENDED** to PERFORMANCE PRESET and makes it the new-install default. AUTO measures real voxel draw cost before frame-limiter sleep, starts at MEDIUM, demotes after sustained expensive draws, and only promotes after a long stable-headroom dwell.
+- AUTO is runtime-only: it does not spam option writes or rewrite CUSTOM child rows. Switching presets or toggling the voxel renderer resets the governor cleanly.
+- MEDIUM keeps 55% internal render resolution/blob shadows/sky reflections but reduces Kanto background prefetch from 2 rings to 1 and uses the SMOOTH mesh-build policy.
+- HIGH keeps 75% internal resolution and real sun shadows but uses the fast SKY reflection path; FULL SSR is reserved for ULTRA/CUSTOM.
+- Tightens off-screen world/detail/figure/actor culling and reduces actor prefilter radius, cutting OPEN WORLD/Stadium draw submissions without changing collision or gameplay records.
+- Shortens cooperative mesh-build slices to reduce main-thread hitches while routes/sectors warm in the background.
+- Real shadow maps refresh less often while moving: HIGH at 30 Hz, LOW at 20 Hz; stationary signature caching remains unchanged.
+- Visible Wilds AI now ticks by performance tier (20/30/45/60 Hz for LOW/MEDIUM/HIGH/ULTRA) instead of running every presentation frame.
+- Ambient sky Pokémon use the same tiered cadence, cap their count on LOW/MEDIUM, and perform zero update work while native 2D mode is active.
+- Weather FX AUTO now starts at MEDIUM on every platform and climbs to HIGH only after its existing governor confirms headroom, avoiding a first-seconds particle spike on phones/integrated GPUs.
+- Adds `tests/performance_optimization_parity.lua`; complete suite is now 62 tests.
+- Version advances from v0.4.16 to v0.4.17.
+
+# v0.4.16 — Native Gold/Silver 2D compatibility pass
+
+- Makes **3D VOXEL WORLD** the sole master switch for the overworld renderer. OFF is now a supported first-class native Gold/Silver 2D mode rather than a fallback state.
+- OPEN WORLD can remain enabled as a remembered 3D residency preference, but it cannot activate voxels or extend survey zoom while the master switch is OFF.
+- On a live switch to 2D, releases first/third-person camera ownership, relative mouse capture, camera-relative continuous movement, stale body yaw/blend state, and the local voxel level. Booting directly into 2D runs the same cleanup.
+- Native 2D compose now redraws Gold's authoritative world before custom menu overlays and visible-wild fallback sprites, so pause/submenu presentation stays modern without requiring a voxel backdrop.
+- Temporarily suspends active **companion `drawWorld` pipelines only during the native-world redraw**, then restores their exact live levels without writing their options. This prevents Character Selector/other world pipelines or stale same-frame voxel output from defeating the explicit 2D choice.
+- Weather FX now asks whether this host's 3D renderer is actually active; a dormant installed voxel host no longer suppresses 2D precipitation/fog presentation.
+- OPEN WORLD zoom extensions stand down in 2D, leaving Gold's native zoom controls/range authoritative.
+- The 3D shoulder capture minigame stands down in 2D; visible wild Pokémon continue through normal 2D battles and catching.
+- Detached Yellow/Kanto free roam no longer auto-promotes 3D. Entry is refused with a clear message while native 2D is selected, and disabling 3D during a Kanto excursion returns safely to Johto.
+- Exposes `mod.exports.world3DEnabled()` so companion mods can distinguish **installed** from **actually rendering in 3D**.
+- Keeps 3D battle presentation independent, allowing a native 2D overworld with optional Stadium-style battles.
+- Adds `tests/two_d_mode_parity.lua` and `tests/two_d_compose_runtime_parity.lua`; complete suite is now 61 tests.
+- Version advances from v0.4.15 to v0.4.16.
+
+# v0.4.15 — Right-side homescreen Mod Settings
+
+- Reworks the single-page MOD SETTINGS root so it docks to the **right side** of the screen instead of occupying a centered, near-fullscreen overlay.
+- Keeps all categories visible at once in a compact **4x4 homescreen-style app grid** with icon-first cells, labels beneath each icon, and a selected-app highlight.
+- Shrinks the panel footprint so the left side of the paused game remains visible, matching the general feel of the pause menu drawer.
+- Retains the bundled custom PNG icons for UI, Performance, World, Weather, Camera, and Battle, with fallback icons for the remaining categories.
+- Footer now reports the total as **APPS** to match the phone-homescreen presentation.
+- Keeps v0.4.14's single-page category availability, v0.4.12 packaged icon loader fix, v0.4.09 iPhone orientation fix, and OPEN WORLD renderer decoupling.
+- Version advances from v0.4.14 to v0.4.15.
+
+# v0.4.14 — Single-page 4×4 MOD SETTINGS grid
+
+- Fits all 13 current root tiles on one screen using a compact **4 columns × 4 rows** layout.
+- Removes category page switching and replaces the old page counter with a simple `13 CATEGORIES` footer indicator.
+- Tightens panel padding, card gutters, card radius, and icon spacing so the full grid remains dense and readable.
+- Left/Right moves across four columns; Up/Down moves by one row of four and wraps within the same column.
+- Keeps the six packaged custom PNG icons, vector fallbacks for the remaining categories, exact-tile return behavior, modern category pages, iPhone orientation hardening, and OPEN WORLD renderer independence.
+- Version advances from v0.4.13 to v0.4.14.
+
+# v0.4.13 — Compact 3×2 icon grid
+
+- Changes each six-category page from 2 columns × 3 rows to a denser **3 columns × 2 rows** layout.
+- Shrinks the outer glass panel, header/footer padding, and category-card gutters so the menu no longer wastes most of the screen on empty card width.
+- Centers and enlarges each category icon, with the category name and setting count directly below it.
+- Keeps the six supplied raster PNG icons and the packaged `mod:read()` loader fix from v0.4.12.
+- Keeps spatial controller/keyboard/touch navigation, exact-tile return behavior, modern category pages, iPhone orientation hardening, and OPEN WORLD renderer independence.
+- Version advances from v0.4.12 to v0.4.13.
+
+# v0.4.12 — Packaged custom icon loader fix
+
+- Fixes v0.4.11 still showing the old category glyphs in installed `.zip` builds.
+- Loads the six supplied PNG assets through `mod:read()` instead of treating `assets/...` as game-root filesystem paths.
+- Decodes packaged bytes through LOVE `ByteData -> ImageData -> Image`, matching the mod's existing sandbox-safe PNG loaders.
+- Keeps direct-path loading only as an unpacked/development fallback.
+- Adds regression coverage proving page 1 decodes and draws all six supplied raster icons.
+- Keeps v0.4.10 modern glass cards, v0.4.09 iPhone orientation hardening, and OPEN WORLD renderer independence.
+- Version advances from v0.4.11 to v0.4.12.
+
+# v0.4.11 — Custom PNG icon pack for Mod Settings
+
+- Keeps the v0.4.10 modern glass/card MOD SETTINGS root but swaps six category tiles to bundled PNG artwork supplied for the menu redesign.
+- Uses the supplied icons for **BATTLE**, **CAMERA / DISPLAY**, **PERFORMANCE / GRAPHICS**, **UI / MENUS**, **WEATHER FX**, and **WORLD**.
+- Remaining categories continue to use the existing scalable fallback icon renderer so no category loses an icon if a custom asset is missing.
+- Adds `assets/menu/mod_settings_icons/` and loads those images lazily/cached through LOVE at draw time.
+- Keeps the same 2x3 paged grid navigation, option persistence, modern category pages, v0.4.09 iPhone orientation fix, and OPEN WORLD renderer decoupling.
+- Version advances from v0.4.10 to v0.4.11.
+
+# v0.4.10 — Modern NEW-UI icon-grid Mod Settings
+
+- Replaces the v0.4.08 icon grid's retro 160×144 `Font.drawBox` presentation with the same translucent navy glass, rounded cards, scalable typography and selected-card treatment used by the CUSTOM UI pause/mod menus.
+- Keeps the existing 2×3 paged category model and spatial Left/Right/Up/Down navigation; this is a presentation correction, not a settings-storage rewrite.
+- Category icons remain vector-drawn but now scale cleanly with the card size instead of being fixed 14-pixel glyphs.
+- Uses the existing mobile short-dimension scale helper so phone landscape keeps large readable cards and text.
+- The selected category's full title and option count are shown in the modern header; each card also shows its setting count.
+- Category pages continue through the already-modern Mod Manager skin and Gen1Recomp `ManagerState:buildOptionRows()` path, so persistence, conditional visibility, editors, live CUSTOM UI switching, OTHER and RESET ALL behavior stay intact.
+- Updates `tests/custom_ui_icon_grid_parity.lua` to reject retro `Font.drawBox` tiles and verify the modern scalable renderer.
+- Keeps every v0.4.09 iPhone orientation and OPEN WORLD renderer fix.
+- Version advances from v0.4.09 to v0.4.10.
+
+# v0.4.09 — iPhone native orientation + OPEN WORLD renderer decoupling
+
+- Fixes the iPhone upside-down report at the mod layer without guessing from unrelated engine features: **IPHONE ORIENTATION FIX** now explicitly requests the normal iPhone orientation mask (`Portrait + LandscapeLeft + LandscapeRight`) through both SDL3 and SDL2 hint names.
+- Removes automatic iOS whole-frame 180-degree correction entirely. `landscapeFlipped` is now diagnostic only; UIKit/SDL owns framebuffer rotation, touch rotation and safe-area orientation.
+- Uses current Gen1Recomp's iOS-aware `src.core.Orientation.apply("landscape")` as a guarded fallback if direct SDL hinting is unavailable. This matches the engine fix added in dev commit `8c0d0ace4d8e132c8bbe00c55d0f71f3711b6838` on 2026-08-21.
+- Keeps **IPHONE FORCE 180** as an explicit emergency-only fallback; it is the only iOS path that can post-rotate the finished frame.
+- Fixes **OPEN WORLD forcing voxels back ON**. `3D VOXEL WORLD` is again the renderer master switch; OPEN WORLD only remembers/changes voxel residency and waits inertly while Gold/Silver native 2D is selected.
+- The detached Yellow/Kanto excursion remains the compatibility exception because that region is owned by this mod rather than Gold's native map renderer.
+- Adds `tests/open_world_voxel_master_switch_parity.lua` and upgrades `tests/ios_orientation_flip_parity.lua` for the native orientation-mask behavior.
+- Keeps v0.4.08 icon-grid settings and every v0.4.07 renderer-stability fix.
+- Version advances from v0.4.08 to v0.4.09.
+
+# v0.4.08 — Icon-grid Mod Settings
+
+- Replaces this mod's long category-root list with a **2×3 paged icon grid**.
+- Adds purpose-drawn icons for UI/Menus, Performance/GFX, World, Weather, Camera/Display, Battle, 3D Models, Fly/PKMN, Wild/PKMN, Followers/Behavior, Developer Tools, OTHER and RESET ALL.
+- Adds spatial controller/keyboard navigation: Left/Right moves columns, Up/Down moves rows and crosses pages, A opens, B returns.
+- Keeps category submenus on Gen1Recomp's native option-row builder/persistence path.
+- Preserves live CUSTOM UI OFF→ON rebuilding, category cursor restore, conditional rows, option events and defaults.
+- Unknown future settings remain reachable through an automatic OTHER tile.
+- Adds `tests/custom_ui_icon_grid_parity.lua`.
+- Version advances from v0.4.07 to v0.4.08.
+
+# v0.4.07 — FPS / third-person right-stick 3D stability fix
+
+- Fixes the reported case where holding the controller **right stick** to look around in FPS/THIRD PERSON could temporarily expose Gold/Silver's native 2D world until the stick returned to center.
+- Treats active right-stick look as camera ownership, not a camera-mode request: a transient external pipeline/selector read cannot replace an already-selected FIRST/THIRD mode while that look input is being consumed.
+- Stops rebuilding the optional sun shadow map on every analog-look sample when a valid map already exists. The last valid sun map is reused while the stick moves and refreshed once the camera settles.
+- Isolates both shadow-pass startup and caster/draw failures. A bad optional shadow refresh now unwinds its GPU state and lets the same main Voxel3D frame continue instead of bubbling out to the engine's native 2D fallback.
+- Adds diagnostic counters for camera-mode stick holds, shadow-look deferrals and shadow-refresh failures.
+- Adds `tests/fps_right_stick_3d_stability_parity.lua`.
+- Keeps v0.4.06 player-billboard sizing, v0.4.05 clean no-PokeDoom state, and all Gold/Silver/mobile/UI/controller fixes.
+- No terrain geometry change; persistent voxel cache revision remains unchanged.
+- Version advances from v0.4.06 to v0.4.07.
+
+# v0.4.06 — Third-person player billboard scale fix
+
+- Fixes the screenshot-confirmed oversized 2D player trainer in voxel **THIRD PERSON**.
+- Adds a player-only apparent-size compensation tied to the actual third-person camera boom length; the normal 48px boom uses a 0.75 native-card presentation scale, shorter collision-compressed booms shrink proportionally, and distant views never enlarge the authored sprite above 1.0x.
+- Normalizes taller/high-resolution custom player sheets against the native 16px trainer footprint for third-person billboard presentation, without changing their source art or normal 2D rendering.
+- Applies the same transform to the solid player card, occlusion ghost, sun-shadow caster and fallback/blob shadow so all player presentation layers remain registered.
+- Leaves NPCs, Pokemon, terrain, props, camera FOV and world perspective unchanged.
+- Keeps the v0.4.04 Gold/Silver/mobile/UI/controller/player-walk fixes and the v0.4.05 complete removal of the FPS addon.
+- Adds `tests/third_person_player_billboard_scale_parity.lua`.
+- No Kanto terrain geometry change; persistent voxel cache revision remains unchanged.
+- Version advances from v0.4.05 to v0.4.06.
+
+# v0.4.05 — Clean Gold/Silver build
+
+- Removes the previously integrated FPS addon completely: runtime modules, menu/settings rows, import controls, native WAD/PK3 helpers, HUD/weapons/enemies/items/effects, movement overrides, assets, tests, exports and save-state hooks are no longer part of this package.
+- Removes the standalone-addon conflict from `manifest.json`; the Stadium2 mod no longer knows about or depends on that addon.
+- Restores the ordinary Stadium/Gold continuous movement speed path in Johto and Kanto by deleting the addon's absolute-momentum compatibility branch.
+- Retains every v0.4.04 Silver/mobile/UI/controller/player-animation fix.
+- No Kanto terrain geometry change; persistent voxel cache revision remains unchanged.
+- Version advances from v0.4.04 to v0.4.05.
+
+# v0.4.04 — Silver + mobile/UI/controller compatibility
+
+- Adds edition-aware **Pokemon Silver** support on current Gen1Recomp. The runtime remains generation-scoped, while the mobile picker bridge now follows the active `gold`/`silver` edition and includes Silver in its ready state.
+- Fixes the custom Gen-2 Pokédex entry action list: its vertical PAGE / AREA / CRY / PRNT menu now responds to **UP/DOWN** (LEFT/RIGHT remain a native compatibility shortcut).
+- Adds a shared phone-aware Stadium UI scale policy. Android/iOS menu/text layouts keep the desktop baseline but gain a touch-readable logical short-side floor instead of shrinking to tiny desktop-window proportions.
+- Fixes live CUSTOM UI switching. Turning the custom UI OFF and back ON inside the same Mod Settings session rebuilds the categorized root immediately; no unpause/re-pause is required to escape the flat long list.
+- Fixes iPhone upside-down behavior on current hosts by trusting UIKit/SDL's native LandscapeLeft/LandscapeRight transform and removing the old double 180-degree rotation. Adds **IPHONE FORCE 180** as an explicit legacy escape hatch.
+- Controller **left-stick click / right-stick click** now zoom DIORAMA out/in through the same `DioramaZoom` service used by wheel/pinch.
+- Fixes the 2D Gen-2 player card sliding without leg animation in voxel mode: the voxel pose now refreshes from Gold/Silver `Player:walkPhase()`, uses distance-driven cadence for continuous movement, and repairs missing player `walker` metadata only on the player sprite.
+- Adds four new regression files and expands the release suite from 52 to **56/56** passing tests.
+- No Kanto terrain geometry change; persistent voxel cache revision remains unchanged.
+- Version advances from v0.4.03 to v0.4.04.
+
+
+# v0.4.01 — Yellow Summer Beach House / Surfing Pikachu parity
+
+- Restored the Yellow-only Summer Beach House as a real Kanto gameplay service instead of a dialogue-only sandbox interaction.
+- The Surfin' Dude now checks Gold's authoritative party for a PIKACHU that actually knows SURF, matching Yellow's eligibility rule.
+- Saying YES launches Gen1Recomp's current engine-owned `src.ui.SurfingMinigame`; the mod does not duplicate or fork the minigame physics/UI.
+- Surfing high score is bridged into the engine screen from Kanto-local persistence and copied back on completion, then Gold's pre-existing `save.surfingHighScore` value is restored exactly.
+- Yellow's per-map-load `surfinDudeAsked` / `surfedThisVisit` behavior is restored: the short repeat prompt and printer access last only for the current Beach House visit.
+- Beach House Pikachu cry, Surf-capable poster variants, and the high-score printer now route through the direct safe handler.
+- Added `lib/KantoSummerBeach.lua` so the already-large `TwinRegionWorld.lua` stays below Lua's 200-local main-chunk limit.
+- Added `tests/kanto_surfing_pikachu_parity.lua`; full regression result is 51/51 test files passing under Lua 5.4.
+- No geometry changes; persistent voxel geometry cache remains `g2vx-400-r1`.
+
+# v0.4.00 — Kanto Pokemon Center healing + full void-tree belt
+
+- Kanto Pokemon Center nurses now heal Gold's authoritative party even when the imported Yellow cache omitted the optional `nurse=true` text-pointer marker.
+- Nurse routing is center-scoped and recognizes Nurse sprite/text identities before generic dialogue handling can swallow the interaction.
+- Healing still prefers Gen1Recomp's native party healer and retains the compatibility fallback.
+- Every outdoor private Yellow/Kanto off-body non-water apron cell is now filled with Kanto's authored pale tree crown instead of empty/white void.
+- Coastal/water edges still extend as water first, so the new tree fill does not overwrite ocean boundaries.
+- Synthetic Kanto void trees are forced to round tree geometry, never giant rectangular wall prisms.
+- Geometry cache bumped to `g2vx-400-r1`.
+- Preserves all earlier Kanto progression, reward, color, and purple/pink-block fixes.
+
+# v0.3.99 — Final authored Yellow TM-gift sweep
+
+- Restored Celadon Mart 3F's one-time Yellow TM18 COUNTER gift.
+- Restored Cinnabar Lab Metronome Room's one-time Yellow TM35 METRONOME gift.
+- Gold's TM18 and TM35 teach unrelated moves, so neither numeric Gold TM is inserted into the PACK.
+- Both rewards use persistent Kanto-local single-use machine credits and Yellow's original species TM/HM compatibility.
+- Failed/canceled/incompatible teaching preserves the credit; successful teaching consumes only the local machine credit while the original Yellow receive event remains permanent.
+- Preserves the v0.3.92 purple/pink mesh removal and every later gameplay parity fix.
+- Geometry cache remains `g2vx-392-r1`; no geometry changes in this release.
+
+# v0.3.98 — Early Route 22 rival / Yellow Eevee evolution parity
+
+- Restored Yellow's optional first Route 22 rival battle at the authored trigger cells, using RIVAL1 party 2.
+- Oak's Lab rival result now persists the real Yellow Eevee branch: player win -> Flareon route; player loss -> Vaporeon route.
+- Winning the optional first Route 22 battle promotes only the Flareon route to Jolteon, exactly matching Yellow.
+- Obtaining the Boulder Badge permanently skips the optional early Route 22 encounter and leaves the existing Flareon/Vaporeon route intact.
+- Pokemon Tower, late Route 22, and Champion rival party formulas now consume the persisted route instead of depending on the historical Jolteon fallback.
+- Existing older saves without the new history still retain the prior Jolteon fallback for compatibility.
+- Geometry cache remains `g2vx-392-r1`; this is gameplay/state parity only.
+
+# v0.3.97 — Remaining standalone Kanto reward parity
+
+- Restored the Celadon Diner Gym Guide's one-time COIN CASE gift as Gold's real key item.
+- Restored the Route 12 Gate 2F girl's TM39 SWIFT gift, resolved by move semantics rather than trusting a cross-generation TM number.
+- Restored Silph Co. 2F's Yellow TM36 SELFDESTRUCT reward as a persistent Kanto-local single-use machine credit.
+- Gold's unrelated TM36 is never inserted into the PACK.
+- SELFDESTRUCT uses Yellow's original species TM/HM compatibility and Gold's native move-learning flow.
+- Failed/canceled teaching keeps the local credit; successful teaching consumes only that credit while the Yellow received-TM event stays permanent.
+- Preserves v0.3.92's purple/pink block removal and all later Kanto parity work.
+
+# v0.3.96 — Saffron Copycat / Yellow TM31 MIMIC parity
+
+- Restored Copycat's one-time POKE DOLL trade in COPYCATS_HOUSE_2F.
+- One POKE DOLL is consumed only when the Yellow reward state is created.
+- Yellow TM31 MIMIC is represented as a persistent Kanto-local single-use machine credit.
+- The credit uses Yellow's original species TM/HM compatibility and teaches MIMIC through Gold's move-learning flow.
+- Gold's unrelated TM31 is never inserted into the PACK.
+- A canceled or incompatible teach attempt preserves the MIMIC credit for later.
+- After the credit is used, Copycat remains permanently in her post-reward explanation state.
+- Preserves v0.3.92's purple/pink block removal and every later Kanto parity fix.
+
+# v0.3.95 — Celadon rooftop Yellow-TM parity
+
+- Restored all three Celadon Mart rooftop drink-girl rewards.
+- Fresh Water earns Yellow TM13 ICE BEAM, Soda Pop earns Yellow TM48 ROCK SLIDE, and Lemonade earns Yellow TM49 TRI ATTACK.
+- These are not mapped by TM number into Gold: those numbers teach unrelated moves in Gen 2.
+- Each reward is represented as a persistent Kanto-local, one-use machine credit and teaches the exact Yellow move using the imported Yellow species `tmhm` compatibility table.
+- The drink is consumed before the reward, matching Yellow. Canceling or failing to choose a compatible Pokémon leaves the earned machine credit intact for a later retry.
+- No foreign TM id is injected into Gold's PACK.
+- Preserves the v0.3.92 purple/pink block removal and every earlier Kanto parity system.
+
+# v0.3.94 — Cerulean robbery aftermath parity
+
+- Completed the physical Cerulean City aftermath that v0.3.93's TM28 return did not yet reconstruct.
+- Before TM28 is returned: Rocket thief visible, Guard 1 hidden, Guard 2 visible.
+- After TM28 is successfully returned: Rocket thief hidden, Guard 1 visible, Guard 2 hidden, matching Yellow's `CeruleanHideRocket` object swap.
+- The actor swap is rebuilt from persistent Kanto state every time Cerulean City loads, including older saves.
+- Cerulean's robbed-house Fishing Guru now checks Gold's actual TM28/DIG inventory instead of a detached Yellow bag.
+- Cerulean Rocket victory explicitly persists `EVENT_BEAT_CERULEAN_ROCKET_THIEF` so the TM-return phase cannot be lost if trainer-header metadata is incomplete.
+
+# v0.3.93 — Cerulean stolen-TM progression parity
+
+- Restored the Cerulean Rocket thief's post-battle TM return as real Gold state.
+- After `EVENT_BEAT_CERULEAN_ROCKET_THIEF`, talking to the thief returns Gold's real TM28 DIG.
+- A full PACK does not consume the one-time reward or remove the thief; the player can retry, matching Yellow's flow.
+- The thief disappears only after TM28 is successfully accepted, and the completion is persisted in Kanto-local event state.
+- Preserves v0.3.92's giant purple/pink mesh removal and all earlier Kanto systems.
+
+# v0.3.92 — Kanto purple/pink block removal
+
+- Removed the giant purple/pink rectangular mesh artifacts shown in Kanto; they are removed, not recolored.
+- Disabled heuristic whole-building inference on the private Yellow/Kanto adapter. Exact authored Kanto building templates remain active.
+- Large imported-Kanto structural leftovers with substantial roof texture evidence are now flattened to synthesized local ground instead of being emitted as upright cuboids.
+- Bumped the voxel geometry cache to `g2vx-392-r1` so old purple/pink meshes cannot survive from disk.
+
+# v0.3.91 — Kanto Safari/Fuchsia HM progression parity
+
+- Safari Zone West GOLD TEETH are now a Kanto-local key item; they never leak into Gold/Silver's inventory namespace.
+- The Warden now consumes GOLD TEETH, persists EVENT_GAVE_GOLD_TEETH, awards Gold's real STRENGTH HM by move semantics, and retries HM04 after a full PACK without requiring another teeth pickup.
+- The Safari Secret House now awards Gold's real SURF HM by move semantics, persists EVENT_GOT_HM03, retries safely after a full PACK, and never duplicates an already-owned unique HM.
+- Yellow Kanto field moves now use the retail Yellow badge table: FLASH=BOULDER, CUT=CASCADE, FLY=THUNDER, STRENGTH=RAINBOW, SURF=SOUL. Johto Fog/Storm/etc. badges can no longer bypass or block the companion Kanto progression.
+- Added `lib/KantoSafariProgress.lua` and `tests/kanto_safari_fieldmove_parity.lua`.
+- Regression: 43/43 Kanto/mobile test files pass.
+
+# v0.3.90 — Kanto rival progression / Cerulean Cave postgame parity
+
+- Restored the scripted Cerulean City bridge Rival encounter on Yellow's authored `(20,6)` / `(21,6)` trigger cells. The bridge now runs `OPP_RIVAL1` party 3 through Gold's trainer battle system, then the Rival leaves persistently instead of remaining as a stray map actor.
+- Restored Pokemon Tower 2F's Rival encounter on `(15,5)` / `(14,6)`. Its party is selected with Yellow's `wRivalStarter + 1` rule and the actor disappears after the completed fight.
+- Restored Route 22's late League warm-up Rival on `(29,4)` / `(29,5)`. It only activates after all eight companion Kanto badges are owned and uses Yellow's `OPP_RIVAL2` `wRivalStarter + 7` party selection.
+- Added a dedicated rival visibility migration: the three script-revealed Rival actors stay hidden during ordinary roaming, are force-revealed only when their encounter starts, and remain hidden after victory or on upgraded saves whose event already completed.
+- Restored the actual Yellow Cerulean Cave postgame gate. Before the companion Kanto Hall of Fame, the Super Nerd at `(4,12)` is force-visible and the Cerulean City -> Cerulean Cave 1F warp is independently blocked so collision/free-move edge cases cannot bypass him.
+- Completing the v0.3.89 Kanto Hall of Fame now drives the same physical result as Yellow's Hall-of-Fame tail: the Cerulean Cave guard disappears and the cave/Mewtwo route opens.
+- Kept v0.3.89 League/Hall-of-Fame behavior, v0.3.88 Silph/Saffron liberation, v0.3.87 Bill/S.S. Anne, the v0.3.82 mesh cleanup, and v0.3.78 color separation intact.
+
+# v0.3.89 — Kanto Pokemon League / Hall of Fame parity
+
+- Restored Yellow's complete Elite Four run inside the Kanto excursion. Lorelei, Bruno, Agatha and Lance keep their imported Yellow parties/money/names while Gold's native trainer battle engine owns the fight. Gold Elite/Champion presentation classes are used only for compatible battle art/music/AI.
+- Restored the authored room geometry: Lorelei and Bruno swap block `$24 -> $05` at `(2,0)`, Agatha swaps `$3b -> $0e`, and Lance's two entrance blocks swap `$31/$32 -> $72/$73` only after the player has crossed into the room proper.
+- Entering Lorelei from Indigo Plateau starts a forward-only League run. Retreat warps back into the previous room are suppressed until a blackout or Hall of Fame completion resets the run, matching Yellow's don't-run-away progression without executing its map ASM.
+- Elite Four wins now have run-scoped persistence. A blackout clears the four boss trainer-win rows and physical events so a failed challenge cannot resume halfway through; Hall of Fame completion also resets the run for a clean rematch.
+- Restored the Yellow Champion Rival as `OPP_RIVAL3`. Party selection uses Yellow's 1=Jolteon / 2=Flareon / 3=Vaporeon starter enum through a dedicated Kanto key, defaulting safely to party 1 on older saves that never recorded the rival evolution path.
+- Champion victory now enters Gold's native `src.core.gen2.HallOfFame` record and `src.ui.gen2.HallOfFame` induction animation. The companion preserves any pre-existing Gold `spawnAfterChampion` byte so this parallel Yellow League cannot hijack an unrelated Gold continue.
+- After the Hall of Fame animation the temporary League events reset and the player returns safely to Pallet Town; the Kanto Hall-of-Fame completion bit and Gold Hall-of-Fame history remain permanent.
+- Added `KantoLeague.lua` and `kanto_league_hall_of_fame_parity.lua` coverage for exact gate blocks, Elite presentation aliases, forward-only progression, blackout/rematch reset, Champion party selection, Hall-of-Fame bookkeeping and Gold spawn isolation.
+
+# v0.3.88 — Kanto Silph Co / Saffron liberation parity
+
+- Restored Silph Co 11F Jessie/James and Giovanni as Gold-owned Yellow trainer battles, with global Rocket cleanup and Saffron civilian restoration after Giovanni.
+- Fixed Giovanni's class reuse so only `VIRIDIAN_GYM` can award Earth Badge; Rocket Hideout and Silph Giovanni remain story bosses.
+- Restored the President's one-time retry-safe real Gold MASTER BALL reward.
+
+# v0.3.87 — Kanto Bill / S.S. Anne mainline parity
+
+- Restored Bill's Yellow transformation sequence as persistent Kanto progression: talking to Pokemon-form Bill arms the Cell Separator, the hidden PC completes the transformation, Bill returns to human form, and the S.S. Ticket reward becomes available immediately. Leaving before using the machine resets the abandoned attempt like Yellow.
+- Added a dedicated Kanto-local `S_S_TICKET` bit. Gold also has an S.S. Ticket for its own ship content, so the Yellow ticket deliberately does not enter or satisfy Gold's native same-named inventory state.
+- Restored Vermilion's S.S. Anne ticket checkpoint at the authored harbor tile. A native Gold ticket alone cannot pass the Yellow guard; the Kanto ticket flashes once and permits entry. After departure the checkpoint reports that the ship has sailed.
+- Restored the S.S. Anne 2F rival trigger at Yellow's two authored approach cells. It reveals the hidden rival, runs Yellow's `OPP_RIVAL2` party 1 through Gold's trainer battle engine, persists the win, then removes the rival and delivers the Cut-master hint.
+- Restored the seasick Captain progression. Rubbing his back gives Gold's real HM01/CUT through the semantic item bridge, sets the Yellow HM event only after a successful grant, supports retry if the bag cannot accept it, and never duplicates an HM Gold already owns.
+- Restored S.S. Anne departure after obtaining HM01 and walking back off the ship: the local ship-left event persists, the lower dock ship blocks become water, the ship entrance is disabled, and the player is returned to Vermilion.
+- Added migration/object-state handling for Bill's Pokemon/human forms and the hidden S.S. Anne rival so save upgrades land on the correct visible actors.
+- Added `kanto_bill_ssanne_parity.lua` regression coverage for ticket isolation, Bill reset/completion, harbor gate, Rival2 party selection, HM01 reward, and dock departure.
+- Preserves v0.3.86 Power Plant/static encounters, v0.3.85 Mansion/Victory Road puzzles, v0.3.84 Rocket/Tower/Flute progression, and v0.3.78 Johto-matched Kanto colors.
+
+# v0.3.86 — Kanto static-encounter / Power Plant parity
+
+- Fixed Power Plant's eight Voltorb/Electrode traps: an object whose authored sprite is `SPRITE_POKE_BALL` now stays a Poke Ball in the overworld even when its payload is a Pokemon. The species/model is revealed only when the player interacts, matching Yellow's trap presentation.
+- Static encounters now present the safe imported Yellow text body before the Gold battle when available (`Bzzzt!` for Power Plant traps, legendary cries/text such as Zapdos/Mewtwo), while older caches without that text still start the battle instead of becoming inert.
+- Generalized touched-static removal across both `npcCache` and `pokemonCache`, so trap balls and visible legendary models cannot remain underneath the battle screen.
+- A blackout now invalidates both presentation caches and rebuilds the authored actor for a retry; win/catch/run continue to consume the one-off object persistently.
+- Fixed a raw-object fallback leak: once a static Pokemon is persistently cleared, `objectAt` cannot rediscover the authored map object after its presentation entity is gone.
+- Added direct fallback interaction for authored static Pokemon when an older/partial sprite cache cannot build the overworld Pokemon model.
+- Added `kanto_static_encounter_parity.lua` regression coverage for disguised Voltorb/Electrode, Yellow reveal text, Gold battle level/species, blackout retry, Mewtwo catch persistence, and cleared-object fallback suppression.
+- Preserves v0.3.85 Pokemon Mansion/Victory Road dungeon puzzles, v0.3.84 Rocket/Tower/Flute progression, v0.3.83 item/fossil parity, and v0.3.78 Johto-matched color separation.
+
+# v0.3.82 — Strict private-Kanto building proof
+
+- Fixed the path v0.3.81 missed: false-positive Kanto rectangles could already be claimed by the adaptive building detector before orphan-volume cleanup ran, so their giant pink meshes survived.
+- Private Yellow/Kanto adaptive buildings now require the literal Kanto exterior door pair (`0B/0C`). Generic warp/script cells returned by `isDoorTileCell` no longer count as building proof on the foreign adapter.
+- Added facade-density validation: a private-Kanto adaptive candidate must contain multiple rows of known facade/window/door vocabulary and enough facade tiles for its width.
+- Restored a conservative house-sized inference window for private Kanto (24x20 tiles). Large landmarks must come from explicit building templates instead of self-inferred rectangles; native Gen-2 Kanto retains the wider 40x32 search.
+- Fixed the v0.3.81 cleanup bug itself: skipping `buildVolume` did not remove an upright region because `ChunkMesher` falls back to the shape class height when no run exists. Rejected roof-only regions are now explicitly claimed as synthesized local ground (`S.skip` + ground replacement), so there is no upright fallback and no flat magenta roof patch left behind.
+- Bumped geometry cache revision to `g2vx-382-r1` so any pink false-positive mesh cached by v0.3.81 is rebuilt.
+
+# v0.3.81 — Kanto pink roof-prism cleanup
+
+- Fixed the remaining screenshot-confirmed giant pink roof blocks in the private Yellow/Kanto excursion. These were roof-only leftover structural regions that escaped the real Kanto building pass and then got turned into generic rectangular prisms by the fallback volume builder.
+- Added a conservative orphan-roof filter for foreign `TilesetKanto` maps: a region is skipped by the volume builder when it is dominated by Kanto roof-cap tiles but contains no Kanto facade vocabulary, no Kanto base-course vocabulary, and no literal door pair.
+- This leaves those false-positive regions flat instead of standing them up as huge pink blocks, while preserving actual Kanto buildings that still carry their normal frame/door evidence.
+- Bumped the geometry cache revision to `g2vx-381-r1` so stale pink prism meshes are rebuilt automatically.
+
+# v0.3.80 — Kanto water-mesh source fix
+
+- Fixed the actual source of the giant green rectangular meshes over Kanto water. The private Yellow map adapter could let a projected/authored tree or structure shape outrank Yellow's cell-level water classification, creating standing solid geometry on Surf cells. Foreign Kanto water cells now resolve to the flat water class before projected solid pins can win.
+- Fixed Kanto's 3D off-map apron at water-facing edges. The shared Gen-1 2D renderer normally repeats a global tree-wall border around every OVERWORLD map; in a tilted voxel camera that tree filler becomes the huge green walls seen above coastal/canal water. Kanto water edges now extend with a real water tile/class instead.
+- The tree-ring cleanup in `ChunkMesher` now preserves explicitly generated Kanto water apron cells instead of deleting them with unclaimed tree filler.
+- Hardened synthetic Gen-2 geometry projection so flat Kanto material categories (`water`, `shore`, `ground`, `grass`) can take Johto colors but can never be promoted into standing donor wall/tree/prop classes.
+- Restored the normal reflective water path; v0.3.79's reflection disable was only a diagnostic workaround and was not the cause.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-380-r1` and persistent voxel geometry cache revision to `g2vx-380-r1`, forcing stale pre-fix Kanto water meshes to rebuild.
+- Preserves v0.3.78's corrected Johto color separation and native Gold player palette.
+
+# v0.3.79 — Kanto water overdraw / reflection cleanup
+
+- Fixed the screenshot-confirmed Kanto water regression where green shoreline/tree/building voxel geometry could appear above lakes/canals. The problem was in the reflective Kanto water pass, not in the world palette work from v0.3.78.
+- Gen-1 excursion maps now force native/plain water rendering (depth-writing animated water, no reflected world copy) so Kanto water cannot pull reflected shoreline geometry up over the surface.
+- Johto keeps the existing reflective water renderer; only prefixed `__GEN1__` excursion maps take the defensive plain-water path.
+- Preserves the v0.3.78 player/world color separation fix, Johto material ramps, native Gold player palette, Kanto geometry, and existing water/ocean behavior outside the Kanto excursion.
+
+# v0.3.78 — Native Gold player + clean Johto material ramps
+
+- Fixed the screenshot-confirmed layer mix-up: the Kanto excursion player no longer uses Yellow `SPRITE_RED` recolored through the Kanto/map color path. It now reuses the active Gold player's live `SpriteRenderer`, so Chris keeps the exact `PAL_OW_RED` object palette, time-of-day treatment, COLOR-mode treatment, transparency and current bike/player-sheet state that he has in Johto.
+- Removed visible use of the v0.3.76/0.3.77 exact shade-population transfer. That transfer created synthetic Bayer/checker texture on paths and noisy speckling on walls by splitting one native shade into several target shades.
+- Kanto/native-Gen-2-Kanto texel positions and 2bpp shade indices are authoritative again. The selected material family still comes from the frequency-locked Johto scene (`CHERRYGROVE_CITY` for towns/cities, `ROUTE_29` for routes with cross-scene family supplementation), but each source shade maps directly through that Johto PalMap ramp.
+- Preserves the v0.3.77 material-family lock, roof/facade separation, exact Gold day/night/color-mode palette profile, Kanto geometry/collision, and native Gen-2 Kanto geometry donors.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-378-r1` and scene color cache namespace to `color378`, forcing every dithered v0.3.77 projected atlas to rebuild.
+- Expanded regressions so a flat Kanto material cannot gain donor histogram checker shades and the default Kanto player must keep the live Gold `SpriteRenderer` identity even when Yellow player-card metadata exists.
+
+# v0.3.77 — Johto material-family lock
+
+- Replaced per-Kanto-tile color authority with one stable Johto material family per semantic category, eliminating the remaining "some good, some bad" drift between neighbouring roofs, facades, paths, foliage, signs, fences and generic structures.
+- Material-family selection is weighted by how often a Johto tile is actually placed in the donor map, not by the number of unique tile ids. Rare alternate roof/facade palettes can no longer outvote the colors that visually dominate Cherrygrove or Route 29.
+- Every Kanto source tile is categorized before donor matching, closing the fallback leak where uncommon trim/facade tiles could bypass Johto style and land on a generic structure slot.
+- Route 29 remains route-terrain authority and Cherrygrove remains town/city authority; missing outdoor families are filled from the other canonical Johto scene (then New Bark) without overriding the primary scene.
+- Kanto/native-Kanto texture positions remain intact; Johto supplies palette family and representative shade population only. No Johto tile pixels are pasted onto Kanto.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-377-r1` and the scene-color cache key to `color377`, forcing all older projected material atlases to rebuild.
+- Added frequency-lock, supplement-merge and per-tile-conflict regressions; all 33 bundled Kanto/mobile test files pass.
+
+# v0.3.76 — Exact Johto shade-population parity
+
+- Fixed the remaining yellow-heavy Kanto surfaces that v0.3.75 could not remove. The old four-entry shade map moved every pixel of a Kanto shade together; a wall that was 80% one pale shade therefore stayed 80% one pale Johto color even when the matched Johto wall used several shades.
+- Added a deterministic per-tile 64-pixel shade transfer. The matched Johto tile contributes its exact counts of shades 1/2/3/4; Kanto/native-Kanto pixels are ordered by their original luminance and split across those target counts.
+- Equal-shade ties use a fixed 8x8 Bayer rank, so the transfer is stable and distributed instead of producing row bands or frame-random noise. The donor's spatial brick/stripe/roof pixels are still never copied.
+- Exact scene-used PalMap slot selection, Cherrygrove town donor, Route 29 route donor, roof/facade role restriction, Kanto geometry/collision, day/night and Gold color-mode behavior are retained.
+- Added a regression proving a completely flat Kanto shade can become the donor's exact 16/16/16/16 four-shade population, which was impossible in v0.3.75, while the existing anti-v0.3.74 spatial-pattern test still passes.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-376-r1` so every older approximate color projection is rebuilt.
+
+# v0.3.75 — Johto shade-balance parity without donor texture projection
+
+- Fixed the screenshot-confirmed v0.3.74 regression where exact Johto donor tile pixels were pasted across unrelated Kanto surfaces, producing huge pink stripes/bands on buildings and terrain.
+- Kanto/native-Kanto surface texture layout is authoritative again; Johto is COLOR authority only.
+- Retained scene-aware donors (`CHERRYGROVE_CITY` for Kanto towns/cities, `ROUTE_29` for Kanto routes), exact scene-used PalMap slots, roof/facade role separation, and multi-slot Johto material identity.
+- Added per-tile four-shade histogram matching: Kanto's 2bpp light/mid/dark indices are quantile-matched to the selected Johto donor material, preserving spatial detail while matching Johto contrast balance.
+- Added a regression that gives Kanto a left/right shade pattern and Johto a top/bottom pattern; the result must stay left/right, proving donor texels are never pasted.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-375-r1` so every v0.3.74 projected material is rebuilt.
+
+# v0.3.73 — Screenshot-driven Johto city material parity
+
+- Fixed the mismatch visible in the supplied side-by-side screenshots: Johto uses a bright magenta/pink civic roof family with stronger foliage/material contrast, while Kanto v0.3.72 could still choose muted brown/olive slots from unused tiles elsewhere in `TILESET_JOHTO`.
+- Outdoor Kanto towns/cities now prefer `CHERRYGROVE_CITY` as the Johto color scene; Kanto routes prefer `ROUTE_29`, with New Bark retained only as a fallback. Geometry donors remain unchanged.
+- Color-slot selection is now constrained by the tiles the selected Johto donor MAP actually uses instead of searching the entire Johto tileset indiscriminately.
+- Added building-template color roles: roof courses and facade courses are distinguished even though both are collision-class `structure`. Kanto roofs therefore inherit the donor town's actual Johto roof palette slot, while facades inherit its facade slot.
+- Generic ground/grass/water/tree/fence/sign material behavior remains day/night and display-mode synchronized with Gold; only color-role authority changed.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-373-r1` so v0.3.72 projected material caches cannot preserve the old brown/olive choices.
+- Expanded `tests/kanto_johto_voxel_color_parity.lua` with city-vs-route donor selection, used-map tile filtering, roof/facade role separation and projection-revision checks.
+
+# v0.3.72 — Kanto voxel colors match Johto material authority
+
+- Split Kanto's Gen-2 presentation donor into independent GEOMETRY and COLOR donors. Native Gen-2 Kanto can still supply shapes/textures where it best matches the Yellow-authored map, while outdoor color authority now comes from `TILESET_JOHTO` with `NEW_BARK_TOWN` preferred.
+- Kanto terrain, grass, water, doors/warps and structures now select PalMap slots from the nearest same-material Johto donor tile instead of reusing the geometry donor's Kanto palette slot.
+- Matched geometry keeps the donor's 2bpp shade pattern but recolors that shade through the Johto slot/ramp, so voxel material contrast and day/night/color-mode changes follow Johto without replacing Kanto landmarks or collision/layout data.
+- Unmatched/unique Kanto art still falls back to Johto semantic ground/water/grass/door/structure slots, preserving recognizable Kanto silhouettes rather than forcing arbitrary Johto textures.
+- Bumped `KantoGen2Style.PROJECTION_REV` to `g2-johto-colors-372-r1`, forcing persistent voxel/material cache misses for older projections so pre-v0.3.72 colors cannot leak into upgraded sessions.
+- Added runtime diagnostics for separate Kanto geometry and color donors and `tests/kanto_johto_voxel_color_parity.lua`, including a pure check that Pallet geometry can remain Kanto while its visible palette slot is sourced from Johto.
+- Gen1Recomp `dev` remains `9713977755fb87f3a7cc336d5a841cf3f3b15e31` (2026-08-19); no host API rebase was required.
+
+# v0.3.71 — Kanto scripted-reward / Gold state parity
+
+- Promoted the next batch of classic Kanto reward interactions out of the detached dialogue sandbox so they mutate the active Gold save without enabling Red/Yellow story ASM.
+- Celadon Mansion now gives the authored level-25 EEVEE as a Gen-2 gift (happiness 120, player OT/ID, real party/current-box storage and Gold Pokedex ownership) and persistently hides the claimed ball.
+- Silph Co. 7F now gives one level-15 LAPRAS with storage-full retry safety; Fighting Dojo now previews HITMONLEE/HITMONCHAN as seen after the Karate Master, gives exactly one level-30 choice, hides only the selected ball and preserves the other ball's greedy refusal.
+- Mt. Moon's salesman now performs the authored ¥500 level-5 MAGIKARP sale. Decline, insufficient money and full storage never charge or consume completion; money moves only after Gold accepts the Pokemon.
+- Oak's aides now use the exact 10/30/50 caught thresholds and award safe Gold equivalents: HM05 FLASH, ITEMFINDER, and EXP.SHARE as the semantic Gen-2 successor to EXP.ALL. Mixed `caught`/legacy `owned` Pokedex tables count as a union.
+- Mr. Psychic gives Gold's TM29 PSYCHIC once; the Route 16 hidden-house girl gives Gold's HM02 FLY once. Item events are written only after the real Gold Bag accepts the reward.
+- Celadon rooftop vending machines now sell FRESH WATER ¥200, SODA POP ¥300 and LEMONADE ¥350 against Gold money/Bag state, adding the drink before deducting money so a full PACK cannot charge the player.
+- Deliberately does not reinterpret Gen-1-only TM numbering: Copycat's TM31 MIMIC and the thirsty girl's TM13/TM48/TM49 exchanges remain sandboxed until they can be translated by move semantics without silently giving the wrong Gen-2 TM.
+- Added `lib/KantoRewards.lua` and `tests/kanto_scripted_rewards_parity.lua`; all 29 Kanto regression files plus Android Gold sizing/worldOverride and iOS orientation regressions pass.
+- Compatibility remains on Gen1Recomp `dev` 9713977755fb87f3a7cc336d5a841cf3f3b15e31 (2026-08-19); upstream did not move from the v0.3.70 checkpoint.
+
+# v0.3.70 — Kanto Yellow starter-gift / Gold ownership parity
+
+- Promoted Yellow's three Kanto starter sidequests out of the detached dialogue-only sandbox into dedicated Gold-owned gameplay services.
+- Cerulean Melanie now follows the authored Pikachu-specific friendship gate: below 147 happiness she only gives the intro; at 147+ she offers one level-10 BULBASAUR. A compatibility `save.pikachuHappiness` bridge is honored when present; normal Gold reads actual party PIKACHU happiness and never substitutes another lead.
+- Route 24 Damian now offers one level-10 CHARMANDER with the original decline/retry and after-gift branches.
+- Vermilion Officer Jenny now requires Gold's actually earned Kanto THUNDER badge before offering one level-10 SQUIRTLE, preserving decline/retry and after-gift behavior.
+- All three gifts are created as Gen-2 gift Pokemon with happiness 120, stamped with the Gold player's OT/ID, stored through the real party/current-box path, and marked seen/caught in Gold's Pokedex.
+- Completion is atomic: party+current-box full, build failure, or store failure leaves the Kanto event clear so the player can retry and can never lose a one-time starter.
+- Melanie's separate BULBASAUR object hides immediately on success and map-entry migration repairs stale visible objects on upgraded saves that already hold the completion event.
+- `storeGoldMon` now uses Gen1Recomp's current `Mon.stampOT` for non-traded Kanto catches/prizes/gifts when available, while traded Pokemon keep their foreign OT.
+- Added `lib/KantoStarterGifts.lua` and `tests/kanto_yellow_starter_gifts_parity.lua`; Bike Voucher, civic, NPC-dialogue, dynamic-interior and poster/badge regressions remain green.
+- Checked against current Gen1Recomp `dev` 9713977755fb87f3a7cc336d5a841cf3f3b15e31 (2026-08-19), 18 commits beyond the previous v0.3.69 checkpoint. No Yellow story/cutscene VM is enabled.
+
+# v0.3.69 — Kanto Bike Voucher / Bicycle service parity
+
+- Promoted `POKEMON_FAN_CLUB` chairman interaction out of the dialogue-only sandbox into a story-free gameplay service backed by Gold inventory.
+- Restored the original chairman YES/NO branch: NO gives nothing and leaves the service retryable; YES tells the story, gives exactly one BIKE VOUCHER, then explains it.
+- Gold key-item-pocket refusal is authoritative. On normal Gen-2 hosts, BIKE_VOUCHER is represented as Kanto-local held service state (because Gold has no native voucher item) but still checks the real KEY_ITEM pocket capacity; compatible hosts that define BIKE_VOUCHER use the real Bag item. A full pocket does not set completion.
+- Promoted `BIKE_SHOP` clerk interaction into a real service. Existing BICYCLE ownership uses the post-sale line; a BIKE VOUCHER is exchanged atomically by adding BICYCLE first and consuming the voucher only after success.
+- Preserved the no-voucher retail path as the authored impossible ¥1,000,000 BICYCLE/CANCEL menu; browsing cannot spend Gold money or sell a bike.
+- Existing physical BIKE_VOUCHER/BICYCLE ownership backfills only Kanto-local completion bits, preventing duplicate cross-region rewards without writing Yellow story flags into Gold.
+- Added `kanto_bike_voucher_parity.lua` covering decline/retry, bag-full, successful gift/exchange, atomic voucher spending, migration, impossible sale/cancel behavior and dispatcher ownership.
+- Kept v0.3.68 Saffron/Museum physical parity, v0.3.67 iPhone orientation correction and all previous Kanto rendering/movement/performance contracts unchanged.
+
+# v0.3.68 — Kanto Saffron / Pewter Museum physical-service parity
+
+- Restores all four Yellow Saffron gate-house trigger arrays: Route 5 `(3,3)/(4,3)`, Route 6 `(3,2)/(4,2)`, Route 7 `(3,3)/(3,4)`, and Route 8 `(2,3)/(2,4)`.
+- Without access, the guard consumes the first Gold-owned drink in retail order `FRESH_WATER`, `SODA_POP`, `LEMONADE`; one drink opens the shared Saffron event for all four gates.
+- If no drink exists, the authored road-closed interaction consumes the landing and queues one-cell pushback on the correct horizontal/vertical axis. Direct guard talk uses the same inventory/event authority.
+- Restores Pewter Museum's ¥50 rope gate on `(9,4)/(10,4)`: decline/insufficient funds push south, successful admission deducts exactly ¥50 from Gold and persists a Kanto-local ticket event.
+- Restores the Museum scientist's one-time OLD AMBER gift using Gold's real Bag API; bag-full refusal does not set completion. Success hides the `MUSEUM1F_OLD_AMBER` display and invalidates live/spatial actor caches immediately.
+- Adds map-entry migration so an already-completed Old Amber event hides a stale display after upgrading without running Yellow ASM.
+- Added `lib/KantoCivic.lua` plus `tests/kanto_civic_access_parity.lua`.
+- No Yellow story/cutscene VM, rendering-quality setting, Kanto geometry/collision rule, Character Selector path, Android framing, iOS orientation correction, or battle renderer changed.
+
+# v0.3.67 — iPhone landscape orientation correction
+
+- Extends the existing whole-frame mobile presentation wrapper to iOS while leaving desktop untouched and preserving Android's historical manual `screenFlip` option.
+- Uses LÖVE's live `love.window.getDisplayOrientation()` signal and auto-corrects only `landscapeflipped`; normal `landscape` is never rotated.
+- Rotates the complete Game2 frame 180 degrees after world, HUD, menus, battle UI, overlays and touch controls are composed, so Kanto/Johto presentation stays coherent.
+- Applies the inverse 180-degree transform to iOS touch points and deltas, keeping virtual buttons, menus and camera gestures aligned with the corrected picture.
+- Adds enabled-by-default `IPHONE ORIENTATION FIX`; disabling it restores fully native iOS orientation handling for devices/builds that do not need the workaround.
+- Validates stable option/orientation callbacks once per identity and leaves `pcall` afterward, avoiding new protected-call overhead on steady mobile frames.
+- Added `tests/ios_orientation_flip_parity.lua`; Android logical-canvas/worldOverride contracts remain unchanged.
+- No voxel resolution, draw distance, terrain, actors, water, shadows, collision/warp semantics, Character Selector behavior, battle renderer or assets changed.
+
+# v0.3.66 — Kanto steady-frame proxy / neighbor no-lag hot paths
+
+- Caches the connected-neighbor `urgent` / directional `prefetch` result by exact completed player cell plus world-travel vector, so idle and steady-direction presentation frames skip the whole neighbor-dynamic loop.
+- Precomputes each second-ring root-to-neighbor unit vector when the connected descriptor is built; directional prefetch no longer normalizes immutable map geometry every frame, with a one-time fallback for hot-reloaded legacy descriptors.
+- Keeps the existing v0.3.65 descriptor/direct-neighbor identities and invalidates the dynamic key automatically whenever root map, Kanto radius or sector-record identity changes.
+- Caches the visible Kanto player proxy sprite/card by map, Bicycle state, Gold palette key, custom-skin ownership and source SpriteRenderer identity instead of re-entering Yellow sprite/palette lookup every presentation frame.
+- Validates the optional custom-player `active()` callback once per picker/function identity and calls it directly on later frames; function replacement automatically re-arms protected validation.
+- Reuses the already-computed dark-map answer inside `excursionState` rather than querying the immutable field index twice in the same frame.
+- Added `tests/kanto_steady_proxy_neighbor_hotpath_parity.lua`.
+- No voxel resolution, draw distance, terrain, actors, water, shadows, collision/warp semantics, Character Selector animation/state ownership, Android sizing, battle renderer or assets changed.
+
+# v0.3.65 — Kanto connected-neighbor / bridge no-lag hot paths
+
+- Keeps the current Kanto connected-sector neighbor descriptor array intact while `(root map, Kanto radius, sector-record identity)` is unchanged instead of clearing/scrubbing/refilling every presentation frame.
+- Keeps the direct-neighbor array intact with the same cache key, so Gold third-person collision and bridge handoff reuse the exact same table identity across steady frames.
+- Only `urgent` and directional `prefetch` are refreshed per frame; map refs, offsets, depth, parent and direction are rebuilt only when the root/radius/region actually changes.
+- Actor-view invalidation is deliberately independent, so moving/despawning NPCs do not force terrain-neighborhood descriptor rebuilds.
+- GoldVoxelBridge validates the bundled `TwinRegionWorld.excursionState` helper once per function identity and calls it directly on later Kanto frames; replacing the helper automatically re-arms one protected validation.
+- Added `tests/kanto_neighbor_bridge_hotpath_parity.lua`.
+- No voxel resolution, draw distance, terrain, actors, water, shadows, collision/warp semantics, Character Selector, Android sizing, battle renderer or assets changed.
+
+# v0.3.64 — Kanto idle-tick / trainer hot-path no-lag caching
+
+- Idle Kanto frames now advance the NPC wander clock before resolving the current map/NPC list; if no actor is moving and the 0.70s wander decision is not due, the frame touches no map/entity tables.
+- Active NPC interpolation reads the already-maintained tiny mover list directly from `KantoSpatial.peekRoles`; completing a move removes it from that list without rebuilding the authoritative NPC list.
+- Gold overlay-stack ownership is defensively validated once per stack/method identity and then uses a direct `stack:top()` call instead of a protected call every rendered Kanto frame.
+- Love RNG ownership for classic step encounters is likewise validated once per function identity and then called directly for rate/slot rolls.
+- Trainer persistent win IDs and immutable trainer headers are cached on their imported object records instead of rebuilding strings/resolving headers on repeated Kanto landings.
+- Trainer sight now performs the cheap facing/alignment test before touching trainer persistence/header data, so unrelated trainers on busy routes generate no trainer-ID/header work.
+- Added `tests/kanto_idle_tick_hotpath_parity.lua` and `KantoSpatial.peekRoles`.
+- No graphics-quality, draw-distance, actor-visibility, collision/warp, Character Selector, Android-size, battle-renderer or asset changes.
+
+# v0.3.63 — Kanto position-checkpoint no-lag hot path
+
+- Reuses one Kanto position snapshot and one nested LAST_MAP snapshot instead of allocating a new table and deep-copying LAST_MAP on every crossed cell.
+- Ordinary travel checkpoints are coalesced in eight-cell batches, removing seven out of eight mod-save bridge calls during uninterrupted movement while keeping the in-process snapshot current every cell.
+- Menus/overlays flush any pending position once, and existing explicit transitions (warps, Fly, Surf/Bicycle changes, dungeon falls, relocation and RETURN TO JOHTO) remain immediate durable checkpoints.
+- Grid and continuous-body outdoor route seams force an exact checkpoint at the destination before ordinary landing work continues.
+- Unchanged forced checkpoints are no-ops, so opening/holding an overlay cannot repeatedly rewrite the same save-slot position.
+- Added `tests/kanto_position_checkpoint_parity.lua`.
+- No graphics-quality, draw-distance, actor-visibility, collision/warp, Character Selector, Android-size, battle-renderer or asset changes.
+
+# v0.3.62 — Kanto completed-step / warp no-lag hot paths
+
+- Ordinary Kanto cell landings now check the map's O(1) warp index once and completely skip `resolveWarp`, pad/hole tile reads and ExtraWarpCheck work when no authored warp occupies that cell.
+- Warp bounce suppression uses scalar `(map, x, y)` excursion fields instead of allocating/comparing `"map:x:y"` strings on normal runtime paths; the legacy string field remains compatible for older tests/integrations.
+- Classic step-encounter enablement is cached for steady gameplay and invalidated while menus/overlays are open, so setting changes are picked up on resume without a mod-options bridge call on every landing.
+- `ForeignGen1Map:isPassableCell` now reads one cached collision tile and checks walkable/water membership directly, eliminating duplicate Surf-path tile work.
+- Removed a duplicate `sourceMapId` assignment in step finalization.
+- Added `tests/kanto_step_landing_hotpath_parity.lua`.
+- No graphics-quality, draw-distance, actor-visibility, warp/collision-rule, Android-size, Character Selector, battle-renderer or asset changes.
+
+# v0.3.61 — Kanto collision/step no-lag hot paths
+
+- Added an in-bounds collision-cell tile cache to `ForeignGen1Map`; repeated collision/water/grass/warp/elevation queries now reuse decoded tile ids.
+- `setBlock` invalidates exactly the four collision cells covered by the changed Gen-1 block, so live Cut/door/poster/trash-puzzle restamps remain correct without flushing the whole map cache.
+- Trusted Kanto `passable` and tile-pair/elevation checks now call the private map adapter directly instead of paying protected-call overhead on continuous movement.
+- Timer and Gold input callback identities are validated once and then use direct calls until the runtime object/function changes.
+- `fieldIndex` now pre-indexes Yellow ledge rules and ExtraWarpCheck warp-carpet metadata for O(1) held-collision checks.
+- Added `tests/kanto_collision_hotpath_cache_parity.lua`.
+- No graphics-quality, draw-distance, actor-visibility, collision-rule, Android-size, Character Selector, battle-renderer or asset changes.
+
+# v0.3.60 — Kanto actor/AI no-lag caching
+
+- Cached immutable per-map NPC role lists for trainers and wanderers instead of filtering the complete NPC list on repeated trainer-sight/AI checks.
+- Maintains a tiny active-mover list so render-rate NPC interpolation visits only NPCs that are currently moving.
+- Added actor-generation invalidation and a cell/radius keyed actor-view cache; steady movement within one cell reuses the same Kanto current/neighbor candidate arrays while any actor movement/despawn/list change invalidates immediately.
+- Neighbor actor candidate caching uses a one-cell safety margin; VoxelScene remains the final camera-space cull, so actor draw distance/visibility quality is unchanged.
+- Reuses TwinRegionWorld's direct-neighbor array in GoldVoxelBridge instead of allocating/refiltering a second table every Kanto frame.
+- Reuses one overlay-covered result and one FirstPerson method snapshot per Kanto tick rather than repeating protected lookups.
+- Scrubs unused Kanto frame/voxel pool tails when counts shrink, preserving table reuse without retaining actors/maps/meshes from the previous route.
+- Added direct-neighbor handoff, actor-role/generation, actor-view and pooled-reference regressions; all prior Kanto and Android contracts remain green.
+
+# v0.3.59 — Kanto movement-time no-lag / prefetch + palette hot paths
+
+- **No visual-quality reductions:** keeps the v0.3.58 voxel geometry, draw distance, connected-world terrain, actors/models, water, shadows, grass/flowers and Character Selector animation.
+- **Reusable voxel prefetch state:** Kanto reuses the live map set, neighbor visibility flags, neighbor terrain/water readiness and detail-ready arrays instead of allocating those containers every visible frame.
+- **Shared-body dead-work removal:** Kanto's BODY-only stitched world no longer constructs `openWorldFullMasks` placement/mask graphs that are only meaningful to FULL/apron meshes.
+- **One culling setup per frame:** `VoxelScene._prepareCullView` resolves Quality world/detail/actor padding once and caches the expanded view bounds; every neighbor/actor check reads those values directly instead of repeatedly calling Quality through `pcall`.
+- **One neighbor visibility test per frame:** residency and mesh-request passes share the same visibility result rather than repeating identical camera/bounds math.
+- **Stable residency ownership:** `ChunkMesher.setLive` copies membership into two reusable internal sets. Reusing/wiping Kanto's caller live dictionary cannot mutate previous-neighborhood history or cause premature route eviction.
+- **Cheap Gold palette polling:** `GoldColorAtlas.worldPaletteInputs` exposes daytime, color mode, palette-set identity and PalMap identity without scanning the PalMap. `TwinRegionWorld.syncGoldPalette` now runs the full multi-pass `worldPaletteProfile` only when one of those cheap inputs changes, removing the old periodic PalMap/key-serialization spike.
+- **Smaller movement hot paths:** Kanto actor spatial cells use packed numeric keys instead of `"x:y"` strings, and connected-sector cache lookups use nested `sourceId -> radius` keys instead of constructing `"map|radius"` every frame.
+- **Hard unload preserved:** `KantoFrameCache.release` now also clears the new live/prefetch/terrain readiness scratch so RETURN TO JOHTO cannot pin Kanto meshes. `VoxelScene` uses a scalar global sentinel rather than retaining the scratch table.
+- Added regressions: `kanto_voxel_prefetch_low_gc_parity.lua`, `kanto_live_residency_snapshot_parity.lua`, `kanto_palette_poll_parity.lua`; expanded frame/voxel scratch tests.
+
+# v0.3.58 — Kanto no-lag frame pacing / low-GC performance
+
+- **No visual-quality cuts:** this pass keeps the same voxel terrain, actor/model detail, draw distance, water, shadows, flowers/grass, Character Selector animation and Kanto gameplay rules. The improvement comes from eliminating redundant CPU work and allocation churn.
+- **Reusable Kanto render frame:** `lib/KantoFrameCache.lua` owns reusable render-state, neighbor, entity, ghost, ocean and voxel-scratch buffers. Steady Kanto frames no longer rebuild those short-lived Lua table graphs every draw, reducing garbage-collector pressure and frame spikes.
+- **Pooled actor/water pose records:** `VoxelScene` reuses Kanto actor pose rows, water draw rows, cull/context records and atlas lookup scratch. Neighbor translation matrices are cached on stable neighbor records rather than recreated repeatedly across terrain/water/grass/flower/shadow passes.
+- **Visible-only cache preparation:** while Kanto gameplay is visible, disk-cache warming may only touch the current map and already-prepared connected neighbors. It no longer prepares/colorizes arbitrary far-away Yellow maps on an active gameplay frame. Whole-region cooking remains available while a menu/covering overlay is up.
+- **Current-sector-first meshing:** when the current Kanto body is missing, it retains the normal urgent mesh budget. Once current terrain is drawable, neighbor/prefetch mesh work receives short cooperative Kanto-visible slices, preventing background terrain preparation from consuming a large part of a frame.
+- **Idle frames are protected too:** cache-only warmers now receive the visible-gameplay throttle on every Kanto frame, not only while the player is moving. Standing still can no longer invite a several-millisecond background-cache burst.
+- **Zero-allocation forced-bike hot check:** the per-frame `map:x:y` key construction is replaced by scalar map/x/y tracking.
+- **Hard residency boundary preserved:** RETURN TO JOHTO releases all reusable Kanto frame references before region/GPU unload, so the low-GC cache cannot pin Yellow maps, actors, textures or matrices in memory.
+- **Diagnostics:** `Twin.status()` and GoldVoxelBridge expose frame-cache reuse/ocean-cache counters plus visible cache/mesh throttling counts.
+- **Regressions:** added `kanto_render_frame_cache_parity.lua`, `kanto_voxel_frame_scratch_parity.lua`, `kanto_mesh_pacing_parity.lua` and `kanto_cache_warm_visibility_parity.lua`.
+- Retains v0.3.57 Tower purified-zone parity, v0.3.56 third-person state isolation, v0.3.55 Kanto player animation and every earlier collision/warp/elevation/Cycling Road/Seafoam rule.
+
+# v0.3.57 — Kanto Pokemon Tower purified-zone parity
+
+- **Pokemon Tower 5F purified pad restored:** the authored 2x2 zone at `(10,8)`, `(11,8)`, `(10,9)`, `(11,9)` now works in KANTO FREE ROAM.
+- **Gold party authority:** entering the zone heals the real Gold party once per entry; the normal `world:healParty()` path is preferred, so HP, status and PP stay owned by Gen 2 rather than a copied Yellow party.
+- **Encounter suppression:** every completed landing while inside the purified zone is consumed before roaming/classic step encounters, mirroring Yellow's `BIT_NO_BATTLES`. Stepping off clears the visit-local latch and re-entering heals again.
+- **Story-free presentation:** the heal keeps Yellow's white palette sequence—24-frame fade out, `Delay3` twice, 24-frame fade in—then displays `_PokemonTower5FPurifiedZoneText` from the imported cache with a ROM-free fallback.
+- **Cross-region resume:** RETURN TO JOHTO clears the temporary Tower latch; resuming Kanto directly on the pad is treated as a fresh visit and activates the heal/no-battle rule immediately.
+- **Older-host healing improved:** the compatibility fallback now prefers Gen1Recomp's canonical `Pokemon.heal`, restoring move PP (including PP Up bonuses) as well as HP/status.
+- **Diagnostics:** `Twin.status()` exposes Tower purified heals, occupied-pad steps, active latch and entry count.
+- **Regression:** added `tests/kanto_tower_purified_zone_parity.lua`, covering exact coordinates, latch semantics, real Gold heal call, encounter-blocking return behavior, white-fade timing and extracted text.
+- Retains v0.3.56 third-person state isolation, v0.3.55 skeletal animation, v0.3.54 dialogue/spatial indexing, v0.3.52 Game Corner geometry, v0.3.51 elevation/Bicycle and v0.3.48 Android logical framing.
+
+# v0.3.56 — Kanto third-person transition/state isolation
+
+- **Visible Kanto special-card ownership:** Kanto Character Selector eligibility now reads the presentation-local Kanto proxy instead of the still-resident Johto `playerState`. Hidden Johto Surf/Bike/Fishing can no longer make the Kanto 3D trainer disappear, and Kanto Bicycle/Surf correctly hands rendering back to the authored special card instead of layering the humanoid mesh over it.
+- **Hidden fishing leak closed:** the Kanto proxy explicitly pins `fishing=false` so its `__index` fallback cannot inherit a Johto fishing pose from the real Gold player.
+- **Independent third-person travel yaw:** Character Selector's retained `red3dFreeBodyYaw`, `red3dLastWorldX/Z` and projected yaw are mirrored into Kanto-local proxy state for Kanto render calls, then the original Johto fields are restored. Hidden Johto rendering between Kanto shadow/main passes can no longer contaminate the Kanto body's orientation.
+- **Cross-region yaw rebase:** the first Kanto model frame seeds its previous-world sample at the current Kanto position, preventing the Johto-to-Kanto coordinate discontinuity from being interpreted as a giant movement vector.
+- **Idle interaction/warp facing:** a real Kanto facing change while stationary updates the retained 3D body yaw and rebases the travel sample. Camera orbit alone leaves Kanto facing unchanged, so the model still retains travel-facing normally.
+- **Special-state draw isolation:** render-only Surf/Bike/Fishing fields are mirrored to Character Selector during Kanto preparation/draw and restored immediately afterward, just like v0.3.55 movement/jump fields.
+- **Regression:** added `tests/kanto_third_person_transition_parity.lua` covering hidden-Johto special-state rejection, Kanto Bicycle/Surf/Fishing handoff, yaw/sample isolation across intervening Johto draws, first-frame rebasing, idle turn-in-place and exact Gold-field restoration.
+- Retains v0.3.55 Kanto skeletal-frame animation ownership, v0.3.54 dialogue/spatial indexing, v0.3.53 dialogue coverage, v0.3.52 Game Corner geometry, v0.3.51 elevation/Bicycle, v0.3.50 optimization and v0.3.48 Android logical framing.
+
+# v0.3.55 — Kanto third-person player animation cache fix
+
+- **Character Selector voxel-frame ownership fixed in Kanto:** current Character Selector prepares its skeleton in `Renderer:beginVoxelFrame()` and `drawVoxel()` / `drawVoxelShadow()` consume the cached `voxelFrameKey`. Kanto manually delegated the draw but did not refresh that cache, so the visible Kanto body could move while reusing the hidden Johto player's idle skeleton.
+- **Kanto proxy now prepares the model animation frame:** immediately before Kanto shadow/main model rendering, the bridge refreshes Character Selector's cached voxel animation using the visible Kanto presentation proxy while retaining the real Gold player object identity needed for selected skins/accessories.
+- **Walk/run blend parity:** Kanto's live movement vector is mirrored render-only into `red3dMoveStickX/Y` + `red3dAnalogMoveActive`, allowing imported rigs that use Character Selector's analogue magnitude to choose and blend their authored walk/run clips correctly.
+- **Ledge/jump animation parity:** Kanto hop/jump state is mirrored render-only for the selector frame so compatible character rigs can play their authored jump pose while the Kanto world still owns physical movement/lift.
+- **Same-frame cache protection:** shadow/reflection/main passes reuse one prepared Kanto frame, but if another selector/Johto pass overwrites `voxelFrameKey` during that scene frame the Kanto bridge detects the foreign key and reclaims the correct pose before drawing.
+- **Legacy Character Selector fallback:** older selector builds without `beginVoxelFrame()` have stale voxel-frame/upload keys invalidated so their position-aware `animationState()` path can animate from Kanto movement instead of a frozen Johto cache.
+- **Render-only isolation:** every Gold player field temporarily exposed to the selector is restored immediately after frame preparation/draw. Johto Character Selector animation remains owned by its native pipeline.
+- **Regression:** added `tests/kanto_third_person_player_animation_parity.lua` covering moving/facing/progress/target/analogue/jump mirroring, gameplay-state restoration, same-frame reuse, foreign-cache overwrite recovery, legacy fallback and Johto non-interference.
+- Retains v0.3.54 dialogue-audio/actor-spatial fixes, v0.3.53 comprehensive dialogue, v0.3.52 Game Corner geometry, v0.3.51 elevation/Bicycle, v0.3.50 optimization and v0.3.48 Android logical framing.
+
+# v0.3.54 — Kanto dialogue presentation + actor spatial indexing
+
+- **Authentic pet-NPC cry timing:** `play_cry` is now a permitted dialogue-control command inside the detached Yellow sandbox. Its pending cry is carried into the real Kanto TextBox through a sanitized `auto.sound/delay/wait` presentation contract, restoring cases such as Pewter Nidoran / Viridian Spearow without exposing Gold story state.
+- **Sandbox boundary stays narrow:** only safe TextBox audio presentation crosses out. Arbitrary `auto.tick`/`auto.onOverlap`, battles, warps, screens, scripted movement and real save/world mutation remain suppressed.
+- **Per-cell NPC index:** Kanto NPC collision/interaction lookup now uses per-map cell buckets instead of scanning the entire cached NPC list on each query.
+- **Per-cell Pokémon index:** roaming/static Pokémon occupancy and interaction lookup uses the same direct cell strategy.
+- **Live index maintenance:** wandering NPC movement, trainer sight approaches, Strength boulder pushes, Seafoam boulder drops, roaming Pokémon battle removal, static-Pokémon restore, item pickup and Game Corner guard disappearance all update or invalidate the correct index immediately.
+- **Duplicate-cell correctness:** buckets retain multiple actors and preserve `except` handling, so an ignored mover cannot hide a second blocker sharing its cell.
+- **Diagnostics:** `Twin.status()` exposes NPC/Pokémon spatial index builds/hits/moves plus dialogue presentation-audio count.
+- **Regression:** expanded `tests/kanto_npc_dialogue_parity.lua` for `play_cry` TextBox timing and added `tests/kanto_actor_spatial_parity.lua` for build/reuse, move, remove, duplicate/except and invalidation semantics.
+- Retains v0.3.53 comprehensive NPC/sign dialogue, v0.3.52 Game Corner physical entrance, v0.3.51 elevation/Bicycle parity, v0.3.50 optimization, v0.3.49 interiors and v0.3.48 Android logical framing.
+
+# v0.3.53 — Complete Kanto NPC dialogue bridge
+
+- **`text_asm` NPCs no longer go mute:** v0.3.52 deliberately rejected every generated pointer carrying `asm=true`. v0.3.53 resolves the engine's hand-ported map talk handler and presents its dialogue instead.
+- **Detached Yellow dialogue sandbox:** the handler receives a cloned Gold save plus a fake Kanto overworld; `GameVersion` is temporarily Yellow. TextBox, YES/NO and ListMenu presentation is replayed through the real Kanto UI, while the real Gold save/world never enters the handler.
+- **Story/cutscene safety remains:** battle/warp/teleport/blackout/Hall-of-Fame commands halt the sandbox; other unsafe commands, custom screens/states, scripted movement and audio side effects are suppressed. Save flag writes are allowed only on the detached clone so branching within one conversation remains coherent.
+- **Yellow-specific talk overrides:** Yellow Oaks Lab and Yellow-only gifts/Jessie-James/beach/old-man modules are explicitly available even though the owning game is Gold/Silver; shared map scripts continue through the current engine registry.
+- **Incomplete-cache recovery:** a visible NPC/sign whose `text_pointers` row is absent gets a direct engine registry lookup and extracted-label fallback. The final non-muting fallback is `...`, so pressing A on a text-bearing object never silently fails.
+- **Existing safe gameplay handlers keep precedence:** trainers, items, marts, Centers, PCs, Cable Club notice, Safari, Game Corner, rods, trades, CARD KEY, Cut/Strength and other Kanto-owned interactions are unchanged.
+- **Dialogue audit/diagnostics:** region build records counts for NPC/sign text, plain lines, scripted lines, services and missing pointers; runtime counters expose sandbox sessions, handled/recovered interactions, suppressed commands/states, fallbacks and errors.
+- **Regression:** added `tests/kanto_npc_dialogue_parity.lua`, covering function handlers, row scripts, chained boxes, YES/NO, Yellow-only override priority, detached save state, battle-like state suppression, extracted fallback, missing-handler fallback and audit accounting.
+- Retains v0.3.52 Game Corner physical entrance, v0.3.51 elevation/Bicycle parity, v0.3.50 optimization, v0.3.49 interiors, v0.3.48 Android logical framing, v0.3.46 ledges/route edges and v0.3.45 warps.
+
+# v0.3.52 — Kanto Game Corner entrance + indexed spinner/badge rules
+
+- **Celadon Game Corner Rocket entrance restored:** the story-free Kanto runtime now consumes extracted `field.gameCornerPoster`. Before discovery, block `(8,2)` is physically closed as `$2a`; using the authored poster interaction sets `EVENT_FOUND_ROCKET_HIDEOUT`, plays the switch/open cues when the host exposes them, and swaps the live block to `$43` with one voxel refresh. Re-entry/restamp reads the persisted event so collision and rendering agree.
+- **Poster guard no longer becomes a permanent blocker:** defeating the Game Corner Rocket persists a Kanto-local hidden-object state so the poster can be reached. Existing v0.3.51 saves migrate a prior `yellowTrainerWinsV1` win into that hidden state on Game Corner entry; no Yellow exit/cutscene VM is enabled.
+- **Indexed spinner arrows:** immutable `field.spinners` coordinates are compiled into the region field index. Viridian Gym and Rocket Hideout spinner landing checks use direct cell lookup, preserve authored forced-move lists, and play the Arrow Tiles cue when available.
+- **Indexed badge gates:** Route 22 exact checkpoint cells and Route 23 northbound guard rows are compiled into direct lookups, preserving badge/fail-text/max-X semantics while removing repeated per-step scans of extracted guard arrays.
+- **Geometry refresh stays coalesced:** the poster entrance uses the same centralized block-refresh path as v0.3.49-v0.3.51 dynamic Kanto geometry, so repeated interactions/restamps do not rebuild an unchanged voxel chunk.
+- **Regression:** added `tests/kanto_poster_spinner_badge_index_parity.lua`, covering closed/open poster geometry, persistence, one-refresh behavior, no duplicate SFX/rebuild on repeat use, old-save Rocket migration, spinner indexing and both badge-gate index shapes.
+- Retains v0.3.51 elevation/Bicycle parity, v0.3.50 state/chunk optimization, v0.3.49 dynamic interiors, v0.3.48 Android logical framing, v0.3.46 ledges/route edges and v0.3.45 warp/interior parity.
+
+# v0.3.51 — Kanto elevation collisions + manual Bicycle + field-rule indexing
+
+- **Gen-1 elevation/tile-pair collision parity:** Kanto now consumes extracted `field.tilePairs.land/water`. A destination can be individually walkable yet still reject the authored source/destination tile pair, matching current Gen1Recomp cave/forest elevation edges. Pair matching is symmetric and walking/surfing use their own tables.
+- **All Kanto movement modes agree:** DIORAMA/grid checks tile-pair barriers before ordinary occupancy/arrival; FIRST/THIRD PERSON checks pair boundaries before circular wall sliding so free movement cannot slip through an elevation edge that grid movement blocks.
+- **Manual BICYCLE restored:** KANTO FIELD exposes BICYCLE / GET OFF BICYCLE when Gold owns the item. Riding follows extracted `field.bikeRiding` (authored rideable tilesets plus Route 23 / Indigo Plateau exceptions), refuses indoor/disallowed mounts, and never creates a Yellow inventory item.
+- **Correct Cycling Road lock semantics:** while `forcedBike` is armed the player cannot dismount. Route 16/18 gate clear maps now clear only the forced lock; an already-mounted rider stays on the bike and may dismount manually afterward, matching the native status-bit split.
+- **Immutable field-rule index:** Kanto builds one region-local lookup for tile pairs, bicycle maps/tilesets, dark maps, Route 17 slope membership, forced-bike clear maps and force-bike cells. Hot movement checks no longer rescan extracted arrays every frame/step.
+- **Diagnostics/regression:** added tile-pair/free-body block counters, Bicycle mount/dismount counters and `kantoFieldIndexBuilds`, plus `tests/kanto_elevation_bicycle_parity.lua`. The v0.3.50 Cycling/optimization regression was updated for the correct gate-mounted behavior.
+- Retains v0.3.50 state/chunk optimization, v0.3.49 dynamic interiors, v0.3.48 Android logical framing, v0.3.46 ledges/route edges and v0.3.45 warp/interior parity.
+
+# v0.3.50 — Kanto Cycling Road + state/chunk optimization
+
+- **Cycling Road physical parity:** KANTO FREE ROAM now consumes extracted `field.forcedMovement` instead of hard-coding route cells. Route 16/18 force-bike tiles silently mount the BICYCLE when Gold owns one, arm the forced-bike state, and refuse SURF while that state is active.
+- **Route 17 downhill/brake behavior:** an idle bike rolls south automatically; held A or B brakes continuously; a held direction wins over the automatic roll. Downhill keeps bike-speed movement while Route 17 steering uses normal walking-step timing, matching the current Gen1Recomp rule.
+- **Gate-safe companion behavior:** entering the authored Route 16/18 gate clear maps releases the companion's forced-bike presentation so Kanto cannot strand the player in a bike-only state before a manual Kanto Bicycle action exists.
+- **Visit-local Kanto state cache:** repeated reads of door events, trainer wins, boulder state and other mod-owned Kanto tables now use a write-through/read-through cache for the active excursion, cutting repeated `mod.save` bridge calls on Android and desktop. The cache is invalidated on Kanto enter/return.
+- **Batched voxel geometry refresh:** multi-door restamps (notably Silph Co) apply all changed blocks first and invalidate/rebuild that map's voxel chunk once. A four-door floor now causes one chunk refresh instead of four; Cut block updates use the same centralized refresh path.
+- **Diagnostics/regression:** added Cycling Road and optimization counters plus `tests/kanto_cycling_optimization_parity.lua`, covering cached state reads, one-refresh multi-door batching, force-bike mounting/refusal, downhill roll, A/B braking and directional override.
+- Retains v0.3.49 dynamic interiors, v0.3.48 Android logical framing, v0.3.46 ledges/route edges and v0.3.45 warp/interior parity.
+
+# v0.3.49 — Kanto dynamic interiors + physical events
+
+- **Silph Co physical doors:** Kanto now applies the current extracted `field.cardKeyDoors.closedDoors` rows before collision and voxel meshing. Floors 2F-11F start with the authored closed blocks until their exact per-door event is set.
+- **Story-free CARD KEY use:** interacting with a matching Silph locked door checks Gold's `CARD_KEY`, persists the corresponding Yellow door event in mod save, swaps only that block, and refreshes the live voxel chunk. No Yellow story/cutscene VM is enabled.
+- **Rocket Hideout lift parity:** Yellow B1F uses the retail guard-gated `$54 -> $0e` lift doorway; Yellow B4F remains open because Yellow removed that callback and Jessie & James do not set the Red/Blue guard flags.
+- **Upgrade-safe trainer events:** pre-v0.3.49 `yellowTrainerWinsV1` records are migrated through extracted trainer-header events, preventing already-earned physical gates from re-locking after update.
+- **Vermilion Gym:** the 15-can first/second lock puzzle now drives the physical motorized door. Wrong second cans re-lock and re-roll immediately, and the retail `mask AND random` zero-result bug correctly sends the second switch to can 0.
+- **Regression:** `tests/kanto_dynamic_interior_parity.lua` covers Silph per-door state, CARD KEY interaction, Yellow Rocket version behavior, trainer-event migration, Vermilion success/reset behavior and the retail selector bug.
+- v0.3.48 Android Gold logical framing, v0.3.46 Kanto ledges/route edges and v0.3.45 warp/interior parity remain intact.
+
+# v0.3.48 — Android Gold logical drawWorld sizing
+
+- **Actual Android zoom root cause fixed:** current Gold `World:drawPipeline()` draws a mod's returned world canvas directly at `(0,0)`. v0.3.47 incorrectly returned a physical framebuffer-sized canvas on HiDPI Android, so a 2x/2.75x phone showed only the upper-left logical portion and looked massively zoomed/cropped.
+- **Generation-aware output contract:** Gold/Gen2 now renders and returns exactly the logical `ctx.width`/`ctx.height` scene size. Gen1 keeps the physical-framebuffer `Renderer.worldOverride` normalization introduced in v0.3.47.
+- **Internal graphics resolution stays private:** LOW/MEDIUM/custom resolution still renders smaller internally, then normalizes back to the correct Gold logical scene dimensions.
+- **Regression:** `tests/android_gold_pipeline_size_parity.lua` simulates a 1000x600 logical Gold scene on a 2750x1650 Android framebuffer and verifies 55% rendering normalizes 550x330 back to 1000x600 instead of 2750x1650.
+- v0.3.47 TouchSkin/Gen1 compatibility, v0.3.46 Kanto ledges/route edges and v0.3.45 warp/interior fixes remain in the tree.
+
+# v0.3.47 — Android TouchSkin framing + worldOverride normalization
+
+- **Fixed Android zoom/cropping:** current Gen1Recomp first resolves the full `GameViewport`, then `Renderer.displayMetrics()` applies `TouchSkin.viewport(pw, ph)` and treats only that smaller physical rectangle as the gameplay drawable. The voxel renderer now mirrors that exact ordering instead of stretching the smaller world view across the full phone framebuffer.
+- **Full-frame pipeline contract:** `VoxelScene` renders only the TouchSkin gameplay rectangle (at the selected internal graphics-resolution factor), then `GoldVoxelBridge` places/upscales it into a full physical framebuffer canvas before returning it. This matches current `Renderer:endFrame()` worldOverride's 1:1 framebuffer contract and also fixes LOW/MEDIUM internal-resolution canvases being returned smaller than the compositor expects.
+- **Camera/view authority:** official `drawWorld` `ctx.vw/vh` now wins over cached Gold world view dimensions, avoiding one-frame stale framing after Android rotation/viewport changes.
+- **Android input alignment:** camera slider, direct right-thumb look and DIORAMA pinch use the same TouchSkin gameplay rectangle for placement, bounds and sensitivity while Gen1Recomp `TouchControls` are still hit-tested first in raw OS-window space.
+- **Compatibility shim:** `EngineViewportCompat` now exposes TouchSkin-aware physical/logical drawable rectangles, render geometry and drawable-local touch conversion while preserving historical whole-window fallback on older hosts.
+- **Regression:** added `tests/android_viewport_parity.lua`, including a 2000x1200 phone / 1600x900 gameplay-drawable fixture, 55% internal-resolution normalization and full-frame worldOverride placement checks.
+- Retains v0.3.46 Kanto ledges/route-edge parity, v0.3.45 Kanto warp/interior parity, and all earlier Kanto reconstruction fixes.
+
+# v0.3.46 — Kanto ledges + exact route-edge overlap
+
+- **Yellow-authored ledges in Kanto free roam:** the companion runtime now consumes `field.ledges` directly, including tileset/facing/input/standing/ledge tile rules. Valid ledges perform the original one-way two-cell hop instead of behaving like ordinary blocked scenery.
+- **Route-seam ledge landings:** ledges whose second cell is on a connected map now resolve through the authored connection offset. This covers the same important vanilla shapes as current Gen1Recomp, including Route 4 -> Route 3 and the final Route 17 -> Route 18 Cycling Road drop.
+- **FIRST/THIRD PERSON ledge support:** continuous movement gives ledges first refusal when the collision body reaches the authored cliff. The body re-anchors for the two-cell hop and the Kanto player proxy exposes a vertical arc/hop flag, so the voxel renderer lifts the trainer instead of sliding through the cliff. Grid/DIORAMA and authored forced movement use the same ledge resolver.
+- **Exact connection overlap:** shifted route edges no longer clamp an out-of-overlap source coordinate into the destination map's corner. Such crossings are rejected, preserving the real connected strip and preventing corner snaps/stranding while retaining v0.3.45 neighbour collision and Surf checks.
+- **Diagnostics/regression:** added `yellowLedgeHops`, `yellowLedgeSeamHops`, and `kantoConnectionEdgeRejects`, plus `tests/kanto_ledge_route_parity.lua` covering in-map hops, a Route-4-equivalent seam hop, and non-overlap rejection.
+- Retains v0.3.45 Kanto warp/interior parity, v0.3.44 GameViewport compatibility, and v0.3.43 THIRD PERSON/Kanto performance behavior.
+
+# v0.3.45 — Kanto warp + interior parity
+
+- **Current Gen1 map-adapter parity:** Kanto's private Yellow map object now uses the source map's real cell width for warp/sign keys and exposes `signAtCell`, `connection`, `warpPadOrHoleAt`, and the current FACILITY/CAVERN/INTERIOR stale-cache pad/hole fallback table. Water/door/warp/counter tile reads now preserve Gen1Recomp's border-extension behavior where the engine does.
+- **Completed-step ExtraWarpCheck:** after the ordinary door/warp-tile arrival test, Kanto now performs the non-door collision/extra-warp test when the facing direction is still held or authored forced movement owns the landing. Current `field.warpCarpets` rules are honored; old caches keep the engine's edge-facing fallback.
+- **Victory Road physical hole:** story-free Kanto now restores the walkable Yellow Victory Road 3F hole at `(23,15)`, landing on Victory Road 2F `(22,16)`, without enabling Yellow story/cutscene ASM.
+- **Warp diagnostics:** status now counts held/forced extra-warp arrivals, pad transitions, hole transitions, and physical dungeon falls.
+- **Regression coverage:** `tests/kanto_warp_parity.lua` verifies current pad/hole IDs, width-based lookup, held-direction carpet warping, and Victory Road's physical fall.
+- Retains v0.3.44 GameViewport compatibility and v0.3.43 THIRD PERSON/Kanto frame-pacing behavior.
+
+# v0.3.44 — current Gen1Recomp viewport compatibility
+
+- Added a guarded `EngineViewportCompat` bridge so newer Gen1Recomp `GameViewport` layouts provide game-local logical and pixel dimensions without making the mod require that module on older hosts.
+- Voxel camera/render fallbacks now honor explicit `ctx.vw/vh` first, then the active game viewport, instead of silently falling back to the entire OS window.
+- Android camera-slider, direct right-thumb look and DIORAMA pinch polling now convert raw physical touch coordinates through `GameViewport.toLocal()` and ignore touches outside the gameplay viewport.
+- TouchControls hit-testing intentionally stays in raw OS-window coordinates because current Gen1Recomp draws the touch pad after viewport composition as window chrome.
+- `GoldPipelineBridge` now preserves explicit pixel metrics from the render-pipeline context instead of assuming logical dimensions are also physical dimensions.
+- Bridge diagnostics now expose viewport availability/active state and conversion counters.
+- Retains v0.3.43 THIRD PERSON custom-player animation repair, Character Selector motion-state bridge, shared-world BODY promotion and motion-aware Kanto cache warming.
+
+# v0.3.43 — THIRD PERSON animation + Kanto stutter fix
+
+- Continuous FIRST/THIRD movement now repairs the captured player pose to Gold's native 0/1 walk cadence before any sprite/model renderer consumes it. This fixes custom six-frame trainer sheets that animated in DIORAMA but stayed on the stand frame in THIRD PERSON because free movement correctly leaves gameplay `Player.moving` false.
+- Kanto's excursion proxy now implements the same 16-frame 0/1 `Player:walkPhase()` contract as current Gen1Recomp instead of returning 1/2.
+- The optional Character Selector/`red_3d_player` bridge now temporarily mirrors native `progress`, `targetX/targetY`, `stepFrames`, visual movement vector and animation distance during `drawVoxel`, then restores the real Gold player fields. Skins that key animation from step progress now receive the same motion state as DIORAMA without exposing fake movement to gameplay.
+- Fixed a v0.3.42 shared-world hitch: current-map promotion no longer synchronously constructs a FULL bordered/apron mesh that Kanto never draws. Connected/cached BODY meshes promote directly; cold maps queue an urgent persistent-cache-first BODY build cooperatively.
+- Persistent cache warming is now motion-aware. Desktop background warmers receive only ~0.5-1.5 ms while the player moves and 3-10 ms during visible idle play instead of the old 22-35 ms BALANCED/FAST slices; aggressive budgets remain available when the world is covered by a menu/loading presentation.
+- Once the Kanto disk warmer has scanned the full region with nothing left to queue, it latches complete instead of rescanning every render frame.
+- v0.3.42 shared-world BODY rendering, v0.3.41 viewport centering/spawn, native Gen-2 Kanto projection and the custom-player anchor fix remain intact.
+
+# v0.3.40 — Canonical Pallet landing + stricter native Gen-2 surfaces
+
+- KANTO FREE ROAM now treats Yellow's Red-house doorway `(5,5)` as canonical and only chooses the immediate authored landing cells around `(5,6)`. Opaque/numeric warp destinations no longer fall back to another Pallet warp or a town-wide nearest-walkable search.
+- Every persisted Kanto position with revision below 340, including positions already stamped by v0.3.39 under a neighboring map id, is discarded once and rebuilt from the canonical Pallet landing on the next Kanto entry. Gameplay progress keys are untouched. The corrected cell is immediately persisted as revision 340.
+- Pallet entry/resume validation now rejects warp/NPC cells, map border-filler blocks, and source tiles whose projected material is water/door/structure. `excursionState()` repeats the guard while Pallet is active so corrupted coordinates cannot survive into rendering.
+- Gen-2 donor surface classification is now conservative/pure-use: an unpinned donor tile must be used exclusively by one surface collision family before it can become ground/grass/water/door. Any mixed blocked/structure use removes it from generic surface replacement, preventing reused tree/roof/fence art from being painted across walkable Yellow terrain.
+- Accepted donor texture pixels now resolve directly through the donor tile's exact Gold/Silver PalMap slot and exact 2bpp shade before they enter the Kanto atlas. Unmatched unique Kanto art keeps the nearest safe donor slot fallback.
+- Bumped Kanto projection revision to `g2-native-340-r1` and persistent mesh geometry revision to `g2vx-340-r1`; old projected sectors rebuild once and cannot be revived from stale disk geometry.
+- Retains the v0.3.38 arbitrary custom-player frame/anchor correction plus all v0.3.29-v0.3.39 Kanto gameplay, camera, movement, streaming and cache work.
+
+# v0.3.39 — Kanto entry hardening + exact Gen-2 material projection
+
+- Replaced the narrow v0.3.37 Pallet saved-position migration with a revisioned migration: every pre-339 Pallet resume is rebuilt once from the authored Red's-house landing and immediately persisted as revision 339.
+- Pallet resumes now have to be in the same connected walkable component as the canonical landing, and warp/NPC cells are rejected. This catches disconnected scenery/tree pockets even when their locally-nearest cell is technically walkable.
+- Fixed a persistent-cache invalidation hole introduced by the v0.3.38 shape projection. `VoxelDiskCache` now uses geometry revision `g2vx-339-r2` and includes the synthetic projected tileset id, native donor id and projection revision in the body signature, so old Yellow/Gen-2 geometry cannot be revived after a presentation-shape change.
+- Gen-2 donor classification now combines real Gold/Silver `COLL_*` semantics with authored voxel-profile shape pins. A donor tree/fence/sign/roof/ledge/wall/stair/furniture/prop tile cannot be classified as generic ground merely because its shared 16px collision cell is walkable.
+- Shape-compatible donor families are matched more aggressively (tree-to-tree, fence-to-fence, roof-to-roof, ledge-to-ledge, etc.) while broad structure fallback stays guarded. This increases actual Gen-2 texture coverage without turning walkable terrain into scenery.
+- Kanto color conversion now uses the same exact 2bpp shade-index rounding as `GoldColorAtlas` while retaining each matched/nearest donor tile's exact Gen-2 PalMap slot.
+- Retains v0.3.38 arbitrary custom-player frame/anchor alignment, v0.3.37 Pallet authored-warp entry, and all earlier Kanto gameplay/streaming/cache systems.
+
+# v0.3.38 — Gen-2-native Kanto projection + custom player anchor
+
+- Reworked Yellow-backed Kanto presentation around a per-map **native Gen-2 donor**. If Gold/Silver has the same map id, that exact map supplies the palette/tileset context; otherwise outdoor Kanto prefers native `TilesetKanto`, interiors choose a matching Gen-2 family, and Johto is the fallback.
+- Generic Yellow ground/grass/water/shore surfaces now always take the nearest donor texture in the same semantic class. Doors and structures use guarded matching so unique Kanto landmarks are not randomly replaced.
+- Matched tiles use the donor tile's **exact Gen-2 PalMap slot**. Even an unmatched unique Kanto structure now uses the nearest same-material donor's PalMap slot while retaining its own pixels.
+- Gen-2 donor material classes are derived from the donor blockset's real `COLL_*` cells through Gen2 `Permissions` (walkable/grass/water/warp/solid), not Gen-1-style walkable tile lists.
+- Added runtime synthetic voxel profiles that remap native Gen-2 authored shape metadata onto matching Yellow tile ids. Trees, fences/posts, ledges, water, ground and related metadata therefore follow the same voxel construction rules as their Gold/Silver donor without rewriting Yellow gameplay tiles/collision. Source Kanto building templates remain available for unique layouts.
+- Fixed custom player alignment in voxel mode: `SpriteBillboards` now honors arbitrary `frameWidth`, `frameHeight`, `anchorX` and `anchorY`. The old fixed 16x16/x=8 card pivot could render wider custom characters (including Sonic-style skins) left/right of the actual player/collision body.
+- Retains v0.3.37 Pallet spawn recovery, v0.3.36 Safari/fishing/Game Corner/trades, v0.3.35 field/respawn rules, v0.3.34 Seafoam/Fly, v0.3.33 Cut/Strength/trainer sight/NPC roaming, v0.3.32 persistent sector cache, v0.3.31 hard residency/streaming, v0.3.30 analog movement and v0.3.29 camera correction.
+
+# v0.3.37 — Kanto Pallet spawn repair
+
+- Fixed KANTO FREE ROAM spawning around Pallet Town's right-side trees when the imported Yellow cache exposes opaque/numeric warp destinations. v0.3.36 incorrectly fell back to `def.width/def.height`, mixing 32px map-block dimensions with 16px player-cell coordinates.
+- Pallet entry now resolves Red's-house warp by destination name when available, otherwise uses Pallet's first authored warp/coordinate, with canonical `(5,5)` only as a final compatibility fallback.
+- The actual landing searches south of the door first and refuses warp cells or occupied NPC cells before widening around the door.
+- Added a one-way resume repair for the exact v0.3.36 dimension-derived Pallet position, and the validated entry point is persisted immediately so an existing bad save is corrected on the first v0.3.37 Kanto entry.
+- Retains v0.3.36 Safari/fishing/Game Corner/trades and all earlier Kanto movement, camera, streaming, caching, Johto-visual and field-system work.
+
+# v0.3.35 — Kanto second-region field systems
+
+- Added a Kanto-local Pokemon Center spawn (`yellowHealPointV1`). Entering/healing at a Yellow Center remembers a safe non-warp cell plus the matching LAST_MAP exterior without overwriting Gold's native `blackoutMap`.
+- Kanto battle losses now keep the visible player in Kanto, heal through Gold's real party state, and respawn at the last Kanto Center (Pallet fallback if none exists). KANTO FREE ROAM snapshots the hidden Johto map/cell; RETURN TO JOHTO restores that anchor if Gold's native whiteout moved it, while retaining money/party/save consequences.
+- Added `KANTO FIELD` to the START menu. Gold/Silver party + badge authority drives FLASH in extracted Yellow dark maps, DIG back to the remembered Kanto cave exterior, and TELEPORT to the Kanto Center point.
+- Rock Tunnel darkness now multiplies the live voxel lighting instead of replacing palettes/meshes; FLASH removes the multiplier immediately, so no sector rebuild/cache invalidation is needed.
+- Activated extracted Yellow spinner-arrow movement (`field.spinners`) through the same forced-movement runner used by Seafoam currents.
+- Added persistent hidden Game Corner coins through Gold's Coin Case / coin counter.
+- Activated Route 22/23 physical badge gates from `field.badgeGates`; progression checks Gold's real Kanto badge store and does not execute Yellow story ASM.
+- Retains v0.3.34 Seafoam/Fly/hidden-event behavior and all v0.3.29-v0.3.33 camera, movement, streaming, cache and Kanto gameplay work.
+
+# v0.3.34 — Kanto Seafoam + Fly + Hidden Events
+
+- Added data-driven Seafoam Islands boulder-hole progression from current Yellow `field.seafoam`: Strength can push authored boulders into extracted holes, hide the source rock, reveal/persist the lower-floor rock at its authored landing cell, and set a Kanto-local event without mutating Gold story flags.
+- Added Seafoam current playback from extracted RLE movement lists. Currents run through the normal Kanto grid mover so collision, warps and sector ownership remain authoritative; plugging the required boulders disables them persistently.
+- Added `KANTO FLY` to the START menu while Kanto free roam is active. It requires a Gold/Silver party member with FLY plus the STORM Badge, tracks visited Yellow Fly towns, uses Yellow `field.flyWarps` landing coordinates, and excludes route-center/dungeon escape fly spots.
+- Added safe, non-story Yellow hidden interactions from `field.lua`: hidden items feed Gold's real Bag and persist as taken; hidden PC tiles open Gold's PC; trash cans respond; Gym statues show leader/winner status from Gold's Kanto badges.
+- Retains v0.3.33 Cut/Strength/trainer sight/WALK NPC behavior and all v0.3.29-v0.3.32 camera, movement, streaming and persistent-cache work.
+
+# v0.3.33 — Kanto field moves, trainer sight and living NPCs
+
+- Added Yellow-authored Cut block swaps in Kanto with Gold/Silver party + HIVE badge authority. Cut changes persist in the Kanto namespace and use `ChunkMesher.refresh` so voxel terrain rebuilds in place and stale disk-cache signatures are invalidated.
+- Added Gold-authorized Strength activation with PLAIN badge gating for Yellow `SPRITE_BOULDER` actors. Ordinary boulders push one safe cell at a time and persist their Kanto positions across visits.
+- Added Yellow trainer-header sight engagement: forward-facing, inclusive extracted range, blocked by walls/actors, then trainer walk-up to the adjacent cell before the existing Gold scripted battle bridge.
+- Fixed current Yellow object facing import: `STAY` objects now read `SPRITE_FACING_*` from the extractor's `range` field, with older movement-encoded cache shapes still accepted.
+- Added bounded roaming for authored Yellow `WALK` NPCs with interpolated steps and collision/warp/Pokemon/player avoidance.
+- Strength resets on Kanto map handoffs/warps/region exit, while persistent boulder positions remain.
+- Seafoam's special boulder-hole/current cascade is intentionally not approximated by the ordinary pusher; it remains queued for a data-driven pass using the already-extracted Seafoam wiring.
+- Retains v0.3.32 persistent sector caching/background cooking, v0.3.31 hard region residency/palette precision, v0.3.30 true movement, v0.3.29 camera correction, v0.3.28 story-free Yellow gameplay and v0.3.25 announcer playback.
+
+# v0.3.32 — Persistent sector cache + aggressive Kanto cooker
+
+- Rebuilt the formerly disabled voxel disk cache around `EngineCompat.fs()` / Gen1Recomp persistence routing instead of direct mod `love.filesystem` access.
+- BODY and FULL terrain/water vertex streams are revision/map/tile/UV/seam-mask signed, byte-count validated, and commit metadata is written last so interrupted/stale entries are always misses.
+- Cache hits skip `Structures` + `runGeometry` and cooperatively upload raw vertices in chunks. Freshly built terrain lands in the scene before auxiliary grass/figures and before cache writing.
+- Added cache-only Kanto warming jobs: every Yellow outdoor BODY sector can be derived and persisted without allocating a GPU mesh. Real visible terrain jobs always preempt warmers.
+- Desktop cache-only work gets a substantially larger idle CPU slice than mobile, so a PC can fill the Kanto sector cache quickly while the active scene remains playable.
+- Direct/predicted Kanto sectors now request BODY plus their exact FULL seam-masked mesh while still offscreen. Cached BODY can appear immediately while FULL finishes ahead of the camera, reducing first-visit pop as well as repeat-visit delay.
+- RETURN TO JOHTO still cancels unfinished Kanto warmers and unloads Kanto render residency; completed persistent sector files stay on disk for future Kanto visits.
+- Retains v0.3.31 hard region residency/palette precision, v0.3.30 true-direction movement, v0.3.29 camera correction, v0.3.28 Kanto gameplay and v0.3.25 announcer playback.
+
+# v0.3.31 — Kanto predictive streaming, hard residency and palette precision
+
+- Split Johto and Yellow Kanto into hard render-residency domains. Kanto is no longer progressively attached to Gold while the player is in Johto; region switches force immediate previous-region voxel cache eviction.
+- RETURN TO JOHTO releases Kanto private decoded atlases, sprite images/ImageData, foreign map adapters, NPC/Pokemon presentation caches and sector cache while retaining imported Yellow source/gameplay data and persistent Kanto progress.
+- Added offscreen direct-neighbour body-mesh prefetch plus movement-direction second-ring prefetch so adjacent terrain can finish before the player reaches the seam.
+- Moved neighbour actor distance rejection ahead of `entitiesForMap`, preventing far sectors from decoding NPC sheets or constructing ambient Stadium Pokemon until they are actually near the player.
+- Cached Kanto sector topology and reduced Gold palette-profile polling from every render frame to at most four checks per second.
+- Johto donor texture matches now inherit the donor tile's exact Gen-2 PalMap slot, fixing the remaining v0.3.30 mismatch where Johto-looking pixels could still be shaded by a broad Kanto semantic slot.
+- Retains v0.3.30 true-direction movement, v0.3.29 Kanto camera correction, v0.3.28 free-roam systems and v0.3.25 announcer playback.
+
+# v0.3.30 — Kanto true directional movement + Johto texture/palette integration
+
+- Replaced the Yellow/Kanto excursion's final four-direction quantization in FIRST/THIRD PERSON with a continuous 360-degree camera-relative body matching Johto's 16px scale, 5.5px collision radius and 1px/60Hz walking speed. Analog magnitude and diagonals are preserved, with axis-separated wall sliding.
+- Kanto cell ownership still changes at 16px boundaries and continues to drive persistent position, arrival warps, roaming/static Pokemon contact and optional classic encounter rolls. Connected-map seams and collision/edge warps remain explicit handoffs instead of allowing the free body outside a map.
+- DIORAMA and SURF retain grid movement, matching Johto's existing special-state handoff rather than reimplementing Surf physics.
+- Restored Gold/Johto as the Kanto color authority. A canonical Johto outdoor map supplies the eight-slot Gold palette profile so Kanto does not inherit Yellow-authored town/cave tints or a hidden native-Kanto/interior palette.
+- Added guarded Johto texture donors. Kanto 8x8 tiles are pattern-matched only against Johto tiles in the same semantic class (water/shore/grass/ground/door/structure); safe matches use the real Johto pattern, while unmatched/unique Kanto landmark art is preserved.
+- Retains v0.3.29 rendered-map third-person camera collision, all v0.3.28 Yellow free-roam gameplay systems, v0.3.27 Kanto renderer parity, and v0.3.25 announcer playback.
+
+## v0.3.28 — Yellow Kanto free-roam conversion
+
+- Restored Yellow-authored Kanto palette families; Kanto no longer inherits the hidden Johto map's active tint.
+- Fixed Yellow NPC/sign interaction by loading `text_pointers.lua` and resolving object/sign `TEXT_*` constants to their extracted text labels. `text_asm` story/cutscene handlers are explicitly not executed.
+- Loaded `trainer_headers.lua` for battle/after-battle trainer dialogue. Yellow trainers and all eight Gym Leaders continue through Gold's Gen-2 battle runtime; Gym wins now populate Gold's real Kanto badge store.
+- Added persistent Yellow free-roam position, item pickups, trainer wins and one-off/static Pokemon outcomes. RETURN TO JOHTO preserves the hidden Gold world and KANTO FREE ROAM resumes Kanto where it was left.
+- Yellow item objects now add compatible items through Gold's four-pocket `Bag`; Yellow Marts open the Gen-2 Mart UI with compatible Yellow stock; Pokemon Centers call Gold's `World:healParty`; PCs prefer Gold's `World:openPc`.
+- Added Gold SURF traversal on Yellow water using Gold's party move and Fog Badge eligibility; returning to land dismounts automatically.
+- Visible and classic Yellow encounters still feed Gold wild battles/catching. Static Yellow map Pokemon now persist after capture/defeat and return if the player runs.
+- Retains v0.3.27 native Kanto renderer parity and v0.3.25 Stadium 1 announcer playback.
+
+## v0.3.27 — Native Gen-2 Kanto parity
+
+- Removed the last runtime geometry branch that selected higher-quality behavior by the literal `TilesetJohto` / `TilesetJohtoModern` name.
+- Added profile-driven `tree_crown` metadata so native Gold Kanto trees use the same authored stepped-crown hull machinery as Johto trees.
+- Added per-cell source-art checks and separate round-template cache signatures, so boulders, cut trees, urns and other collision-derived cylinders cannot accidentally inherit tree crowns.
+- Added explicit `tree_art` metadata for Kanto, Johto and Johto Modern forest-border/apron inference; older profiles retain the former cylinder/planter/canopy fallback.
+- Kept Kanto's own tile IDs and collision/art vocabulary rather than cloning Johto IDs onto Kanto. Shared Gen-2 hop-lip and collision-class shaping remains region-neutral.
+- Expanded the conservative adaptive Kanto building scan from 24×16 to 40×32 source tiles so larger one-off city landmarks can be recovered when they use the verified Kanto roof/base/door frame; exact templates still claim first.
+- Retained the v0.3.26 native-Kanto building recovery and companion-Kanto seam/warp repairs.
+- Stadium 1 announcer import/cache/playback remains unchanged from the v0.3.25 fix.
+
+## v0.3.26
+
+- Substantial Kanto repair pass covering both Gold's native Gen-2 Kanto and the optional Yellow companion-region Kanto.
+- Native `TilesetKanto` now has a conservative roof-only fallback so unmistakable pitched/slate roof art remains top-facing even when a landmark is not in the exact building catalogue.
+- Added a Kanto-only adaptive framed-building path: after exact templates have first claim, an unclaimed facade with Kanto's real base frame, roof cap and a real door is modeled from its own map tiles with the existing sprite-to-voxel building pipeline. This fixes one-off facade/window/sign variants without inventing map-specific dimensions.
+- Yellow companion Kanto now repairs missing reciprocal surface connections and reversed offsets in stale imported caches while preserving conflicting authored edges as warnings.
+- Yellow `PLATEAU` maps now participate in outside/LAST_MAP semantics and the stitched surface graph.
+- Yellow excursion warps now distinguish arrival, collision and edge triggers; remember the last outside map for `LAST_MAP`; require valid destination warp coordinates; and no longer fall back to arbitrary map-center coordinates.
+- Added safe Pallet recovery for invalid companion-Kanto excursion positions and new Kanto seam/warp diagnostics.
+- Retains the v0.3.25 shared PC/Android Stadium 1 announcer importer/playback fix and TEST STADIUM ANNOUNCER action.
+
+## v0.3.25
+
+- Fixed the remaining Stadium announcer no-voice path on both PC and Android: persisted announcer WAVs are now read back through the same Gen1Recomp persistence backend that saved them, then supplied to LÖVE as in-memory WAV/FileData instead of assuming a relative disk path is visible to the audio engine.
+- Kept one shared Stadium 1 importer/extractor/playback implementation for PC and Android; only the platform file picker differs.
+- Added **TEST STADIUM ANNOUNCER** to Mod Settings. After a successful Stadium 1 import it immediately plays known spoken clip 223, providing a direct end-to-end voice test without requiring a battle.
+- Audio playback now treats `Source:play()` returning `false` as a real failure instead of marking the clip active merely because the Lua call did not throw.
+- The existing 823-clip ROM extraction, Stadium 2 importer, and native Android/desktop picker flows remain intact.
+
+## v0.3.24
+
+- Fixed Android Stadium announcer imports that could report READY but produce no audible voice.
+- ROM-derived announcer WAVs now use Gen1Recomp's persistence filesystem instead of binary `mod.storage` records.
+- Every generated WAV is read back after writing; the final cache is accepted only after clips 000, 223, and 822 validate and clip 223 successfully opens through the audio engine.
+- Old v0.3.23 ROM-cache markers are ignored, so installing this version and re-importing Stadium 1 performs a clean verified rebuild.
+- The Android system Files picker and Stadium 2 model/world import flow are unchanged.
+
+## v0.3.23
+
+- Extended the existing Android Storage Access Framework / Files picker instead of adding a desktop-only builder: the same **STADIUM 1 / 2 ROM FILE** row accepts either Stadium 2 or Pokemon Stadium (USA) v1.0.
+- Stadium 2 selections retain the v0.3.22 001-251 model/world importer unchanged. Stadium 1 USA v1.0 selections are recognized before that path and routed into StadiumBattleFX validation/caches.
+- Added an Android-safe pure-Lua Stadium 1 speech archive reader and MORT decoder. It inventories the cartridge's nested `S1` archive and incrementally converts all **823** 16 kHz announcer streams to private cached WAV data without Python, shell commands or the desktop `mort_decoder` executable.
+- Announcer extraction advances in small frame budgets during normal updates and reports `S1 VOICE ###/823` in the ROM option row to avoid one long blocking decode on mobile.
+- A rejected/wrong Stadium 1 selection now has its own error path and does not mark an existing Stadium 2 model cache failed.
+- No ROM bytes or announcer recordings are shipped; voice audio is derived only from the player's selected legally obtained Stadium 1 image and stored in mod-scoped cache storage.
+- Preserves all v0.3.22 StadiumBattleFX audit behavior and prior Stadium2/weather/flight/follower/live-battle systems.
+
+## v0.3.22
+
+- Completed a second-pass file/behavior audit against the full user-supplied **StadiumBattleFX 2.1.7** archive. All **77/77** source Lua modules remain embedded byte-for-byte; v0.3.21's copy was complete, but the audit found important source behaviors that were copied without being on Gold's active execution path.
+- Activated the source `effects/StadiumFxPlayer` and `effects/StadiumNativeInterpreter` for exact source-timed move emissions, including the dedicated traced Thunder Shock/Thunder Wave, Scratch, Sand Attack, Quick Attack, Gust, Horn, Leer, String Shot, Confusion, kick and tackle render paths.
+- Added **STADIUM NATIVE SCHEDULER** to independently enable/disable the exact native scheduler while retaining the lighter cartridge/generic overlay fallback.
+- Added optional source Stadium 1 **DSM7 native metadata** cache support. With the player's validated private Stadium 1 ROM, Gen-1 species now use the source 151×165 move attachment bytes and native move-camera selector/cut-delay metadata; Gen-2-only species keep the existing Stadium2 fallback anchors/camera profiles.
+- Native source attachment requests resolve against the currently animated Stadium2 actor instead of installing the uploaded mod's competing Stadium1 model host.
+- Activated source `StadiumScreenFx.present` borderless replay, `FailureNotice`, `StadiumLog` and `StadiumLogExport`; added **STADIUM FX FALLBACK NOTICE**, **REBUILD STADIUM FX CACHE** and **SAVE DIAGNOSTIC SNAPSHOT** controls.
+- Added attack-camera ownership negotiation so a compatible external Battle Cinematics camera can claim the attack-camera role without two directors fighting each other.
+- Documented the source systems deliberately **superseded rather than missed**: its alternate Stadium1 model/provider stack, embedded Gen1-oriented Stadium2 importer, provider-owned whole-frame compositor, ordinary portable arena themes and external BattleArt/PotatoVoxel compatibility. Those would conflict with or regress this project's Gold-aware 001–251 Stadium2 renderer, double battles, live encounter-world arenas and controller HUD; source boss rooms/effects/metadata remain active where useful.
+- The uploaded/public 2.1.7 source remains voice-free. The complete announcer engine/captions and optional locally generated 823-clip voice-pack path remain preserved.
+- Added `stadiumBattleFxAudit()` and `stadiumBattleFxRebuild()` exports for diagnostics/integration.
+- Preserves v0.3.20 modern live-battle motion and all v0.3.21 weather/flight/follower/controller/render systems; Gold remains authoritative for battle rules and HP.
+
+## v0.3.21
+
+- Ported the battle-presentation systems from the user-supplied MIT **StadiumBattleFX 2.1.7** source into this Gold/Stadium2 mod without replacing Gold's battle engine or the existing full Gen-2 Stadium 2 model owner. The original source tree and license/notices are retained under `lib/StadiumBattleFX217/` plus the root attribution files.
+- Integrated the complete **165-move source roster**: Stadium dispatch metadata, move-specific visual/delivery families, source-calibrated duration/impact timing, body-only flags, attachment requests and melee/combo/ranged/sustained/aerial/field/status/self/explosion cinematic profiles now feed the Gold live-battle presentation.
+- Added **STADIUM CARTRIDGE FX**. AUTHENTIC ONLY renders the source's cartridge-calibrated prominent-move programs; ALL 165 additionally enables its deterministic generic renderer for the complete roster; OFF leaves this mod's existing depth-aware world-space effect layer alone.
+- Added an optional private **Pokemon Stadium (USA) v1.0** import (`ed1378bc12115f71209a77844965ba50`). When present, StadiumBattleFX locally builds the ROM-derived effect texture, Gym Leader Castle/Elite Four/Champion arena and trainer-portrait caches. No Stadium 1 ROM bytes or extracted cache are shipped.
+- Adapted StadiumBattleFX's animated origin/impact attachment concept to the already-loaded Stadium 2 skeletal actors through `Stadium.attachmentWorld`, so effect anchors follow live animated model matrices instead of installing the source mod's competing Gen-1 model host.
+- Integrated source attack-camera staging into the existing Stadium battle camera, with windup/travel/impact/recovery subject changes, orbit/width cues and existing manual-camera priority.
+- Integrated toggleable source-driven hit reactions and faint animations while preserving Gold HP/faint authority and v0.3.20 render-only knockback.
+- Added optional ROM-derived **STADIUM BOSS ARENAS** for compatible Kanto Gym Leader Castle rooms plus Elite Four/Champion rooms. Ordinary fights remain in this mod's live overworld arena rather than replacing its core encounter-world feature.
+- Added optional ROM-derived **STADIUM TRAINER PORTRAITS** for compatible source classes. Unsupported Gold-only trainer classes safely keep their normal Gold art.
+- Ported StadiumBattleFX's announcer event/timing engine and added **ANNOUNCER BATTLES** scope plus **ANNOUNCER CAPTIONS**. The public 2.1.7 source ZIP is intentionally voice-free, so audible Stadium calls require the user's own locally built 823-clip `assets/announcer` pack; no voice recordings are redistributed here.
+- Added BATTLE toggles for the master source port, cartridge layer, screen wash, attack camera, attack speed, camera width, hit reactions, faint animations, boss arenas, trainer portraits, announcer, announcer scope and captions.
+- Preserves v0.3.20 modern live-battle motion, controller HUD, double battles, battle transparency/backgrounds, Weather FX, flight, ambient sky Pokemon, followers, performance controls and all existing Stadium2 overworld systems.
+
+## v0.3.20
+
+- Upgraded **modern live Stadium battles** without replacing Gold's actual turn/damage/HP/PP/status/switch/item/catch logic. The new layer is presentation and direct-control only.
+- Direct Pokémon movement now uses true analog acceleration/deceleration instead of fixed per-frame translation. Camera-relative left-stick/WASD control has soft stopping, faster reversal, configurable TIGHT/MODERN/SMOOTH feel, arena-wall sliding and a loose combat tether so the fight cannot drift apart.
+- Contact-style damaging moves now visibly close distance with a short render-only lunge, commit the attacker during the performance, then return to the stable manual-control anchor. Projectile/status/global moves do not fake contact movement.
+- Real HP loss now drives defender knockback scaled by damage fraction. This is visual only: the battle position used by Gold never changes.
+- The Stadium battle camera follows temporary lunge/recoil positions, narrows FOV during active attacks, adds damage-scaled impact zoom and deterministic camera shake, then eases back to the menu/inter-turn frame.
+- Added **MODERN LIVE BATTLE MOTION**, **BATTLE MOVEMENT FEEL**, and **BATTLE IMPACT FEEDBACK** under the BATTLE settings category.
+- Double-battle partner anchors remain independent; the selected partner can still be moved without dragging the other Pokémon.
+- Preserves v0.3.19 Weather FX integration, v0.3.17 flight seam 3D-player continuity, v0.3.13+ crash-safe landing, ambient sky Pokémon, custom battle UI and existing Stadium skeletal/effect renderers.
+
+## v0.3.18
+
+- Replaced the old `lib/Weather.lua` four-mode CLEAR/RAIN/FOG/RAIN+FOG renderer with an embedded **Weather FX 4.10.0 visual/weather-state port**.
+- Added Weather FX regional fronts and the full selectable weather catalogue: clear/sun/heatwave/harsh sun, light/heavy/primal rain, storm/gale, snow/blizzard/hail/sleet/thundersnow, sand/dust/ash, strong winds/flock/swarm, haunted mist/dragon/brawl/plain/verdant fronts, smog/fog/psystorm.
+- Weather FX now drives the Stadium2 voxel atmosphere in 3D: cloud decks, weather sky grading, depth-aware rain/fog, light shafts/motes and its wet/puddle presentation. Weather types the 3D backend does not draw as world-space particles (snow, hail, sand, ash) retain Weather FX's 2D particle layer instead of falling back to the removed legacy renderer.
+- Added Weather FX lightning, splashes, rain/thunder/wind audio, automatic spell timing, Johto-aware fronts, time-of-day weighting and seasons.
+- Added a dedicated **WEATHER FX** settings category. `WEATHER FX` replaces the old `3D WEATHER` row and `MOVING CLOUDS` has been removed because Weather FX owns cloud presentation.
+- This is intentionally a **visual/weather-state port**. Weather FX's bundled Steel/Fairy/Dark type registry changes, Delta/weather-form Pokémon, wild encounter substitutions, tornado warps and battle-rule mutations are vendored for source attribution/compatibility but are **not installed** into this package.
+- Preserves v0.3.17 flight seam 3D-player continuity, v0.3.16 ambient flying Pokémon/unrestricted connected flight, crash-safe Circle/B landing, visible Surf, battle presentation and all existing Stadium/voxel systems.
+- Preserved `weatherfx/lib/voxel_atmos/LICENSE-kanto-dynamic-weather` and `NOTICE.md` with the vendored Campo Kanto Dynamic Weather atmosphere code.
+
+## v0.3.17
+
+- Fixed the 3D player turning into Gold's non-animated 2D trainer card after flying across an unrestricted/unvisited map connection.
+- Gold `setMap()` always runs `CheckUpdatePlayerSprite`; destination edge cells can temporarily force SURF or BIKE even though Fly Your Pokemon still owns movement. Flight now normalizes those temporary map-entry player states back to NORMAL while airborne.
+- Added an explicit `_flyYourPokemonFlight3D` rider-presentation marker and taught the Character Selector/Stadium bridge to ignore Gold's temporary Surf/Bike special-card suppression only while flight is actually active.
+- The fix applies to both native seamless connections and the v0.3.16 unrestricted fallback used for previously inaccessible/unvisited connected areas.
+- Landing clears the flight presentation marker, so normal Surf/Bike behavior still uses its intended player presentation afterward.
+- Preserves v0.3.16 ambient sky Pokemon, unrestricted connected flight, v0.3.15 direct steering, and the crash-safe Circle/B landing path.
+
+## v0.3.16
+
+- Removed the free-flight discovery lock. Physical Flight now crosses normal outdoor map connections whether or not the destination has been visited before; the old `mountDiscoveryGates` / `AREA NOT VISITED` path is gone. This changes only connected overworld traversal, not indoor/cave takeoff rules or landing safety.
+- Added **AMBIENT SKY POKéMON** (default ON) and **SKY POKéMON DENSITY** (LOW/NORMAL/HIGH) under Fly Your Pokémon settings.
+- Ambient flyers are location-aware rather than globally random: the system prefers flying/airborne species found in the current map's encounter data, borrows from directly connected routes when needed, then uses conservative forest, mountain, coast, ruins, cold-area, town and route pools with day/night weighting. Legendaries are explicitly excluded.
+- Ambient flyers are presentation-only: they never enter Gold's `world.entities`/`world.npcs`, never collide, never trigger battles, never alter encounter RNG, and are merged only into the voxel/Stadium render scene.
+- Ambient flyers use Stadium 2 models when available, drift/turn/bob at varied altitudes, and have sun-shadow casting disabled to keep the feature light on the voxel renderer. NORMAL density is intentionally small (usually 2, sometimes 3 on large maps).
+- Preserves v0.3.15 direct live-input flight steering, v0.3.13+ controller crash isolation / Circle-B landing, visible Surf, followers, battle systems, FPS controls and voxel performance changes.
+
+## v0.3.15
+
+- Fixed v0.3.14 flight steering being completely unresponsive. Gold's fixed-step order calls `world:pollInput()` before `world:step()`; v0.3.14 copied the fresh stick vector in the first seam and then reset it at the start of the second seam before Flight used it.
+- Flight no longer depends on GoldCameraControls' temporary `_stadiumFreeIntentX/Z` fields. Airborne `World:pollInput` now suppresses Gold's ground movement owner, while the flight solver reads `FirstPerson.moveVector()` / the live engine Input table directly once per logic tick.
+- FIRST/THIRD PERSON keep camera-relative analog/D-pad steering. DIORAMA now has explicit map-relative flight steering instead of silently requiring a free-camera rung.
+- Releasing the stick yields an immediate zero vector; changing direction is consumed on the same tick. GoldCameraControls' stale continuous-walk fields are cleared before and after the flight tick, so there is no auto-forward or double movement.
+- Circle/B LAND, controller face-button quarantine, render-only Stadium mount handling, and the v0.3.13 crash-isolation path are unchanged.
+
+## v0.3.14
+- Fixed the v0.3.13 regression where flight could keep moving forward and ignore new D-pad/left-stick steering.
+- Root cause: FlyYourPokemon returned before `GoldCameraControls` could refresh `_stadiumFreeIntentX/Z`, while GoldCameraControls' `stepBody` tail continued replaying the stale vector from before takeoff.
+- Flight now allows GoldCameraControls to sample the live input and perform its camera-relative conversion, copies that fresh world-space vector, then clears all Gold continuous-movement ownership fields before its movement tail runs.
+- The air solver now runs exactly once from the guarded `World:stepBody` tail using the captured vector. `Player:update` no longer performs a second/conditional free-flight move.
+- A logic tick with no fresh steering input is explicitly zero movement, preventing stale auto-forward.
+- `FirstPerson.driving()` (camera engaged + overworld owns controls) is now the preferred free-flight input gate, preventing movement behind menus/overlays.
+- Circle/B LAND, the v0.3.13 pre-world-step landing transition, face-button quarantine, Stadium render-only carrier, Visible Surf and the 3D player restore remain unchanged.
+
+## v0.3.13
+
+- Reworked the flight landing path after Circle/B could still crash in v0.3.12. The remaining global `love.gamepadpressed` / `love.gamepadreleased` wrapper has been removed; flight no longer owns a callback above Gen1Recomp's controller stack.
+- Circle/B is now detected only from Gold's queued logical `b` action at `input.step`. The edge is removed before `Input:step`, then landing is committed before `World:step` begins.
+- LAND is now a minimal state transition. It no longer restores monkey-patched world methods, parks/retags the Stadium carrier, writes options to disk, polls `isGamepadDown` for the landing button, or calls controller/mobile vibration in the crash-sensitive landing frame.
+- Water LAND is temporarily fail-closed in this crash-isolation release: Circle/B over water keeps flight active and reports `LAND OVER SOLID GROUND`; the Pokémon SWIM action remains the supported path into visible Surf.
+- `GoldVoxelBridge` now submits the presentation-only Stadium mount only while `mountRenderActive` is true. Landing turns that flag off, so the 3D mount disappears without mutating or deleting the carrier table while renderer/world code may still hold references.
+- Any v0.3.09-v0.3.12 post-world landing bridge is disabled on hot reload, and any v0.3.12 global LÖVE gamepad bridge is neutralized into a transparent pass-through. A full process restart is still recommended when replacing an older build so stale hook closures cannot survive.
+- Preserves v0.3.10 swim-to-shore 3D-player restoration, v0.3.11 render-only mount ownership, v0.3.12 fixed-step input quarantine, battle transparency/backgrounds, controller layouts, F6 camera, followers, FPS controls and voxel performance changes.
+
+## v0.3.12
+- Removed `FlyYourPokemon` from the `Game2:gamepadpressed` / `gamepadreleased` wrapper chain. The previous stack-dependent `flightInputOwned()` gate could fall through whenever another transparent/custom state sat above the overworld, allowing Cross/A back into Gold/BattleControllerUI despite the flight guard.
+- Added a stable top-level LÖVE gamepad bridge. While Flight is active it swallows face buttons plus START/SELECT before `SwitchDiagnostics`, Game2, CamControl, PerformanceRuntime or BattleControllerUI can see them. Circle/B still only queues the deferred LAND request; matching releases are swallowed with their press.
+- Added a second fixed-step quarantine on `input.step` before `Input:step`: A/B/START/SELECT queued state is cleared before Gold can promote it, and the cleanup runs both before and after other input-step hooks so synthetic injected edges cannot leak through either.
+- Controller mount shortcuts are polled from mapped gamepads instead of requiring another Game2 callback wrapper. D-pad/left-stick movement, right-stick camera and L2/R2 altitude remain outside the quarantine.
+- Preserves the v0.3.11 render-only Stadium carrier and v0.3.10 Visible Surf -> shore 3D-player restoration.
+
+## v0.3.11
+- Fixed the persistent controller crash while flying at its gameplay/render boundary. The Stadium mount carrier is now presentation-only and is **never inserted into Gold's `world.entities` list**; `GoldVoxelBridge` already merges it directly into the voxel scene. This prevents `World:interact` and other Gold entity scans from treating the synthetic carrier as a real NPC.
+- Hard-isolated airborne controller face buttons from Gold's input queue. Circle/B remains the dedicated deferred LAND input; Cross/A, Square/X and Triangle/Y do not become gameplay/interact edges while Flight owns the overworld. Matching face-button releases are swallowed as well.
+- Flight interaction guards, Stadium carrier creation and rider sync are armed immediately at takeoff instead of waiting for a later `Player:update`.
+- Added session-reset cleanup for legacy v0.3.08-v0.3.10 mount carriers that may survive a hot reload in `world.entities`.
+- Preserves v0.3.10 Visible Surf -> shore restoration of the Character Selector 3D player.
+
+## v0.3.10
+- Removed Cross/A from the flight landing path. LAND now uses PlayStation Circle / Xbox B / Switch B (or keyboard H).
+- Removed the last synchronous `M.land()` call from Gold's airborne interact wrapper; confirm is consumed safely while flying.
+- Landing now parks/hides and reuses the Stadium carrier instead of deleting it from the live Gold entity array during the world tick.
+- Fixed Visible Surf -> shore restore: stale Surf state is normalized on completed land steps and Character Selector's 3D player becomes eligible immediately.
+
+## v0.3.09
+- Fixed the remaining **Cross / A LAND crash**. Controller confirm no longer dismantles the flight/Stadium mount from inside LÖVE's `gamepadpressed` callback. It only queues a landing request there, swallows the confirm so Gold never receives an interact press, and performs the actual safe-landing / mount teardown from the Gen-2 post-world-step compatibility tail after player/entity iteration is finished.
+- Keyboard **H** uses the same deferred landing path while already airborne.
+- Kept the v0.3.08 direct Stadium flight-mount carrier/rendering behavior unchanged.
+
+## v0.3.08
+- Fixed **LAND** on controllers: while Flight owns the overworld, the selected layout's normal confirm button (PlayStation Cross / Xbox A / Switch A) lands directly and is swallowed before Gold can queue an A/interact edge. Landing is available even while the mount is moving.
+- Hardened landing/dismount cleanup: movement/interact guards unwind immediately, Stadium mount tags are released safely, and provider/render cleanup errors are contained instead of crashing the game.
+- Fixed invisible Stadium flight mounts: AUTO/STADIUM no longer requires a 2D follower sprite to exist before creating the mount. A species-tagged Stadium carrier is created directly from the selected party Pokemon, so an imported Stadium model can render beneath the rider even when the 2D mount-art provider has no matching sheet.
+- Updated the mounted HUD hint to show the active controller family's confirm button as LAND.
+
+## v0.3.06
+- Grounded normal land followers in the 3D renderer so species whose 2D follower art uses a hover offset (notably Gyarados and other serpentine/levitating sprites) no longer become physically elevated in the voxel world. Genuine ledge hops and water bobbing still keep lift.
+- Added simple Fly/Swim progression toggles directly to FLY YOUR POKéMON: REQUIRE FLY MOVE, REQUIRE SURF MOVE, and REQUIRE BADGES.
+- Added BATTLE -> STADIUM ATTACK ANIMATIONS (default ON) and gated the imported Stadium skeletal move-performance bridge through it.
+- Added UI / MENUS -> FPS COUNTER.
+- Added BLOB / FAST shadows and made LOW/MEDIUM performance presets use them. This draws soft contact shadows under actors without rendering the entire world a second time from the sun, cutting a major GPU/CPU cost while avoiding coarse shadow-map artifacts. Existing LOW/HIGH/SOFT real sun-shadow modes remain selectable.
+
+## v0.3.05
+- Added **FRAME RATE LIMIT** under PERFORMANCE / GRAPHICS: 30 / 45 / 60 / 90 / 120 / 144 FPS or UNLIMITED. The cap is presentation-only, so Gold's fixed-step gameplay speed, movement and music are unchanged. Default is 60 FPS to avoid wasting voxel CPU/GPU work on high-refresh displays.
+- Added **L1/R1 GAME SPEED** under UI / MENUS, default OFF. OFF swallows PlayStation L1/R1 and Xbox/Switch LB/RB before Gen1Recomp's built-in shoulder fast-forward handler; ON restores the original behavior. L2/R2 trigger controls are unaffected.
+- Optimized steady voxel rendering without deleting visual features: cooperative terrain meshing now gets one normal build slice per visible frame instead of two, with an emergency second slice only while the current terrain is still cold/missing.
+- LOW shadow quality now reuses its real shadow map for alternating presentation frames (30 Hz shadow updates at 60 FPS), cutting roughly half of the moving shadow-pass work while HIGH/SOFT still update every frame and standing scenes remain fully cached.
+- **SKY / FAST** water no longer copies the entire rendered scene or re-renders characters into a reflection texture that its shader never samples; **FULL SSR** keeps the complete world-reflection path.
+- Added conservative camera culling for off-screen dynamic actors, authored figures and far-neighbor grass/flowers/shadow detail while keeping connected terrain/water residency broader so OPEN WORLD does not expose empty voids.
+- Tightened asynchronous mesh-build time slices to reduce route-transition/camera hitching on phones, handhelds and integrated GPUs.
+- Preserves v0.3.04 FLY/SWIM party actions, follower spacing and zone-transition fixes, plus the existing controller-layout, F6-camera, render-resolution, battle-background/transparency and animated custom-player systems.
+
+## v0.3.04
+- Added **FLY** directly to a supported Pokemon's PARTY action list. It starts free overworld flight on that selected Pokemon instead of opening the vanilla Fly destination map.
+- Added **SWIM** directly to supported Surf mounts in the same PARTY action list. It starts Gold's native water movement with that selected Pokemon as the visible mount.
+- Fixed seamless-zone follower handoff reusing a stale/out-of-range trailer position and sending a follower to the opposite side of the next map. Invalid convoys now safely respawn under the player and trail back out.
+- Added **Player-Follower Gap** and **Pokemon-Pokemon Gap** (1-4 walked tiles) under FOLLOWERS / BEHAVIOR. Spacing follows the player's actual walked path around corners.
+
+## v0.3.02
+- Fixed the missing actual Flight control in Mod Settings. **FLY YOUR POKéMON** now begins with **FLY = OFF/ON**; switching it ON mounts an eligible party flyer and enters free-flight gameplay, while OFF performs a safe landing/dismount.
+- Added **FLYING POKéMON = AUTO / species** so the player can choose the flying mount directly from Mod Settings instead of relying on the M hotkey.
+- H/controller-X Flight activation now mirrors the same persisted Flight switch, and a Flight request made while the settings menu is busy is deferred until gameplay resumes.
+- v0.3.01 mount systems and the v0.3.00 battle-transparency/custom-background/custom-player changes remain intact.
+
+## v0.3.01
+- Added built-in **Fly Your Pokemon** ownership: Flight, Ground Ride and Visible Surf without loading Dramatic Sky Ride.
+- Added the documented 16-flight / 17-ground / 8-surf Gen-1/Gen-2 mount rosters, Fly/Surf + Johto badge gates, outdoor/story/discovery/landing safety, first/third-person continuous free flight, altitude controls, Flight Boost, Ground Gallop, reverse ledges and Suicune amphibious travel.
+- Added optional air encounters against this mod's visible roaming Pokemon, rider/follower visibility, mount cries/rumble, flight-music behavior, mount hints/altitude/gallop HUD, 2D-vs-Stadium mount rendering, realistic scale and per-species size overrides.
+- Stadium mount entities now use this mod's own Pokemon metadata and whole-model flight/ground/surf motion transforms; active Dramatic Sky Ride compatibility aliases/ownership paths were removed.
+- Keeps the v0.3.00 transparent battle UI and all v0.2.98+ custom image/player picker fixes unchanged.
+
+## v0.3.00
+
+- Rebuilt from the verified v0.2.98 baseline after the v0.2.99 packaging regression.
+- Fixed **TRANSPARENT BATTLE UI BG** so Gold's opaque shade-0 pixels inside the HP-bar, EXP-bar, and HUD-border tile sheets are alpha-keyed while the option is ON. This removes the remaining white strips behind and below the HP UI without erasing black borders, labels, colored HP/EXP fills, text, sprites, models, or effects.
+- Preserves the v0.2.98 custom animated player-sprite system, custom 2D battle-background picker, Android picker isolation, and all other v0.2.98 behavior.
+
+## v0.2.98
+
+- Added **CUSTOM PLAYER SPRITE** plus **PLAYER SPRITE SHEET** under 3D MODELS. The PC/Android/iOS picker accepts PNG/JPEG/BMP and feeds a six-frame animated sheet into Gold's native player `SpriteRenderer` so facing, walk cadence, bike steps, ledge offsets and voxel-card poses stay synchronized.
+- Custom player sheets use a vertical six-frame layout: Stand Down, Stand Up, Stand Left, Walk Down, Walk Up, Walk Left. Right is mirrored automatically. PNG alpha is preserved and recommended. The chosen sheet hot-swaps live and a disabled/reset option restores the latest engine-requested normal player sprite.
+- Custom-player replacements use fresh revisioned filenames and are validated before commit, so malformed/replaced images cannot resurrect stale PNG textures or destroy the currently working sheet.
+- Added **TRANSPARENT BATTLE UI BG** under BATTLE, default ON. It removes opaque white battle-UI paper fills while preserving the actual battle backdrop, borders/text, HP/EXP UI, models/sprites and translucent battle effects. OFF restores Gold's white cartridge-style UI paper.
+- Stadium 2 ROM, battle-background and custom-player mobile pickers now mutually yield through feature-specific pending markers around the shared `picked_rom.gb` native staging file.
+- Retains the v0.2.97 revisioned custom battle-background fix. No DSM7 rebuild is required.
+
+## v0.2.97
+
+- Fixed custom 2D battle backgrounds getting stuck on a previously selected PNG. Replacements now use a fresh revisioned filename and commit only after the new image decodes successfully.
+
+- Added **2D BATTLE BACKGROUND** under the BATTLE category. **A/Confirm or Right** opens a native PC/Android file picker; **Left** restores Gold's default white battle background.
+- Supports custom **PNG, JPEG, and BMP** images copied into the engine save directory, with image signature/size/decoder validation and no permanent arbitrary host-path access.
+- Custom images replace only the classic Gold 160x144 battle paper behind native 2D battle sprites. **LIVE OVERWORLD BATTLES** continues to use the captured voxel encounter world and takes priority automatically.
+- Android/iOS reuses Gen1Recomp's engine-owned document picker safely. A dedicated pending marker prevents its shared `picked_rom.gb` staging file from ever being mistaken for a Stadium 2 ROM; canceled mobile picks self-clear after the app resumes.
+
+## v0.2.95
+- **Kanto now uses the active Johto palette slots, not a Yellow/averaged tint.** The Yellow 2bpp atlas is recolored from the same eight active Gold background palettes using semantic water/grass/ground/door/structure slot mapping.
+- **Kanto Pokemon keep Stadium 2 model eligibility even if their generated 2D runtime sheet is missing.** Model-only roaming/authored Pokemon entities remain in the scene and are rescued by the Stadium renderer from their explicit Dex identity.
+- **Kanto 3D Character Selector animation/facing fixed.** The visible Kanto proxy temporarily mirrors its px/py, facing, step flip and animation clock onto the original Gold player only during the selector draw/shadow call, then restores the Johto player immediately.
+- **FIRST/THIRD PERSON Kanto controls are camera-relative.** Left-stick intent is rotated by the live camera yaw before the final Gen-1 grid-step direction is chosen, fixing forward/back/left/right after orbiting the camera.
+- VoxelScene pose capture now carries Kanto visual-moving/animation-distance state so external 3D player skins actually play their walking animation.
+- No DSM7 model-cache rebuild is required.
+
+## v0.2.92
+- Passed pause-menu layout width to the custom Spotify Stadium renderer so it can size its metadata area correctly.
+- Works with Spotify Stadium Edition v0.1.11 for smaller album art plus Artist / Album / Song scrolling text in the bottom-left.
+
+## 0.2.86
+
+- **Major no-feature-cut performance pass.** Added a PC-style `PERFORMANCE PRESET` with LOW / MEDIUM / HIGH / ULTRA / CUSTOM plus individual 3D render resolution, shadow quality, water reflections, world draw distance, Kanto sector prefetch and mesh-build-rate controls. MEDIUM is the new default. Presets only change quality/residency budgets; voxel terrain, Kanto, ocean, NPCs, Pokemon, weather, battles and 3D models remain available.
+- **Real internal 3D resolution scaling.** The voxel/depth/weather/water scene now renders at 40/55/75/100% before the existing Gold compose bridge scales it to the window, substantially reducing GPU fill cost on high-DPI/mobile displays without shrinking UI or changing collision/camera coverage.
+- **Far-world and actor culling.** OPEN WORLD/Kanto maps well outside the camera no longer consume terrain/grass/water/shadow draw calls; distant Kanto NPCs/Pokemon skip presentation work while their collision/trainer records remain live and stream back automatically. Yellow survey atlases are decoded progressively and capped by draw-distance policy instead of synchronously materializing the entire region at toggle-on.
+- **WORLD OCEAN is perimeter-only.** The old giant under-land plane is replaced by four coastline strips around each visible land component. Ocean is no longer drawn under Gold/Kanto land, still fills the sea gap between regions, and an offscreen coastline no longer starts the reflection/depth pass.
+- **Kanto Character Selector bridge hardened.** Pallet/Kanto player proxies now pass the original Gold player object to `red_3d_player` / 3D Character Selector while retaining the Kanto pose/coordinates, so imported/renamed/accessory skins remain selector-owned during the Yellow excursion.
+- **Pokemon Yellow trainer and Gym battles.** Interacting with authored Yellow trainer objects builds the real Yellow ROM party/levels and launches it through Gold's supported Gen-2 `World:startScriptedBattle` path against the player's Gold party. Brock, Misty, Lt. Surge, Erika, Koga, Sabrina, Blaine and Giovanni are recognized as Gym fights; wins persist in this mod's own save bucket. Generic Yellow trainers work through the same bridge. Plain NPC text may display, but Yellow story/cutscene/progression scripts remain intentionally disabled.
+- No Stadium DSM7 model-cache rebuild is required.
+
+## 0.2.84
+
+- Fixed **GEN-1 KANTO REGION** and **PALLET TELEPORT** being inert on Gold. Gen1Recomp's Gen2Compat intentionally aliases a mod-side `require("src.world.Map")` to Gold's Gen-2 Map class; v0.2.83 accidentally used that alias to classify inactive Red/Blue/Yellow map records, so every Gen-1 `OVERWORLD` map was rejected as non-outdoor before the region could render.
+- `TwinRegionWorld` now uses a private Gen-1 tile-map adapter for inactive caches, preserving Gen-1 tile IDs, walkable/water/grass/door semantics and connection placement without touching Gold's live Map class.
+- Inactive Red/Blue/Yellow cache reads now temporarily clear/restore `CacheFs.prefix` and invoke the engine's idempotent legacy Red-cache migration before probing, preventing `gold/red/...` double-prefix misses and supporting older Red imports.
+- **GEN-1 KANTO REGION is now truly independent.** Turning it ON temporarily promotes voxel residency to the full stitched world even when `OPEN WORLD` is OFF. The saved OPEN WORLD preference is not changed.
+- **PALLET TELEPORT** uses the corrected same region loader, so it can resolve `PALLET_TOWN` / `REDS_HOUSE_1F`, enter the outdoor Gen-1 excursion and return to the untouched Johto position normally.
+- No Stadium model-cache rebuild is required.
+
+## 0.2.83
+
+- Added **PALLET TELEPORT** to Gold's START menu. The destination is resolved from the imported Gen-1 `PALLET_TOWN` map by finding the warp to `REDS_HOUSE_1F`, then choosing a nearby walkable outdoor cell, rather than hard-coding one ROM-specific coordinate.
+- While teleported, the Stadium renderer re-roots on the imported Gen-1 outdoor Kanto graph and a presentation-local player proxy can walk its real Gen-1 collision cells and connection seams. Gold's live player/map/save location is never overwritten.
+- The START row changes to **RETURN TO JOHTO**, which drops the excursion and immediately reveals the exact Gold location/state left underneath.
+- Gold movement and interaction are suppressed while the Kanto excursion is active so the hidden Johto player cannot walk into NPCs/warps from the same directional/A input.
+- Exposed `twinRegionWorld`, `teleportToPalletTown`, `returnToJohto`, `togglePalletTeleport`, and `palletTeleportStatus` for companion mods such as Dramatic Sky Ride.
+- No Stadium model-cache rebuild is required.
+
+## 0.2.82
+
+- Added **WORLD OCEAN**: an independent toggle that places one reflective low water plane beneath/around the rendered Gold voxel world. It expands to the complete stitched bounds in OPEN WORLD and sits below native map water so rivers/lakes keep their own surfaces.
+- Added **GEN-1 KANTO REGION**: an independent OPEN WORLD toggle that auto-detects an already imported Red/Blue/Yellow Gen-1 cache, reconstructs its authentic outdoor cardinal connection graph, namespaces every foreign runtime map id, and places the whole visual region east/right of Gold across a 384-world-pixel ocean gap. Gold remains the collision/script/NPC/warp authority in this first twin-region release.
+- Gen-1 terrain uses the inactive cache's real generated tileset atlas when the host can decode cached PNG bytes directly; a semantic true-color atlas is a fail-safe fallback rather than allowing the Gold renderer to fail. Foreign maps share the existing ChunkMesher/VoxelScene/Structures stack instead of installing a competing world pipeline.
+- Extended the existing OPEN WORLD ZOOM LIMIT with **TWIN 16X** and **ATLAS 24X** ceilings so the doubled Gold + Gen-1 survey layout can actually fit into a pulled-back diorama view; startup remains 1x and the existing 2.2x/4x/8x/12x choices remain unchanged.
+- Updated against current Gen1Recomp `dev` `3588a5f3fe00efffc92ad0ed037a6224f4db55a1`, including its current versioned `CacheFs` layout and Gen-1 cardinal connection placement rules.
+
 ## 0.2.81
 - **Party leader swaps now replace the visible follower immediately.** Trainer FOLLOW mode is bound to the selected party slot (slot 1 by default) instead of following the old Pokemon fingerprint through a PARTY -> SWITCH reorder. The persistent follower selection is reconciled before trailer/2D/3D/water sprite sync, so the first frame after a party swap uses the new leader.
 - **Same-species leader swaps are no longer missed.** Trailer composition now compares the actual party-mon object as well as species, so swapping between two copies of the same species (including shiny/non-shiny copies) rebuilds the follower correctly.

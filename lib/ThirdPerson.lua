@@ -42,6 +42,27 @@ local Voxel = V.require("VoxelState")
 
 local ThirdPerson = {}
 
+-- The camera must collide against the SAME map graph VoxelScene is drawing.
+-- Gold normally renders its live world, but the Yellow/Kanto free-roam layer
+-- deliberately leaves that Gold world resident underneath and supplies a
+-- presentation-local map/player state.  Querying Game2.world here therefore
+-- collides a Kanto camera boom against Johto and can collapse THIRD PERSON
+-- all the way into the head.  VoxelScene updates this context once per render
+-- from its authoritative state; ordinary Johto frames use the same path.
+local renderedWorld = nil
+
+function ThirdPerson.setWorldContext(ctx)
+  if type(ctx) == "table" and ctx.map then
+    renderedWorld = ctx
+  else
+    renderedWorld = nil
+  end
+end
+
+function ThirdPerson.worldContext()
+  return renderedWorld
+end
+
 -- ------- the boom's numbers
 --
 -- BOOM is world pixels behind the pivot at full extension. A cell is 16 and
@@ -61,6 +82,23 @@ local ThirdPerson = {}
 ThirdPerson.BOOM = 48
 ThirdPerson.PIVOT_LIFT = 4
 ThirdPerson.SHOULDER = 4
+
+-- The 2D trainer card is presentation art, not a physical 16px-tall slab that
+-- should balloon just because the third-person eye is close to it.  At the
+-- normal 48px boom the old world-space card occupied roughly a quarter of a
+-- phone-height frame, and a collision-compressed/zoomed boom could make it
+-- suddenly enormous.  Keep the card's apparent height capped by shrinking its
+-- world-space presentation size in direct proportion to the ACTUAL boom
+-- length.  Because perspective size is also proportional to 1/distance, the two
+-- cancel and the player stays visually stable while NPCs/world geometry keep
+-- ordinary perspective.
+--
+-- REFERENCE is the distance at which a native 16px trainer reaches full size;
+-- farther away we never enlarge it above its authored dimensions.  The minimum
+-- only protects the transition frame where the boom is almost inside the head;
+-- FirstPerson.hidePlayer removes the card completely once it is truly too close.
+ThirdPerson.PLAYER_CARD_REFERENCE = 64
+ThirdPerson.PLAYER_CARD_MIN_SCALE = 0.20
 
 -- how long the eye takes to slide out to the boom (and back into the head
 -- when 1ST is picked), in seconds -- the same order as FirstPerson's own
@@ -196,6 +234,28 @@ function ThirdPerson.showsPlayer()
   return ThirdPerson.extension() > 0 and ThirdPerson.len >= ThirdPerson.SHOW_AT
 end
 
+-- Scale for the PLAYER'S flat voxel card only. `frameHeight` lets imported
+-- high-resolution player sheets participate in the same cap instead of turning
+-- 32/48px source art into a 32/48-world-pixel giant.  The scale eases in with
+-- the boom so switching camera modes never pops the trainer smaller in one
+-- frame.  NPCs do not call this and therefore retain normal world perspective.
+function ThirdPerson.playerCardScale(frameHeight)
+  local e = ThirdPerson.extension()
+  if e <= 0 then return 1 end
+
+  local h = math.max(1, tonumber(frameHeight) or 16)
+  local len = math.max(0, tonumber(ThirdPerson.len) or 0)
+  local reference = math.max(1, tonumber(ThirdPerson.PLAYER_CARD_REFERENCE) or 64)
+  local minScale = math.max(0.05, math.min(1,
+    tonumber(ThirdPerson.PLAYER_CARD_MIN_SCALE) or 0.20))
+
+  -- Normalise higher-resolution/custom frames back to the native 16px trainer
+  -- footprint, then compensate for the live boom distance.
+  local target = (len / reference) * (16 / h)
+  target = math.max(minScale, math.min(1, target))
+  return 1 + (target - 1) * e
+end
+
 -- ------- the world the boom has to fit through
 --
 -- Everything below asks the live overworld and pcall-guards the asking:
@@ -204,6 +264,12 @@ end
 -- nothing in it.
 
 local function overworld()
+  -- Prefer the state that is actually on screen.  This is essential for the
+  -- Yellow/Kanto twin-region runtime, whose rendered map is intentionally not
+  -- installed into Game2.world.  It is also the correct source for ordinary
+  -- Johto because VoxelScene refreshes the context from that same live state.
+  if renderedWorld and renderedWorld.map then return renderedWorld end
+
   -- Gold's standalone voxel host supplies the live Game2 instance on V.game.
   -- Gen 1 keeps using the original singleton fallback. Both expose the common
   -- map API this boom collision code needs.

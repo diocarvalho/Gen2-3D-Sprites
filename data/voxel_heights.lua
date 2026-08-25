@@ -425,6 +425,16 @@ local profile = {
         [0x1F] = { { below = { 0x2F }, class = "planter" } },
       },
       cylinder = { 0x1E, 0x1F, 0x3E, 0x3F },
+      -- v0.3.27: geometry metadata, deliberately NOT a shape class.  These
+      -- are the four source tiles of Johto's actual tree crown/underside.
+      -- Structures uses them to select the authored stepped tree mask instead
+      -- of keying that higher-quality treatment to the word "Johto".
+      tree_crown = { 0x1E, 0x1F, 0x3E, 0x3F },
+      -- Complete Johto tree-art vocabulary for border/apron inference.
+      tree_art = { 0x1E, 0x1F, 0x2E, 0x2F, 0x3E, 0x3F },
+      -- The two-cell tree wall is the same crown with a middle course, and
+      -- should use the same tree mask rather than the potted-plant spray cap.
+      planter_tree_crown = true,
       -- $4C is the cliff's FOOT as well as the ledge's lip -- the same
       -- eight pixels of dark rim, and the mountain drawings ($0A, $6C-$6F,
       -- $72, $73) end on a course of it. There it is the bottom band of a
@@ -5099,6 +5109,9 @@ profile.tilesets.TilesetJohtoModern = {
   flower = { 0x03 },
   signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
   cylinder = { 0x1E, 0x1F, 0x3E, 0x3F },
+  -- v0.3.27: same data-driven single-tree crown path as Johto/Kanto.
+  tree_crown = { 0x1E, 0x1F, 0x3E, 0x3F },
+  tree_art = { 0x1E, 0x1F, 0x3E, 0x3F },
   when_above = {
     [0x4C] = { { above = { 0x3C, 0x4B, 0x4C, 0x4D }, class = "wall" } },
   },
@@ -5307,6 +5320,15 @@ profile.tilesets.TilesetKanto = {
   -- them flat where they run into a blocked cell, which is where the
   -- fallback would otherwise raise them.
   ground = { 0x10, 0x11, 0x23, 0x2C, 0x30, 0x39 },
+  -- v0.3.26: conservative roof-only fallback for Kanto's one-off buildings.
+  -- Exact Buildings.lua templates still claim the common structures first.
+  -- These ids are the unambiguous cap/field/verge tiles shared by the Kanto
+  -- pitched and slate roofs; deliberately omit ambiguous 07/22/25/26/28/29/32
+  -- because those also appear in ordinary or facade contexts.  If a landmark
+  -- does not match an exact/derived full-building template, at least its roof
+  -- now stays top-facing instead of folding into a generic upright wall box.
+  roof = { 0x05, 0x06, 0x08, 0x09, 0x12, 0x15, 0x16, 0x17, 0x18, 0x19,
+           0x38, 0x4C, 0x4D, 0x4E, 0x53, 0x5A, 0x5C, 0x5D, 0x5E, 0x5F },
   -- class $29 is Kanto's water, and these four are the only tiles ever drawn
   -- in one: $14 the open surface, $33 and $31 the shore courses, $54 the
   -- ripple.
@@ -5340,6 +5362,13 @@ profile.tilesets.TilesetKanto = {
   -- pin: their cells carry classes $12 and $7B, which the collision map
   -- already rounds.
   cylinder = { 0x2A, 0x2B, 0x3A, 0x3B, 0x40, 0x41, 0x50, 0x51 },
+  -- v0.3.27: Kanto now participates in the SAME authored tree-crown path as
+  -- Johto.  This is metadata, not another shape pin: it tells Structures
+  -- which already-round cells are real trees, so the stepped canopy mask is
+  -- used for these eight Kanto tree-art tiles but NOT for collision-derived
+  -- cut trees, boulders or other round props.
+  tree_crown = { 0x2A, 0x2B, 0x3A, 0x3B, 0x40, 0x41, 0x50, 0x51 },
+  tree_art = { 0x2A, 0x2B, 0x3A, 0x3B, 0x40, 0x41, 0x50, 0x51 },
   -- KANTO'S RAIL FENCE, the run that pens Pallet's yards and lines the
   -- ridge above Viridian: $0E over $55, one cell per bay, and drawn
   -- nowhere else in the set.  Its cells are plain $07, so a fence read as

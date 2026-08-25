@@ -244,12 +244,10 @@ end
 -- where the canvas cannot be made -- VoxelScene then keeps the flat decal
 -- shadows, which need nothing but a quad.
 function ShadowMap.available()
-  -- SHADOWS OFF answers here rather than at the call sites, so it takes
-  -- exactly the same route a driver without a depth canvas takes: the sun
-  -- pass never begins and VoxelScene falls back to the flat decal shadows
-  -- it already carries for that case. One path, already written and
-  -- already tested, instead of a second way of having no shadow map.
-  if Quality.shadowsOff() then return false end
+  -- SHADOWS OFF means genuinely no shadows in v0.2.87.  The sun pass stops
+  -- here, while VoxelScene separately knows not to draw its driver-fallback
+  -- decal shadows.  A missing/unsupported depth canvas still uses those decals.
+  if Quality.shadowsOff() or (Quality.blobShadows and Quality.blobShadows()) then return false end
   if not (love.graphics and love.graphics.newCanvas
           and love.graphics.setDepthMode) then
     return false
@@ -275,7 +273,7 @@ end
 -- the world would wear one frozen frame of shadows forever, while the
 -- decal fallback ALSO drew because castShadows had stopped running.
 function ShadowMap.active()
-  if Quality.shadowsOff() then return false end
+  if Quality.shadowsOff() or (Quality.blobShadows and Quality.blobShadows()) then return false end
   return ready and canvas ~= nil and canvas ~= false
 end
 
@@ -541,6 +539,11 @@ function ShadowMap.begin(cx, cy, vw, vh)
     prevCanvas = nil
     return false
   end
+  -- From the moment the nested target is bound, an exception in any later
+  -- setup call must be unwindable by abort(). Mark the pass live before those
+  -- calls instead of only after shader setup succeeds.
+  drawing = true
+  ready = false
   prevBlend, prevAlphaMode = love.graphics.getBlendMode()
   -- white clears to depth 1 + 1/255, past the far plane: a texel nothing
   -- was drawn into can never shadow anything
@@ -556,8 +559,6 @@ function ShadowMap.begin(cx, cy, vw, vh)
   -- the world until a cast pass says otherwise, reset per pass so one that
   -- forgot to put it back cannot leak into the next map's terrain
   pcall(sh.send, sh, "sprite", 0)
-  drawing = true
-  ready = false
   return true
 end
 
@@ -592,11 +593,9 @@ function ShadowMap.draw(mesh, texture, model)
 end
 
 -- Close the pass and stamp it with the signature it was drawn for.
-function ShadowMap.finish(sig)
-  if not drawing then return end
-  drawing = false
-  love.graphics.setShader()
-  love.graphics.setDepthMode()
+local function restoreAfterPass()
+  pcall(love.graphics.setShader)
+  pcall(love.graphics.setDepthMode)
   local target = prevCanvas
   prevCanvas = nil
   if preserveCallerCanvas() and target ~= nil then
@@ -605,18 +604,58 @@ function ShadowMap.finish(sig)
     -- Desktop: exact v0.2.45 pass-exit behavior.
     pcall(love.graphics.setCanvas)
   end
-  love.graphics.setBlendMode(prevBlend or "alpha", prevAlphaMode)
-  love.graphics.setColor(1, 1, 1, 1)
+  pcall(love.graphics.setBlendMode, prevBlend or "alpha", prevAlphaMode)
+  pcall(love.graphics.setColor, 1, 1, 1, 1)
+end
+
+function ShadowMap.finish(sig)
+  if not drawing then return end
+  drawing = false
+  restoreAfterPass()
   lastSig = sig
   ready = true
   deferred = 0
 end
 
+-- Optional sun shadows must never be allowed to tear down the whole voxel
+-- frame. If a driver/mesh throws while the shadow map is being refreshed,
+-- unwind the nested canvas/shader/depth state and mark the map unreadable.
+-- VoxelScene then continues the SAME 3D frame using its ordinary fallback,
+-- and a later settled frame can retry because lastSig is not advanced here.
+function ShadowMap.abort()
+  if not drawing then return false end
+  drawing = false
+  ready = false
+  restoreAfterPass()
+  deferred = 0
+  return true
+end
+
 -- Drop the GPU objects (window resize, hot reload).
 function ShadowMap.invalidate()
+  if canvas and canvas ~= false and type(canvas.release) == "function" then
+    pcall(canvas.release, canvas)
+  end
+  if blank and blank ~= false and type(blank.release) == "function" then
+    pcall(blank.release, blank)
+  end
   canvas, canvasRes, blank = nil, 0, nil
   drawing, ready, lastSig = false, false, nil
   deferred = 0
+end
+
+-- Shadow resolution/filter changes must invalidate a READY map even while the
+-- camera is standing perfectly still. v0.2.86 only consulted the new quality
+-- on the next stale signature, which made the settings row look inert.
+local shadowMod = V and V.mod
+if shadowMod and shadowMod.events and type(shadowMod.events.on) == "function" then
+  pcall(shadowMod.events.on, shadowMod.events, "mod.options_changed", function(payload)
+    if type(payload) ~= "table" then return end
+    if payload.mod ~= nil and payload.mod ~= shadowMod.id then return end
+    if payload.key == "performancePreset" or payload.key == "graphicsShadows" then
+      ShadowMap.invalidate()
+    end
+  end)
 end
 
 return ShadowMap

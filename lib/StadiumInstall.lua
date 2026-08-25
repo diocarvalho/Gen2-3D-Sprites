@@ -335,7 +335,7 @@ function StadiumInstall.beginFrom(bytes, label)
   local rom, err = RomReader.open(bytes)
   if not rom then
     if gen == 2 then
-      return false, "Gold/Silver needs a Pokemon Stadium 2 ROM: " .. tostring(err)
+      return false, "Gold/Silver/Crystal needs a Pokemon Stadium 2 ROM: " .. tostring(err)
     end
     return false, tostring(err)
   end

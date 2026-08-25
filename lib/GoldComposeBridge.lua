@@ -18,6 +18,23 @@ local function customUIEnabled()
   return value ~= false
 end
 
+local function world3DEnabled()
+  if VoxelBridge and type(VoxelBridge.world3DEnabled) == "function" then
+    local ok, enabled = pcall(VoxelBridge.world3DEnabled)
+    if ok then return enabled == true end
+  end
+  if VoxelBridge and type(VoxelBridge.voxelModeEnabled) == "function" then
+    local ok, enabled = pcall(VoxelBridge.voxelModeEnabled)
+    if ok then return enabled == true end
+  end
+  local options = mod and mod.options
+  if options and type(options.get) == "function" then
+    local ok, value = pcall(options.get, options, "voxel3d")
+    if ok and value ~= nil then return value ~= false end
+  end
+  return true
+end
+
 local Bridge = {
   installed = false,
   frames = 0,
@@ -192,6 +209,90 @@ local function drawGoldOverlayStack(game, world, ctx)
   return true, goldOverlayStateCount(game)
 end
 
+-- Draw-local native-2D guard. Gen1Recomp permits one active drawWorld pipeline,
+-- and optional companion mods (notably Character Selector / voxel providers)
+-- may still have theirs enabled even when THIS mod's 3D VOXEL WORLD switch is
+-- OFF. World:draw() would otherwise invoke that external pipeline and the user
+-- would still see 3D. Temporarily zero every active world pipeline only for the
+-- native redraw, then restore the exact live levels without syncing options.
+-- This never rewrites another mod's saved preference.
+local function withNativeWorldPipelinesSuspended(body)
+  local okP, Pipelines = pcall(require, "src.render.Pipelines")
+  if not (okP and type(Pipelines) == "table"
+      and type(Pipelines.list) == "function"
+      and type(Pipelines.level) == "function"
+      and type(Pipelines.setLevel) == "function") then
+    return pcall(body)
+  end
+
+  local saved = {}
+  local okList, entries = pcall(Pipelines.list)
+  if okList and type(entries) == "table" then
+    for _, entry in ipairs(entries) do
+      local id = entry and entry.id
+      local def = entry and entry.def
+      if id and type(def) == "table" and type(def.drawWorld) == "function" then
+        local okLevel, level = pcall(Pipelines.level, id)
+        level = okLevel and tonumber(level) or 0
+        if level and level > 0 then
+          saved[#saved + 1] = { id = id, level = level }
+          pcall(Pipelines.setLevel, id, 0)
+        end
+      end
+    end
+  end
+
+  local okBody, a, b, c = pcall(body)
+  -- Restore after the body even if drawing throws. There can only be one live
+  -- world pipeline under the engine contract, but iterate in reverse so this
+  -- remains correct if an older host allowed more than one level to linger.
+  for i = #saved, 1, -1 do
+    pcall(Pipelines.setLevel, saved[i].id, saved[i].level)
+  end
+  if #saved > 0 then
+    Bridge.native2DPipelineSuppressions = (Bridge.native2DPipelineSuppressions or 0) + 1
+  end
+  return okBody, a, b, c
+end
+
+local function drawGoldNative2DFrame(game, world, ctx)
+  if not (world and type(world.draw) == "function") then
+    return false, 0, "Gold 2D world has no draw()", 0
+  end
+  local G = love and love.graphics
+  if not G then return false, 0, "graphics unavailable", 0 end
+  local overlayCount, wildDrawn = 0, 0
+  local ok, drawErr = pcall(function()
+    G.push("all")
+    G.origin()
+    -- Draw Gold's authoritative 2D map first, then the mod-owned roaming
+    -- Pokemon fallback, then the stack. This preserves native layer order and
+    -- prevents visible Wilds from being painted on top of START/custom menus.
+    local okNative, nativeErr = withNativeWorldPipelinesSuspended(function()
+      world:draw()
+    end)
+    if not okNative then error(nativeErr or "native 2D world draw failed", 0) end
+    if WildsBridge and type(WildsBridge.drawFallback) == "function" then
+      local okWild, drawn, wildErr = pcall(WildsBridge.drawFallback, world)
+      if okWild then
+        wildDrawn = tonumber(drawn) or 0
+        Bridge.lastWildError = wildErr
+      else
+        Bridge.lastWildError = tostring(drawn)
+      end
+    end
+    local okOverlay, count, overlayErr = drawGoldOverlayStack(game, world, ctx)
+    if not okOverlay then error(overlayErr or "Gold 2D overlay redraw failed", 0) end
+    overlayCount = tonumber(count) or 0
+    G.pop()
+  end)
+  if not ok then
+    pcall(G.pop)
+    return false, 0, tostring(drawErr), wildDrawn
+  end
+  return true, overlayCount, nil, wildDrawn
+end
+
 local function drawGoldVoxelFrame(canvas, game, world, ctx)
   local G = love.graphics
   local ok, result, overlayCount, overlayErr = pcall(function()
@@ -330,6 +431,51 @@ local function composeCore(nextFn, host, ctx)
       Bridge.battleFallbackFrames = Bridge.battleFallbackFrames + 1
     end
   end
+
+  -- v0.4.16: native 2D is a first-class presentation mode, not "voxel
+  -- failed this frame". Check this BEFORE consuming render_pipelines output:
+  -- a mode change can happen between drawWorld and compose, and a stale 3D
+  -- renderedForCompose bit must never win over an explicit 2D selection.
+  -- Do not call VoxelScene at all while the master switch
+  -- is OFF. Gold remains the world owner; this bridge only adds mod-owned
+  -- visible Wilds in the correct layer and redraws custom pause overlays when
+  -- Game2's full-screen classification hides the live world behind them.
+  if not world3DEnabled() then
+    -- Discard a drawWorld result produced earlier in this same frame before the
+    -- option changed. The bit is edge-triggered; leaving it armed could make
+    -- the first later 3D frame consume an obsolete canvas.
+    if PipelineBridge and type(PipelineBridge.consumeRenderedFrame) == "function" then
+      pcall(PipelineBridge.consumeRenderedFrame)
+    end
+    if not worldActive then
+      Bridge.passthroughFrames = Bridge.passthroughFrames + 1
+      return nextFn(host, ctx)
+    end
+    local world2d = resolveWorld(game, host)
+    if not (world2d and world2d.map) then
+      Bridge.passthroughFrames = Bridge.passthroughFrames + 1
+      return nextFn(host, ctx)
+    end
+    -- Always own the live world frame in 2D. This is not just for Wilds or a
+    -- pause backdrop: an optional companion drawWorld pipeline may already have
+    -- painted a voxel canvas into ctx.sceneCanvas before compose. Redrawing the
+    -- authoritative Gold world with world pipelines suspended guarantees that
+    -- 3D VOXEL WORLD = OFF really means native 2D.
+    local ok2d, overlayCount, err2d, wildDrawn = drawGoldNative2DFrame(
+      game, world2d, ctx)
+    if ok2d then
+      Bridge.native2DFrames = (Bridge.native2DFrames or 0) + 1
+      Bridge.native2DOverlayFrames = (Bridge.native2DOverlayFrames or 0)
+        + ((stackTop(game) ~= nil) and 1 or 0)
+      Bridge.wildSpritesDrawn = Bridge.wildSpritesDrawn + (tonumber(wildDrawn) or 0)
+      Bridge.lastOverlayError = nil
+      return true
+    end
+    Bridge.lastOverlayError = err2d
+    Bridge.passthroughFrames = Bridge.passthroughFrames + 1
+    return nextFn(host, ctx)
+  end
+
 
   -- Current desktop Gold renders the voxel world earlier through the official
   -- render_pipelines drawWorld seam. In that case sceneCanvas already contains
@@ -532,6 +678,9 @@ function Bridge.status()
     battleFallbackFrames = Bridge.battleFallbackFrames,
     pipelineFrames = Bridge.pipelineFrames,
     passthroughFrames = Bridge.passthroughFrames,
+    native2DFrames = Bridge.native2DFrames or 0,
+    native2DOverlayFrames = Bridge.native2DOverlayFrames or 0,
+    native2DPipelineSuppressions = Bridge.native2DPipelineSuppressions or 0,
     lastVoxelError = Bridge.lastVoxelError,
     lastOverlayError = Bridge.lastOverlayError,
     lastWildError = Bridge.lastWildError,

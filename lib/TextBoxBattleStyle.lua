@@ -53,6 +53,10 @@ local function targetDimensions()
 end
 
 local function uiScaleFor(ww, wh)
+  local helper = mod and mod.exports and mod.exports.mobileUiScale
+  if helper and type(helper.scale) == "function" then
+    return helper.scale(ww, wh, 0.55, 1.40)
+  end
   return math.max(0.55, math.min(1.75, math.min(ww / 800, wh / 600)))
 end
 

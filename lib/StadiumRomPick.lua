@@ -67,7 +67,7 @@ end
 
 local function prompt()
   if isGen2() then
-    return "Choose your Pokemon Stadium 2 ROM (Gold/Silver models)"
+    return "Choose your Pokemon Stadium 2 ROM (Gen 2 models)"
   end
   return "Choose your Pokemon Stadium (US) 1.0 ROM"
 end

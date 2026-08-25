@@ -81,6 +81,7 @@ local Sky = V.require("Sky")
 local DayNight = V.require("DayNight")
 local ShadowMap = V.require("ShadowMap")
 local Mat4 = V.require("Mat4")
+local Quality = V.require("Quality")
 
 local Water = {}
 
@@ -99,7 +100,15 @@ Water.setting = ModSetting.new(Water.KEY, Water.LABEL,
                                { "FULL", "SKY", "OFF" })
 
 function Water.level()
-  local v = Water.setting:get()
+  -- v0.2.86: the PC-style graphics preset is the authoritative performance
+  -- policy. The old WATER ModSetting remains as a compatibility fallback for
+  -- older hosts/saves that do not expose the new schema.
+  local v = nil
+  if Quality and type(Quality.reflections) == "function" then
+    local ok, got = pcall(Quality.reflections)
+    if ok then v = got end
+  end
+  if v == nil then v = Water.setting:get() end
   if v == "off" then return 0 end
   if v == "sky" then return 1 end
   return 2

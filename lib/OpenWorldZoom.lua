@@ -20,6 +20,8 @@ M.LIMITS = {
   far = 4.00,
   world = 8.00,
   extreme = 12.00,
+  twin = 16.00,
+  atlas = 24.00,
 }
 
 local function option(key, fallback)
@@ -41,7 +43,11 @@ function M.dioramaMax()
 end
 
 function M.openWorldEnabled()
-  return option("openWorld", false) == true
+  -- v0.4.16: this is a 3D survey range, not a native Gold 2D zoom override.
+  -- OPEN WORLD may stay enabled as a remembered residency preference while the
+  -- player uses 2D, but the engine's normal 2D zoom ladder must remain native.
+  if option("voxel3d", true) == false then return false end
+  return option("openWorld", false) == true or option("gen1Region", false) == true
 end
 
 function M.install()

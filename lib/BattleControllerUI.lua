@@ -4,10 +4,12 @@
 -- switching and outcomes. This module owns the NORMAL live-3D battle screen's
 -- presentation and its four-command controller shortcuts:
 --
---     Triangle / Up      PKMN
---     Square   / Left    FIGHT
---     Circle   / Right   RUN
---     Cross    / Down    PACK
+--     Top face / Up      PKMN
+--     Left face / Left   FIGHT
+--     Right face / Right RUN
+--     Bottom face / Down PACK
+--
+-- Face-button names/glyphs follow CONTROLLER LAYOUT (PlayStation/Xbox/Switch).
 --
 -- Left stick/WASD are reserved for direct Pokemon movement. The right stick is
 -- consumed by BattleCinematic. The real controller D-pad remains available to
@@ -80,6 +82,87 @@ local function battleShortcutMode()
   if value == "native" or value == "off" then return "native" end
   if value == "dpad" or value == "arrows" then return "dpad" end
   return "face"
+end
+
+local function controllerLayoutModule()
+  local mod = V and V.mod
+  local C = mod and mod.exports and mod.exports.controllerLayout
+  return type(C) == "table" and C or nil
+end
+
+local function controllerPrompt(text)
+  local C = controllerLayoutModule()
+  if C and type(C.prompt) == "function" then
+    local ok, value = pcall(C.prompt, text)
+    if ok and value then return value end
+  end
+  return tostring(text or "")
+end
+
+local function controllerFace(role)
+  local C = controllerLayoutModule()
+  if C and type(C.face) == "function" then
+    local ok, value = pcall(C.face, role)
+    if ok and type(value) == "table" then return value end
+  end
+  local fallback = {
+    west={logical="x",label="SQUARE",kind="square"},
+    north={logical="y",label="TRIANGLE",kind="triangle"},
+    south={logical="a",label="CROSS",kind="cross"},
+    east={logical="b",label="CIRCLE",kind="circle"},
+  }
+  return fallback[role] or fallback.south
+end
+
+local function controllerLayoutName()
+  local C = controllerLayoutModule()
+  if C and type(C.layoutName) == "function" then
+    local ok, value = pcall(C.layoutName)
+    if ok and value then return tostring(value) end
+  end
+  return "PLAYSTATION"
+end
+
+local function confirmPadButton()
+  local C = controllerLayoutModule()
+  if C and type(C.confirmButton) == "function" then
+    local ok, value = pcall(C.confirmButton)
+    if ok and (value == "a" or value == "b") then return value end
+  end
+  return "a"
+end
+
+local function cancelPadButton()
+  local C = controllerLayoutModule()
+  if C and type(C.cancelButton) == "function" then
+    local ok, value = pcall(C.cancelButton)
+    if ok and (value == "a" or value == "b") then return value end
+  end
+  return "b"
+end
+
+local function overlayPadControl(button)
+  if button == confirmPadButton() then return "confirm" end
+  if button == cancelPadButton() then return "cancel" end
+  local dpad = { dpup="up", dpdown="down", dpleft="left", dpright="right" }
+  return dpad[button]
+end
+
+local function rawOverlayControl(button)
+  local C = controllerLayoutModule()
+  local switch = false
+  if C and type(C.current) == "function" then
+    local ok, value = pcall(C.current)
+    switch = ok and value == "switch"
+  end
+  if switch then
+    if button == 2 then return "confirm" end
+    if button == 1 then return "cancel" end
+  else
+    if button == 1 then return "confirm" end
+    if button == 2 then return "cancel" end
+  end
+  return nil
 end
 
 -- Forward declaration: the same visual-ready test used by the HUD is also the
@@ -753,11 +836,7 @@ function M.install(game)
       local screen = battleInputOwned(game)
       local handled = false
       if screen and overlayFor(screen) then
-        local controls = {
-          dpup = "up", dpdown = "down", dpleft = "left", dpright = "right",
-          a = "confirm", b = "cancel",
-        }
-        local control = controls[button]
+        local control = overlayPadControl(button)
         if control then handled = overlayControl(screen, control) end
         -- Square/Triangle are command buttons only on the command diamond.
         -- Swallow them while a selector is open so they never leak to Gold.
@@ -828,8 +907,8 @@ function M.install(game)
       local screen = battleInputOwned(game)
       local handled = false
       if screen and overlayFor(screen) then
-        if button == 1 then handled = overlayControl(screen, "confirm")
-        elseif button == 2 then handled = overlayControl(screen, "cancel")
+        local control = rawOverlayControl(button)
+        if control then handled = overlayControl(screen, control)
         elseif button == 3 or button == 4 then handled = true end
       else
         local shortcutMode = battleShortcutMode()
@@ -937,9 +1016,10 @@ function M.update(game)
       local o = overlayFor(screen)
       if o then
         local controls = {
-          a = "confirm", b = "cancel",
           dpup = "up", dpdown = "down", dpleft = "left", dpright = "right",
         }
+        controls[confirmPadButton()] = "confirm"
+        controls[cancelPadButton()] = "cancel"
         for button, control in pairs(controls) do
           local okDown, down = pcall(js.isGamepadDown, js, button)
           down = okDown and down and true or false
@@ -1043,6 +1123,7 @@ local function drawBattlerHud(screen, mon, side, ww, wh)
   local margin = math.max(18, wh * 0.025)
   local x = side == "enemy" and margin or ww - margin - w
   local y = margin
+  if side == "player2" then y = margin + h + math.max(8, wh * 0.010) end
   local r = math.max(12, h * 0.16)
   panel(x, y, w, h, r, 0.78)
 
@@ -1083,10 +1164,18 @@ local function drawBattlerHud(screen, mon, side, ww, wh)
     local sw = G.getFont():getWidth(st)
     G.print(st, x + w - sw - h * 0.18, by + bh + h * 0.06)
   end
+  if side == "player2" then
+    G.setColor(1, 1, 1, 0.50)
+    local tag = "PARTNER"
+    local tw = G.getFont():getWidth(tag)
+    G.print(tag, x + w - tw - h * 0.18, y + h * 0.16)
+  end
 end
 
-local function buttonIcon(kind, x, y, r, selected)
+local function buttonIcon(spec, x, y, r, selected)
   local G = love.graphics
+  spec = type(spec) == "table" and spec or { kind = tostring(spec or "cross"), label = "" }
+  local kind = spec.kind or "letter"
   local line = math.max(2, r * 0.10)
   G.setLineWidth(line)
   if selected then
@@ -1105,15 +1194,23 @@ local function buttonIcon(kind, x, y, r, selected)
     G.line(x + q, y - q, x - q, y + q)
   elseif kind == "triangle" then
     G.polygon("line", x, y - q * 1.1, x - q, y + q * 0.8, x + q, y + q * 0.8)
+  else
+    local f = font(math.max(12, r * 1.00))
+    if f then G.setFont(f) end
+    local label = tostring(spec.label or "")
+    local fw = G.getFont():getWidth(label)
+    local fh = G.getFont():getHeight()
+    G.print(label, x - fw * 0.5, y - fh * 0.54)
   end
 end
 
 local CHOICES = {
-  { index = 1, kind = "square",   label = "FIGHT", key = "LEFT",  dx = -1, dy = 0 },
-  { index = 4, kind = "circle",   label = "RUN",   key = "RIGHT", dx =  1, dy = 0 },
-  { index = 3, kind = "cross",    label = "PACK",  key = "DOWN",  dx =  0, dy = 1 },
-  { index = 2, kind = "triangle", label = "PKMN",  key = "UP",    dx =  0, dy = -1 },
+  { index = 1, role = "west",  label = "FIGHT", key = "LEFT",  dx = -1, dy = 0 },
+  { index = 4, role = "east",  label = "RUN",   key = "RIGHT", dx =  1, dy = 0 },
+  { index = 3, role = "south", label = "PACK",  key = "DOWN",  dx =  0, dy = 1 },
+  { index = 2, role = "north", label = "PKMN",  key = "UP",    dx =  0, dy = -1 },
 }
+
 
 commandReady = function(screen)
   if type(screen) ~= "table" or type(screen.battle) ~= "table" then return false end
@@ -1171,8 +1268,9 @@ local function drawCommandDiamond(screen, ww, wh)
   local shortcutMode = battleShortcutMode()
   if hintFont then G.setFont(hintFont) end
   G.setColor(1, 1, 1, 0.62)
-  local subtitle = shortcutMode == "native" and "NATIVE MENU INPUT"
-    or (shortcutMode == "dpad" and "D-PAD / ARROWS" or "FACE BUTTONS")
+  local subtitle = shortcutMode == "native" and ("NATIVE MENU INPUT — " .. controllerLayoutName())
+    or (shortcutMode == "dpad" and "D-PAD / ARROWS"
+      or ("FACE BUTTONS — " .. controllerLayoutName()))
   G.print(subtitle, x + w * 0.068, y + h * 0.155)
 
   local cx = x + w * 0.53
@@ -1190,7 +1288,7 @@ local function drawCommandDiamond(screen, ww, wh)
     local by = cy + item.dy * spreadY
     local on = selected == item.index
     if shortcutMode == "face" then
-      buttonIcon(item.kind, bx, by, iconR, on)
+      buttonIcon(controllerFace(item.role), bx, by, iconR, on)
     else
       -- D-pad/native modes deliberately avoid showing face-button glyphs that
       -- no longer own these commands. The compact direction plate still uses
@@ -1215,7 +1313,7 @@ local function drawCommandDiamond(screen, ww, wh)
   if hintFont then G.setFont(hintFont) end
   G.setColor(1, 1, 1, 0.68)
   local hint = shortcutMode == "native"
-    and "D-PAD SELECT    •    A CONFIRM    •    B BACK"
+    and controllerPrompt("D-PAD SELECT    •    CROSS/A CONFIRM    •    CIRCLE/B BACK")
     or "LEFT STICK MOVE    •    RIGHT STICK CAMERA"
   local hw = G.getFont():getWidth(hint)
   local footerY = y + h - G.getFont():getHeight() * 1.55 - math.max(5, h * 0.018)
@@ -1296,7 +1394,17 @@ local function drawMoves(screen, ww, wh)
 
   if metaFont then G.setFont(metaFont) end
   G.setColor(1, 1, 1, 0.58)
-  G.print("D-PAD / ARROWS SELECT    CROSS/A CONFIRM    CIRCLE/B BACK",
+  local duoPrefix = ""
+  if screen._stadiumDuoSelectingPartner then
+    local battle = screen.battle
+    local index = screen._stadiumDuoPartnerIndex
+    local mon = battle and battle.party and battle.party[index]
+    local name = mon and (mon.nickname or mon.name or mon.species) or "POKEMON 2"
+    duoPrefix = "PARTNER " .. cleanText(name) .. "    "
+  elseif screen._stadiumDuoPrimaryAction then
+    duoPrefix = "PARTNER MOVE    "
+  end
+  G.print(duoPrefix .. controllerPrompt("D-PAD / ARROWS SELECT    CROSS/A CONFIRM    CIRCLE/B BACK"),
           x + gap * 1.5, y + h - math.max(24, wh * 0.032))
 end
 
@@ -1337,7 +1445,7 @@ local function selectorFooter(G, o, x, y, w, h, gap, wh)
              w - gap * 3.2, "left")
   else
     G.setColor(1, 1, 1, 0.58)
-    G.print("D-PAD / ARROWS SELECT    CROSS/A CONFIRM    CIRCLE/B BACK",
+    G.print(controllerPrompt("D-PAD / ARROWS SELECT    CROSS/A CONFIRM    CIRCLE/B BACK"),
             x + gap * 1.5, y + h - math.max(28, wh * 0.035))
   end
 end
@@ -1654,6 +1762,13 @@ function M.drawFull(screen, ctx)
   local battle = screen.battle
   drawBattlerHud(screen, battle and battle.enemy, "enemy", ww, wh)
   drawBattlerHud(screen, battle and battle.player, "player", ww, wh)
+  local duo = V and V.DoubleBattleMode
+  if duo and type(duo.partnerForBattle) == "function" and battle then
+    local okPartner, partner = pcall(duo.partnerForBattle, battle)
+    if okPartner and partner then
+      drawBattlerHud(screen, partner, "player2", ww, wh)
+    end
+  end
 
   if drawCustomOverlay(screen, ww, wh) then
     -- Custom PACK / PKMN selectors live on the 3D battlefield.

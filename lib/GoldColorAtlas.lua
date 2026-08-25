@@ -62,6 +62,21 @@ local function modeName()
   return tostring(GbcPalette.mode or "gbc")
 end
 
+-- v0.3.59 cheap invalidation probe for Kanto's Gold-material projection.
+-- worldPaletteProfile below walks the PalMap several times and serializes all
+-- eight active palettes. That work is appropriate when the active material
+-- family changes, but not as a four-times-per-second polling mechanism.
+-- Return stable scalar/reference inputs so TwinRegionWorld can skip the full
+-- profile while daytime, color mode, palette-set identity and PalMap identity
+-- are unchanged.
+function GoldColorAtlas.worldPaletteInputs(world, map)
+  map = map or (world and world.map)
+  local set, daytime, err = paletteSetFor(world, map)
+  if not set then return nil, nil, nil, nil, err end
+  local ts = map and map.tileset or {}
+  return daytime, modeName(), set, ts and ts.tilePalettes or nil, nil
+end
+
 local function shadeIndex(r)
   -- Exact companion of src/render/GbcPalette.lua's shader math. Generated 2bpp
   -- source pixels are 1, 2/3, 1/3, 0, so this lands on 1..4 with headroom.
@@ -89,6 +104,141 @@ local function resolvedPalette(set, slot)
     if ok and resolved then return resolved end
   end
   return colors
+end
+
+-- A generation-neutral four-shade ramp representing the currently visible
+-- Gold world. Kanto's Gen-1 source art has no Gen-2 PalMap, so it cannot reuse
+-- Gold's eight per-tile slots one-for-one. Averaging each shade across the
+-- active Gold set preserves the exact Gold/Silver color mode + time-of-day
+-- family while leaving Yellow's own tile silhouettes/layout untouched.
+function GoldColorAtlas.worldRamp(world, map)
+  map = map or (world and world.map)
+  local set, daytime, err = paletteSetFor(world, map)
+  if not set then return nil, nil, err end
+  local out = {}
+  for shade = 1, 4 do
+    local sr, sg, sb, count = 0, 0, 0, 0
+    for slot = 1, 8 do
+      local colors = resolvedPalette(set, slot)
+      local c = colors and colors[shade]
+      if c then
+        sr, sg, sb = sr + (c[1] or 0), sg + (c[2] or 0), sb + (c[3] or 0)
+        count = count + 1
+      end
+    end
+    if count == 0 then return nil, nil, "Gold palette ramp is empty" end
+    out[shade] = {
+      math.floor(sr / count + 0.5),
+      math.floor(sg / count + 0.5),
+      math.floor(sb / count + 0.5),
+    }
+  end
+  local parts = { tostring(daytime or "DAY"), modeName() }
+  for shade = 1, 4 do
+    local c = out[shade]
+    parts[#parts + 1] = table.concat({ c[1], c[2], c[3] }, ",")
+  end
+  local key = table.concat(parts, "#")
+  return out, key, nil
+end
+
+-- v0.2.95: expose the ACTUAL eight active Gold/Johto background palettes, not
+-- just the averaged four-shade compatibility ramp. Yellow/Kanto has no Gen-2
+-- PalMap, so TwinRegionWorld uses the semantic slot hints below (water, grass,
+-- walkable ground, doors/structures) to map Yellow source tiles onto the same
+-- palette slots the current Johto map is using. This keeps Kanto in the exact
+-- active Gold color family while preserving Yellow's layouts and tile art.
+local function lookupHas(lookup, tile)
+  if type(lookup) ~= "table" then return false end
+  if lookup[tile] == true then return true end
+  for _, v in ipairs(lookup) do
+    if tonumber(v) == tile then return true end
+  end
+  return false
+end
+
+local function slotCounts(tilePalettes, predicate)
+  local counts = {}
+  if type(tilePalettes) ~= "table" then return counts end
+  for k, _ in pairs(tilePalettes) do
+    local tile = tonumber(k)
+    if tile then
+      -- Lua PalMap arrays are 1-based, while tile ids are 0-based.
+      tile = tile - 1
+      if not predicate or predicate(tile) then
+        local slot = tilePaletteIndex(tilePalettes, tile)
+        counts[slot] = (counts[slot] or 0) + 1
+      end
+    end
+  end
+  return counts
+end
+
+local function dominantSlot(counts, fallback)
+  local best, bestN = tonumber(fallback) or 1, -1
+  for slot = 1, 8 do
+    local n = tonumber(counts and counts[slot]) or 0
+    if n > bestN then best, bestN = slot, n end
+  end
+  return best
+end
+
+function GoldColorAtlas.worldPaletteProfile(world, map)
+  map = map or (world and world.map)
+  local set, daytime, err = paletteSetFor(world, map)
+  if not set then return nil, nil, err end
+  local slots = {}
+  for slot = 1, 8 do
+    slots[slot] = resolvedPalette(set, slot)
+  end
+
+  local ts = map and map.tileset or {}
+  local tilePalettes = ts and ts.tilePalettes
+  local all = slotCounts(tilePalettes)
+  local defaultSlot = dominantSlot(all, 1)
+  local waterLookup = (map and map.waterTiles) or (ts and ts.waterTiles)
+  local walkLookup = (map and map.walkable) or (ts and ts.walkable)
+  local doorLookup = (map and map.doorTiles) or (ts and ts.doorTiles)
+  local grassTile = tonumber(ts and ts.grassTile)
+
+  local waterSlot = dominantSlot(slotCounts(tilePalettes, function(tile)
+    return lookupHas(waterLookup, tile)
+  end), defaultSlot)
+  local groundSlot = dominantSlot(slotCounts(tilePalettes, function(tile)
+    return lookupHas(walkLookup, tile)
+  end), defaultSlot)
+  local doorSlot = dominantSlot(slotCounts(tilePalettes, function(tile)
+    return lookupHas(doorLookup, tile)
+  end), groundSlot)
+  local grassSlot = grassTile and tilePaletteIndex(tilePalettes, grassTile) or groundSlot
+  local structureSlot = dominantSlot(slotCounts(tilePalettes, function(tile)
+    return not lookupHas(waterLookup, tile) and not lookupHas(walkLookup, tile)
+      and tile ~= grassTile
+  end), defaultSlot)
+
+  local parts = { tostring(daytime or "DAY"), modeName(),
+    tostring(defaultSlot), tostring(waterSlot), tostring(groundSlot),
+    tostring(grassSlot), tostring(doorSlot), tostring(structureSlot) }
+  for slot = 1, 8 do
+    local colors = slots[slot]
+    for shade = 1, 4 do
+      local c = colors and colors[shade] or {0,0,0}
+      parts[#parts + 1] = table.concat({ c[1] or 0, c[2] or 0, c[3] or 0 }, ",")
+    end
+  end
+  local key = table.concat(parts, "#")
+  return {
+    slots = slots,
+    default = defaultSlot,
+    water = waterSlot,
+    shore = waterSlot,
+    ground = groundSlot,
+    grass = grassSlot,
+    door = doorSlot,
+    structure = structureSlot,
+    daytime = daytime,
+    mode = modeName(),
+  }, key, nil
 end
 
 -- Exported for the headless regression probe.

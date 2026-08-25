@@ -54,6 +54,15 @@ local StadiumMon = V.require("StadiumMon")
 
 local Stadium = {}
 
+local function stadiumFxFaintEnabled()
+  local port = V and V.StadiumBattleFXPort
+  if type(port) == "table" and type(port.faintAnimationsEnabled) == "function" then
+    local ok, enabled = pcall(port.faintAnimationsEnabled)
+    if ok then return enabled ~= false end
+  end
+  return true
+end
+
 -- The stored values of the two 3D-BTL rungs that select this mode. Strings
 -- rather than further booleans so an older save's `true` still means the
 -- 2D-3D it was written for (see OverworldBattle.setting).
@@ -128,6 +137,7 @@ function Stadium.begin(arena)
     arena = arena,
     groundY = 0,
     player = StadiumMon.new("player"),
+    player2 = StadiumMon.new("player"),
     enemy = StadiumMon.new("enemy"),
     -- what each side has been TRANSFORMED into, if anything (see install)
     transform = {},
@@ -144,6 +154,7 @@ end
 function Stadium.finish()
   if not session then return end
   session.player:release()
+  if session.player2 then session.player2:release() end
   session.enemy:release()
   session = nil
 end
@@ -371,6 +382,58 @@ function Stadium.updateGen2(dt, screen, groundY)
   if not battle then return end
 
   local arena = session.arena
+  -- v0.3.20: temporary live-combat offsets (contact lunges / hit recoil) are
+  -- render-only.  The stable arena anchors remain owned by direct control.
+  local modernMechanics
+  do
+    local okModern, got = pcall(V.require, "BattleModernMechanics")
+    if okModern and type(got) == "table" then modernMechanics = got end
+  end
+  local function combatOffset(side)
+    if not (modernMechanics and type(modernMechanics.actorOffset) == "function") then return 0, 0 end
+    local okOff, ox, oz = pcall(modernMechanics.actorOffset, side, arena)
+    if not okOff then return 0, 0 end
+    return tonumber(ox) or 0, tonumber(oz) or 0
+  end
+  local duo = V.DoubleBattleMode
+  local partner, partnerIndex
+  if duo and type(duo.partnerForBattle) == "function" then
+    local okPartner, p, i = pcall(duo.partnerForBattle, battle)
+    if okPartner then partner, partnerIndex = p, i end
+  end
+
+  local px, pz, ex, ez, perpX, perpZ
+  if arena and arena.player and arena.enemy and partner then
+    px, pz = arena.player[1], arena.player[2]
+    ex, ez = arena.enemy[1], arena.enemy[2]
+    local dx, dz = ex - px, ez - pz
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len > 0.001 then
+      perpX, perpZ = -dz / len, dx / len
+    end
+
+    -- v0.2.94: the duo partner owns a real independent arena anchor.  In
+    -- v0.2.93 its model position was recomputed from arena.player every frame,
+    -- so moving the lead dragged Pokemon #2 around with it.  Initialize once
+    -- per partner and then let BattlePokemonControl move this anchor directly.
+    if type(arena.player2) ~= "table"
+        or arena._stadiumDuoPartnerIndex ~= partnerIndex then
+      arena.player2 = {
+        (tonumber(arena.player[1]) or 0) + (perpX or 0) * 12,
+        (tonumber(arena.player[2]) or 0) + (perpZ or 0) * 12,
+      }
+      arena.player2Cell = {
+        math.floor((tonumber(arena.player2[1]) or 0) / 16),
+        math.floor((tonumber(arena.player2[2]) or 0) / 16),
+      }
+      arena._stadiumDuoPartnerIndex = partnerIndex
+    end
+  elseif arena then
+    arena.player2 = nil
+    arena.player2Cell = nil
+    arena._stadiumDuoPartnerIndex = nil
+  end
+
   for _, side in ipairs({ "enemy", "player" }) do
     local mon = session[side]
     local battler = battle[side]
@@ -400,16 +463,65 @@ function Stadium.updateGen2(dt, screen, groundY)
         local cell = arena[side]
         local other = arena[side == "player" and "enemy" or "player"]
         if cell and other then
+          local cx, cz = cell[1], cell[2]
+          -- In duo mode move the lead slightly off the centre line so the two
+          -- Stadium models stand side-by-side instead of occupying one spot.
+          if side == "player" and partner and perpX and perpZ then
+            cx, cz = cx - perpX * 8, cz - perpZ * 8
+          end
+          local ox, oz = combatOffset(side)
+          cx, cz = cx + ox, cz + oz
+          local otherSide = side == "player" and "enemy" or "player"
+          local oox, ooz = combatOffset(otherSide)
+          local otherX = (tonumber(other[1]) or 0) + oox
+          local otherZ = (tonumber(other[2]) or 0) + ooz
           Stadium.guard(side, mon, "gen2-build", function()
-            mon.model_matrix = mon:matrix(cell[1], session.groundY, cell[2],
-                                          other[1] - cell[1],
-                                          other[2] - cell[2])
+            mon.model_matrix = mon:matrix(cx, session.groundY, cz,
+                                          otherX - cx,
+                                          otherZ - cz)
             mon:build()
           end)
         end
       end
     end
   end
+
+  -- The second active party Pokemon is presentation-only here; battle logic is
+  -- owned by DoubleBattleMode. Keeping it in Stadium's session means it shares
+  -- the same pack cache, lighting, shadows and camera as the native lead.
+  local p2 = session.player2
+  if p2 then
+    local dex = partner and dexOf(partner.species) or nil
+    if session.at.player2 ~= partner then
+      session.at.player2 = partner
+      p2.grow, p2.grewOwn = nil, nil
+      if p2.rig and p2.state == "faint" then p2:play("idle") end
+    end
+    p2:setSpecies(dex, true)
+    if p2.species then StadiumPack.keep(p2.species) end
+    p2.visible = (p2.rig ~= nil) and partner ~= nil
+      and gen2SideVisible(screen, "player", partner)
+    p2.model_matrix = nil
+    if p2.rig then
+      p2:update(dt or 0)
+      if p2.visible and arena and arena.player2 and arena.enemy then
+        local cx = arena.player2[1]
+        local cz = arena.player2[2]
+        local ox, oz = combatOffset("player2")
+        cx, cz = cx + ox, cz + oz
+        local other = arena.enemy
+        local eox, eoz = combatOffset("enemy")
+        local ex = (tonumber(other[1]) or 0) + eox
+        local ez = (tonumber(other[2]) or 0) + eoz
+        Stadium.guard("player2", p2, "gen2-build", function()
+          p2.model_matrix = p2:matrix(cx, session.groundY, cz,
+                                      ex - cx, ez - cz)
+          p2:build()
+        end)
+      end
+    end
+  end
+
   Stadium.debug(dt)
 end
 
@@ -420,7 +532,7 @@ end
 -- only high-level presentation verbs; the controller never receives the private
 -- Stadium session or mutates Gold's battle logic.
 function Stadium.controlReady(side)
-  if side ~= "player" and side ~= "enemy" then return false end
+  if side ~= "player" and side ~= "player2" and side ~= "enemy" then return false end
   local mon = session and session[side]
   if not (mon and mon.rig and mon.visible and mon.model_matrix) then return false end
   return mon.state ~= "entrance" and mon.state ~= "faint"
@@ -497,7 +609,7 @@ function Stadium.update(dt, battle, groundY)
         session.faintPending[side] = nil
       elseif faintReady(battler) then
         session.faintPending[side] = nil
-        if mon and mon.rig then mon:request("faint") end
+        if stadiumFxFaintEnabled() and mon and mon.rig then mon:request("faint") end
       end
     end
 
@@ -613,9 +725,9 @@ end
 
 function Stadium.draw(pull)
   if not session then return end
-  for _, side in ipairs({ "enemy", "player" }) do
+  for _, side in ipairs({ "enemy", "player", "player2" }) do
     local mon = session[side]
-    if mon.rig and mon.visible and mon.model_matrix then
+    if mon and mon.rig and mon.visible and mon.model_matrix then
       Stadium.guard(side, mon, "draw", function()
         mon.rig:draw(mon.model_matrix, pull)
       end)
@@ -628,9 +740,9 @@ end
 -- wing on the ground.
 function Stadium.cast(shadowMap)
   if not session then return end
-  for _, side in ipairs({ "enemy", "player" }) do
+  for _, side in ipairs({ "enemy", "player", "player2" }) do
     local mon = session[side]
-    if mon.rig and mon.visible and mon.model_matrix then
+    if mon and mon.rig and mon.visible and mon.model_matrix then
       Stadium.guard(side, mon, "cast", function()
         mon.rig:caster(shadowMap, mon.model_matrix)
       end)
@@ -699,15 +811,15 @@ function Stadium.footprint(side)
 end
 
 -- The current animated position of one of Stadium's geo-layout attachment
--- tags, projected into the same live GB-coordinate space as
--- OverworldBattle.shot(). This deliberately exposes coordinates, not the
--- private model, rig, matrices or session that produced them.
+-- tags in WORLD coordinates. v0.3.21 exposes this read-only companion surface
+-- so StadiumBattleFX cartridge effects can originate from the live animated
+-- Stadium 2 skeleton instead of a fixed chest-height guess.
 --
 -- Native lookup rules (fragment 62's func_8432FA54): the conventional 0x64
 -- request prefers tag 0x0A and then 0x64; another request tries itself and
 -- then 0x64. nil lets a companion retain its ordinary body-anchor fallback.
-function Stadium.attachment(side, tag)
-  if side ~= "player" and side ~= "enemy" then return nil end
+function Stadium.attachmentWorld(side, tag)
+  if side ~= "player" and side ~= "enemy" and side ~= "player2" then return nil end
   tag = tonumber(tag)
   if not tag then return nil end
   tag = math.floor(tag)
@@ -738,7 +850,14 @@ function Stadium.attachment(side, tag)
   local wx = m[1] * x + m[2] * y + m[3] * z + m[4]
   local wy = m[5] * x + m[6] * y + m[7] * z + m[8]
   local wz = m[9] * x + m[10] * y + m[11] * z + m[12]
+  return wx, wy, wz
+end
 
+-- The same attachment projected into the live GB-coordinate battle layer.
+-- Kept for the original companion API while attachmentWorld serves real 3D FX.
+function Stadium.attachment(side, tag)
+  local wx, wy, wz = Stadium.attachmentWorld(side, tag)
+  if not wx then return nil end
   local OverworldBattle = V.require("OverworldBattle")
   local shot = OverworldBattle.shot()
   if not (shot and shot.vp and shot.scale and shot.scale > 0) then return nil end
@@ -751,7 +870,8 @@ end
 -- signature keys on alongside the pics' own token.
 function Stadium.standing()
   if not session then return false end
-  return (session.player.visible or session.enemy.visible) and true or false
+  return (session.player.visible or session.enemy.visible
+          or (session.player2 and session.player2.visible)) and true or false
 end
 
 -- ------- what the fight asks for

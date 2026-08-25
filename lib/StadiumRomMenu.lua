@@ -19,6 +19,8 @@ local Compat = V.require("EngineCompat")
 local PICKED_ROM = "picked_rom.gb"
 local PICKED_STADIUM = "picked_stadium.z64"
 local PENDING_FLAG = "stadium_overworld_picker_pending.flag"
+local BATTLE_BACKGROUND_PENDING_FLAG = "stadium2_battle_background_picker_pending.flag"
+local CUSTOM_PLAYER_PENDING_FLAG = "stadium2_custom_player_sprite_picker_pending.flag"
 
 local function isGen2()
   local ok, install = pcall(V.require, "StadiumInstall")
@@ -28,7 +30,10 @@ local function isGen2()
 end
 
 local function romLabel()
-  return isGen2() and "STADIUM 2 ROM FILE" or "STADIUM ROM FILE"
+  -- Gen-2 builds use one Android document-picker row for both private sources:
+  -- Stadium 2 feeds the 001-251 model/world importer; Stadium 1 USA v1.0 feeds
+  -- StadiumBattleFX plus the locally decoded announcer voice cache.
+  return isGen2() and "STADIUM 1 / 2 ROM FILE" or "STADIUM ROM FILE"
 end
 
 -- Android compatibility note:
@@ -127,6 +132,39 @@ local function n64Format(data)
   return nil
 end
 
+local function canonicalU8(data, offset, format)
+  local source = offset
+  if format == "v64" then
+    local word = offset - offset % 2
+    source = word + (1 - offset % 2)
+  elseif format == "n64" then
+    local word = offset - offset % 4
+    source = word + (3 - offset % 4)
+  end
+  return data:byte(source + 1)
+end
+
+local function canonicalU32(data, offset, format)
+  local a = canonicalU8(data, offset, format)
+  local b = canonicalU8(data, offset + 1, format)
+  local c = canonicalU8(data, offset + 2, format)
+  local d = canonicalU8(data, offset + 3, format)
+  if not d then return nil end
+  return ((a * 256 + b) * 256 + c) * 256 + d
+end
+
+local function looksLikeStadium1US(data, format)
+  return canonicalU32(data, 0x10, format) == 0x90F5D9B3
+     and canonicalU32(data, 0x14, format) == 0x9D0EDCF0
+end
+
+local function stadium1VoiceStatus()
+  if type(V.stadium1ImportStatus) ~= "function" then return nil end
+  local ok, value = pcall(V.stadium1ImportStatus)
+  if ok and type(value) == "table" then return value end
+  return nil
+end
+
 local function resolveGame(game)
   if game and game.stack then return game end
   -- Gold's live owner is Game2.  Keep the Gen-1 fallback only for older shared
@@ -149,6 +187,14 @@ local function pushBuildScreen(game)
     game.stack:push(StadiumScreen.new(game, true))
   end)
   return ok
+end
+
+local function failStadium1Android(why)
+  safeRemove(PENDING_FLAG)
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("S1 IMPORT ERROR")
+  return true, why
 end
 
 local function failAndroid(game, why)
@@ -190,10 +236,30 @@ local function consumeAndroidPick(game)
     return failAndroid(game, err or "could not read selected file")
   end
 
-  -- Reject obvious wrong picks here. StadiumRom.open performs the full
+  -- Reject obvious wrong picks here. Both private importers perform full
   -- normalization/validation again, including .v64 and .n64 byte order.
-  if not n64Format(data) then
+  local format = n64Format(data)
+  if not format then
     return failAndroid(game, "selected file is not an N64 ROM image")
+  end
+
+  -- Pokemon Stadium (USA) v1.0 has a unique header CRC pair. Detect it before
+  -- handing the file to StadiumInstall, because this Gen-2 build's ordinary
+  -- importer expects Stadium 2. StadiumBattleFX performs canonical MD5
+  -- validation before any speech/effect offsets are trusted.
+  if looksLikeStadium1US(data, format) and type(V.importStadium1) == "function" then
+    local okS1, startedS1, s1Err = pcall(V.importStadium1, data, source)
+    if not okS1 then return failStadium1Android(startedS1) end
+    if not startedS1 then return failStadium1Android(s1Err or "Stadium 1 ROM was rejected") end
+
+    safeRemove(source)
+    safeRemove(PENDING_FLAG)
+    safeRemove(PICKED_ROM)
+    safeRemove(PICKED_STADIUM)
+    setStatus("S1 VOICE IMPORTING")
+    -- StadiumBattleFX advances its ROM/voice jobs from input.step, so unlike
+    -- StadiumInstall it needs no model-build screen to stay alive.
+    return true
   end
 
   local okInstall, install = pcall(V.require, "StadiumInstall")
@@ -202,10 +268,8 @@ local function consumeAndroidPick(game)
     return failAndroid(game, "voxel host has no Stadium importer")
   end
 
-  -- Mobile v0.1.56: feed the picked bytes straight to the voxel host. The
-  -- previous path wrote a second 32 MB copy into baseroms and required a
-  -- restart, then the host read that entire copy again. Direct beginFrom is
-  -- exactly the desktop import path and avoids that extra disk/memory churn.
+  -- Stadium 2 path: unchanged from v0.3.22. Feed the picked bytes straight to
+  -- the voxel host and avoid persisting a second 32 MiB ROM copy.
   local okBegin, started, beginErr = pcall(install.beginFrom, data, source)
   if not okBegin then
     return failAndroid(game, started)
@@ -218,7 +282,7 @@ local function consumeAndroidPick(game)
   safeRemove(PENDING_FLAG)
   safeRemove(PICKED_ROM)
   safeRemove(PICKED_STADIUM)
-  setStatus("IMPORTING")
+  setStatus("S2 IMPORTING")
 
   if not pushBuildScreen(game) then
     -- Keep a marker so game.ready / the manager update can attach the screen
@@ -229,13 +293,25 @@ local function consumeAndroidPick(game)
 end
 
 function M.poll(game)
+  -- The custom battle-background picker reuses the engine's generic mobile
+  -- document bridge, which also stages its result as picked_rom.gb. Yield
+  -- while that feature-specific marker exists so a valid PNG/JPEG/BMP can
+  -- never be deleted or fed to StadiumInstall as an N64 ROM.
+  local f = Compat.fs()
+  if f and type(f.getInfo) == "function" then
+    local okBg, pendingBg = pcall(f.getInfo, BATTLE_BACKGROUND_PENDING_FLAG, "file")
+    if okBg and pendingBg then return false end
+    local okPlayer, pendingPlayer = pcall(f.getInfo, CUSTOM_PLAYER_PENDING_FLAG, "file")
+    if okPlayer and pendingPlayer then return false end
+  end
+
+  -- Consume a fresh Android SAF result BEFORE cleanupStagingIfReady(). An
+  -- already-ready Stadium 2 cache must never delete a newly selected Stadium 1
+  -- file as stale picker debris.
+  local consumed = consumeAndroidPick(game)
+  if consumed then return true end
   if cleanupStagingIfReady() then return true end
 
-  -- Consume OUR Android SAF result before any Dramatic Shape legacy picker.
-  -- On Android we deliberately do not call StadiumRomPick.poll(): the ROM
-  -- staging file is enough for StadiumInstall on the next overworld boot and
-  -- avoids legacy picker/import state interfering with the voxel pipeline.
-  local consumed = consumeAndroidPick(game)
   local osName = Compat.osName()
   if osName ~= "Android" and osName ~= "iOS" and not consumed then
     notifyDramaticShape(game)
@@ -263,6 +339,14 @@ local function startAndroidPicker()
   if not (f and type(f.write) == "function") then
     setStatus("NO PICKER")
     return false
+  end
+  if type(f.getInfo) == "function" then
+    local okBg, pendingBg = pcall(f.getInfo, BATTLE_BACKGROUND_PENDING_FLAG, "file")
+    local okPlayer, pendingPlayer = pcall(f.getInfo, CUSTOM_PLAYER_PENDING_FLAG, "file")
+    if (okBg and pendingBg) or (okPlayer and pendingPlayer) then
+      setStatus("PICKER BUSY")
+      return false
+    end
   end
 
   -- Own the generic mobile ROM pick before opening the engine bridge. Current
@@ -440,9 +524,18 @@ end
 
 -- Value shown beside STADIUM ROM FILE in the per-mod options screen.
 function M.value(game)
-  -- This function is evaluated while the Mod Manager draws the row.  Keep
+  -- This function is evaluated while the Mod Manager draws the row. Keep
   -- every optional picker/importer failure contained to the mod.
   pcall(M.poll, game)
+  local voice = stadium1VoiceStatus()
+  if voice and voice.state == "building" then
+    local done, total = tonumber(voice.done) or 0, tonumber(voice.total) or 823
+    return text(("S1 VOICE %03d/%03d"):format(done, total))
+  end
+  if voice and voice.state == "failed" then return text("S1 VOICE ERROR") end
+  if voice and voice.ready and voice.source == "rom" then
+    return text(stadiumReady() and "S1 + S2 READY" or "S1 VOICE READY")
+  end
   if M._status then return text(M._status) end
   local source = rawRow()
   local upstream = valueFromSource(source, game)

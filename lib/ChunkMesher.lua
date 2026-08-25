@@ -55,6 +55,9 @@ local Structures = V.require("Structures")
 local TileShape = V.require("TileShape")
 local Voxel3D = V.require("Voxel3D")
 local Budget = V.require("BuildBudget")
+local Quality = V.require("Quality")
+local DiskCache = V.require("VoxelDiskCache")
+local EngineCompat = V.require("EngineCompat")
 
 local ffi = nil
 do
@@ -125,16 +128,25 @@ end
 
 local function newTableSink()
   local verts, indices, quads = {}, {}, 0
+  local function pushRaw(x1, y1, z1, u1, v1,
+                         x2, y2, z2, u2, v2,
+                         x3, y3, z3, u3, v3,
+                         x4, y4, z4, u4, v4, shade)
+    local flat = type(shade) ~= "table"
+    verts[#verts + 1] = { x1, y1, z1, u1, v1, flat and shade or shade[1] }
+    verts[#verts + 1] = { x2, y2, z2, u2, v2, flat and shade or shade[2] }
+    verts[#verts + 1] = { x3, y3, z3, u3, v3, flat and shade or shade[3] }
+    verts[#verts + 1] = { x4, y4, z4, u4, v4, flat and shade or shade[4] }
+    Voxel3D.pushQuad(indices, quads)
+    quads = quads + 1
+  end
   return {
+    pushRaw = pushRaw,
     push = function(c, uv, shade)
-      local flat = type(shade) ~= "table"
-      for i = 1, 4 do
-        local cc, t = c[i], uv[i]
-        verts[#verts + 1] = { cc[1], cc[2], cc[3], t[1], t[2],
-                              flat and shade or shade[i] }
-      end
-      Voxel3D.pushQuad(indices, quads)
-      quads = quads + 1
+      pushRaw(c[1][1], c[1][2], c[1][3], uv[1][1], uv[1][2],
+              c[2][1], c[2][2], c[2][3], uv[2][1], uv[2][2],
+              c[3][1], c[3][2], c[3][3], uv[3][1], uv[3][2],
+              c[4][1], c[4][2], c[4][3], uv[4][1], uv[4][2], shade)
     end,
     results = function()
       return verts, indices, quads
@@ -145,34 +157,107 @@ local function newTableSink()
   }
 end
 
-local TRI_ORDER = { 1, 2, 3, 1, 3, 4 }
-
 local function newFfiSink()
   local cap = 4096 * 6
   local buf = ffi.new("float[?]", cap * 6)
   local n = 0
   local sink
+
+  -- Hot-path quad writer. Terrain used to construct two nested Lua tables
+  -- (corners + UVs) for every face even on the FFI sink, only to unpack them
+  -- again here. Route-sized builds can emit hundreds of thousands of faces, so
+  -- that transient allocation was a major source of GC pressure and frame-time
+  -- spikes. The packed path writes the same six unindexed vertices directly.
+  local function pushRaw(x1, y1, z1, u1, v1,
+                         x2, y2, z2, u2, v2,
+                         x3, y3, z3, u3, v3,
+                         x4, y4, z4, u4, v4, shade)
+    if n + 6 > cap then
+      local grown = ffi.new("float[?]", cap * 2 * 6)
+      ffi.copy(grown, buf, n * 6 * 4)
+      buf, cap = grown, cap * 2
+    end
+    local flat = type(shade) ~= "table"
+    local s1 = flat and shade or shade[1]
+    local s2 = flat and shade or shade[2]
+    local s3 = flat and shade or shade[3]
+    local s4 = flat and shade or shade[4]
+    local base = n * 6
+
+    -- 1,2,3, 1,3,4 -- identical winding to TRI_ORDER/pushQuad.
+    buf[base] = x1; buf[base + 1] = y1; buf[base + 2] = z1
+    buf[base + 3] = u1; buf[base + 4] = v1; buf[base + 5] = s1
+    base = base + 6
+    buf[base] = x2; buf[base + 1] = y2; buf[base + 2] = z2
+    buf[base + 3] = u2; buf[base + 4] = v2; buf[base + 5] = s2
+    base = base + 6
+    buf[base] = x3; buf[base + 1] = y3; buf[base + 2] = z3
+    buf[base + 3] = u3; buf[base + 4] = v3; buf[base + 5] = s3
+    base = base + 6
+    buf[base] = x1; buf[base + 1] = y1; buf[base + 2] = z1
+    buf[base + 3] = u1; buf[base + 4] = v1; buf[base + 5] = s1
+    base = base + 6
+    buf[base] = x3; buf[base + 1] = y3; buf[base + 2] = z3
+    buf[base + 3] = u3; buf[base + 4] = v3; buf[base + 5] = s3
+    base = base + 6
+    buf[base] = x4; buf[base + 1] = y4; buf[base + 2] = z4
+    buf[base + 3] = u4; buf[base + 4] = v4; buf[base + 5] = s4
+    n = n + 6
+  end
+
   sink = {
+    pushRaw = pushRaw,
     push = function(c, uv, shade)
-      if n + 6 > cap then
-        local grown = ffi.new("float[?]", cap * 2 * 6)
-        ffi.copy(grown, buf, n * 6 * 4)
-        buf, cap = grown, cap * 2
+      pushRaw(c[1][1], c[1][2], c[1][3], uv[1][1], uv[1][2],
+              c[2][1], c[2][2], c[2][3], uv[2][1], uv[2][2],
+              c[3][1], c[3][2], c[3][3], uv[3][1], uv[3][2],
+              c[4][1], c[4][2], c[4][3], uv[4][1], uv[4][2], shade)
+    end,
+    vertexCount = function()
+      return n
+    end,
+    -- Serialize the native float buffer through the ENGINE persistence
+    -- backend.  Normal LÖVE files stream in ~1.5MB chunks with cooperative
+    -- budget checks; portable-mode's simpler write-only backend falls back to
+    -- one string write without ever touching raw io/love.filesystem here.
+    writeRaw = function(_, fs, path)
+      if n == 0 then
+        if fs and type(fs.remove) == "function" then pcall(fs.remove, path) end
+        return true
       end
-      local flat = type(shade) ~= "table"
-      local base = n * 6
-      for k = 1, 6 do
-        local i = TRI_ORDER[k]
-        local cc, t = c[i], uv[i]
-        buf[base] = cc[1]
-        buf[base + 1] = cc[2]
-        buf[base + 2] = cc[3]
-        buf[base + 3] = t[1]
-        buf[base + 4] = t[2]
-        buf[base + 5] = flat and shade or shade[i]
-        base = base + 6
+      if not (fs and type(fs.write) == "function") then
+        return false, "persistence filesystem is not writable"
       end
-      n = n + 6
+      local totalBytes = n * 6 * 4
+      if type(fs.newFile) == "function" then
+        local okFile, file = pcall(fs.newFile, path)
+        if okFile and file then
+          local okOpen, opened = pcall(file.open, file, "w")
+          if okOpen and opened ~= false then
+            local at = 0
+            local CHUNK = 65536
+            while at < n do
+              local count = math.min(CHUNK, n - at)
+              local bytes = count * 6 * 4
+              local chunk = ffi.string(buf + at * 6, bytes)
+              local okWrite, wrote = pcall(file.write, file, chunk)
+              if not okWrite or wrote == false then
+                pcall(file.close, file)
+                return false, "cached mesh write failed"
+              end
+              at = at + count
+              Budget.check()
+            end
+            pcall(file.close, file)
+            return true
+          end
+        end
+      end
+      local raw = ffi.string(buf, totalBytes)
+      local okWrite, wrote, err = pcall(fs.write, path, raw)
+      if not okWrite then return false, tostring(wrote) end
+      if wrote == false then return false, tostring(err or "cached mesh write failed") end
+      return true
     end,
     finish = function()
       if n == 0 then return nil end
@@ -239,29 +324,70 @@ end
 -- is what the headless geometry() below and the sun's own pass both want.
 local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   local push = sink.push
+  local pushRaw = sink.pushRaw
   local waterPush = waterSink and waterSink.push or nil
+  local waterRaw = waterSink and waterSink.pushRaw or nil
   local tileset = map.tileset
   local S = Structures.forMap(map)
+  -- Pull the hottest structure tables into locals. `heightAt` is called for
+  -- AO, face exposure and corner shading many times per tile; avoiding repeated
+  -- S.* hash lookups matters on the route-sized meshes this module builds.
+  local shapeAt, tileAt = S.shapeAt, S.tileAt
+  local skipAt, runsAt, groundAt = S.skip, S.runs, S.ground
   local perRow = tileset.tilesPerRow or 16
   local atlasW = tileset.imageWidth or (perRow * 8)
   local atlasH = tileset.imageHeight or 48
+  local invAtlasW, invAtlasH = 1 / atlasW, 1 / atlasH
 
+  -- Height queries repeat heavily around each visible column. Cache the scalar
+  -- answer once per keyed cell instead of walking skip/runs/shape tables for
+  -- every AO corner and every side. Zero is a valid cached value in Lua.
+  local heightCache = {}
   local function heightAt(tx, ty)
     local k = keyOf(tx, ty)
-    if S.skip[k] then return 0 end
-    local run = S.runs[k]
-    if run then return run.h end
-    local s = S.shapeAt[k]
-    return s and s.h or 0
+    local cached = heightCache[k]
+    if cached ~= nil then return cached end
+    local h
+    if skipAt[k] then
+      h = 0
+    else
+      local run = runsAt[k]
+      if run then
+        h = run.h
+      else
+        local shape = shapeAt[k]
+        h = shape and shape.h or 0
+      end
+    end
+    heightCache[k] = h
+    return h
   end
 
-  -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
+  -- Full-tile UVs are by far the common case. Cache those four scalars per
+  -- tile; cropped partial bands still use the exact historical math. Using
+  -- reciprocal multiplies also removes four divides from every uncached call.
+  local fullU0, fullU1, fullV0, fullV1 = {}, {}, {}, {}
   local function uvRect(tile, vTop, vBot)
+    if vTop == 0 and vBot == 8 then
+      local u0 = fullU0[tile]
+      if u0 ~= nil then
+        return u0, fullU1[tile], fullV0[tile], fullV1[tile]
+      end
+      local ax = (tile % perRow) * 8
+      local ay = math.floor(tile / perRow) * 8
+      u0 = (ax + INSET) * invAtlasW
+      local u1 = (ax + 8 - INSET) * invAtlasW
+      local v0 = (ay + INSET) * invAtlasH
+      local v1 = (ay + 8 - INSET) * invAtlasH
+      fullU0[tile], fullU1[tile] = u0, u1
+      fullV0[tile], fullV1[tile] = v0, v1
+      return u0, u1, v0, v1
+    end
     local ax = (tile % perRow) * 8
     local ay = math.floor(tile / perRow) * 8
     local vi = math.min(INSET, (vBot - vTop) / 4)
-    return (ax + INSET) / atlasW, (ax + 8 - INSET) / atlasW,
-           (ay + vTop + vi) / atlasH, (ay + vBot - vi) / atlasH
+    return (ax + INSET) * invAtlasW, (ax + 8 - INSET) * invAtlasW,
+           (ay + vTop + vi) * invAtlasH, (ay + vBot - vi) * invAtlasH
   end
 
   -- ------------------------------------------------------ ambient occlusion
@@ -377,13 +503,22 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
 
   -- `to` routes the quad somewhere other than the main sink -- the water
   -- surface is the only caller that ever does (see runGeometry's header).
-  local function topQuad(x0, z0, h, tile, shade, to)
+  local function topQuad(x0, z0, h, tile, shade, toWater)
     local u0, u1, v0, v1 = uvRect(tile, 0, 8)
-    ;(to or push)({ { x0, h, z0 }, { x0 + 8, h, z0 },
-                    { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
-                  { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
-                  aoShades(x0 / 8, z0 / 8, h, shade))
+    local shaded = aoShades(x0 / 8, z0 / 8, h, shade)
+    local raw = toWater and waterRaw or (not toWater and pushRaw or nil)
+    if raw then
+      raw(x0,     h, z0,     u0, v0,
+          x0 + 8, h, z0,     u1, v0,
+          x0 + 8, h, z0 + 8, u1, v1,
+          x0,     h, z0 + 8, u0, v1, shaded)
+    else
+      local target = toWater and waterPush or push
+      target({ { x0, h, z0 }, { x0 + 8, h, z0 },
+               { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
+             { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } }, shaded)
     end
+  end
 
   -- vertical quad for face direction `d` of the tile column at (x0, z0),
   -- spanning heights [y0, y1] and showing art rows [vTop, vBot] of `tile`.
@@ -392,17 +527,33 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   -- never draws mirrored.
   local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade)
     local x1, z1 = x0 + 8, z0 + 8
+    local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
+    if pushRaw then
+      if d == 5 then                                     -- south, at z1
+        pushRaw(x0, y0, z1, u0, v1, x1, y0, z1, u1, v1,
+                x1, y1, z1, u1, v0, x0, y1, z1, u0, v0, shade)
+      elseif d == 6 then                                 -- north, at z0
+        pushRaw(x1, y0, z0, u0, v1, x0, y0, z0, u1, v1,
+                x0, y1, z0, u1, v0, x1, y1, z0, u0, v0, shade)
+      elseif d == 1 then                                 -- east, at x1
+        pushRaw(x1, y0, z1, u0, v1, x1, y0, z0, u1, v1,
+                x1, y1, z0, u1, v0, x1, y1, z1, u0, v0, shade)
+      else                                               -- west, at x0
+        pushRaw(x0, y0, z0, u0, v1, x0, y0, z1, u1, v1,
+                x0, y1, z1, u1, v0, x0, y1, z0, u0, v0, shade)
+      end
+      return
+    end
     local c
-    if d == 5 then                                       -- south, at z1
+    if d == 5 then
       c = { { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 } }
-    elseif d == 6 then                                   -- north, at z0
+    elseif d == 6 then
       c = { { x1, y0, z0 }, { x0, y0, z0 }, { x0, y1, z0 }, { x1, y1, z0 } }
-    elseif d == 1 then                                   -- east, at x1
+    elseif d == 1 then
       c = { { x1, y0, z1 }, { x1, y0, z0 }, { x1, y1, z0 }, { x1, y1, z1 } }
-    else                                                 -- west, at x0
+    else
       c = { { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 } }
     end
-    local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
     push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade)
   end
 
@@ -440,7 +591,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     for tx = -r, tw + r - 1 do
       Budget.tick()
       local k = keyOf(tx, ty)
-      local s, tile = S.shapeAt[k], S.tileAt[k]
+      local s, tile = shapeAt[k], tileAt[k]
       local inBody = tx >= 0 and ty >= 0 and tx < tw and ty < th
       if not inBody and masked(tx * 8, ty * 8, tx * 8 + 8, ty * 8 + 8) then
         s = nil
@@ -454,14 +605,15 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       -- that the 2x2 grouping could not take -- a canopy whose partners
       -- fall outside the shortened ring is left unclaimed, and one strip of
       -- boxes along an edge is the whole artefact this avoids.
-      if not inBody and S.hideBareRing and not S.skip[k] then
+      if not inBody and S.hideBareRing and not skipAt[k]
+          and not (s and s.class == "water") then
         s = nil
       end
 
-      if s and S.skip[k] then
+      if s and skipAt[k] then
         -- an object stands here; paint its synthesized ground and let the
         -- prebuilt prism quads (appended below) carry the art
-        local g = S.ground[k]
+        local g = groundAt[k]
         if g then
           topQuad(tx * 8, ty * 8, 0, g, 1)
           -- the claimed tile is still ground at height 0, and water next
@@ -492,7 +644,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           end
         end
       elseif s then
-        local run = S.runs[k]
+        local run = runsAt[k]
         local h = run and run.h or s.h
         local x0, z0 = tx * 8, ty * 8
 
@@ -509,13 +661,16 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
         -- everything else its own art.
         if run and run.rise > 0 then
           local mid = run.extent / 2
-          local function gableH(d)     -- d = rows north of the south eave
-            local t = d <= mid and d / mid or (run.extent - d) / (run.extent - mid)
-            return run.h + run.rise * math.max(0, math.min(1, t))
-          end
           local d0 = run.front - ty                -- rows from the south edge
-          local hS = gableH(d0)
-          local hN = gableH(d0 + 1)
+          -- Keep this arithmetic inline: the old local gableH closure was
+          -- recreated for every roof tile during meshing.
+          local tS = d0 <= mid and d0 / mid
+                     or (run.extent - d0) / (run.extent - mid)
+          local d1 = d0 + 1
+          local tN = d1 <= mid and d1 / mid
+                     or (run.extent - d1) / (run.extent - mid)
+          local hS = run.h + run.rise * math.max(0, math.min(1, tS))
+          local hN = run.h + run.rise * math.max(0, math.min(1, tN))
           -- art by proximity to the ridge, mirrored over the back
           local rel = 1 - math.abs(d0 + 0.5 - mid) / math.max(mid, 0.5)
           local idx = math.min(run.roofRows - 1,
@@ -531,9 +686,16 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             neY = math.max(run.h, hN - 8)
           end
           local u0, u1, v0, v1 = uvRect(roofTile, 0, 8)
-          push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
-                 { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
-               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95)
+          if pushRaw then
+            pushRaw(x0, swY, z0 + 8, u0, v1,
+                    x0 + 8, seY, z0 + 8, u1, v1,
+                    x0 + 8, neY, z0, u1, v0,
+                    x0, nwY, z0, u0, v0, 0.95)
+          else
+            push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
+                   { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
+                 { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95)
+          end
         elseif run then
           local m = math.min(2, run.extent)
           local topTile = map:tileAt(tx, run.north + ((ty - run.north) % m))
@@ -550,7 +712,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             -- northmost row.
             local north, front = ty, ty
             while ty - north < 6 do
-              local bs = S.shapeAt[keyOf(tx, north - 1)]
+              local bs = shapeAt[keyOf(tx, north - 1)]
               if bs and bs.authored and bs.class == s.class then
                 north = north - 1
               else
@@ -558,7 +720,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               end
             end
             while front - ty < 6 do
-              local bs = S.shapeAt[keyOf(tx, front + 1)]
+              local bs = shapeAt[keyOf(tx, front + 1)]
               if bs and bs.authored and bs.class == s.class then
                 front = front + 1
               else
@@ -571,11 +733,11 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               -- row just above it when that row is furniture too (a
               -- bookcase wearing its shelf-top trim), else with the
               -- run's own top row
-              local above = S.shapeAt[keyOf(tx, north - 1)]
+              local above = shapeAt[keyOf(tx, north - 1)]
               row = (above and above.authored and above.art == "upright")
                     and (north - 1) or north
             end
-            topTile = S.tileAt[keyOf(tx, row)]
+            topTile = tileAt[keyOf(tx, row)]
           end
           -- water's surface, and only water's: the recessed sheet itself,
           -- never the ground's shoreline bands around it. A cell an object
@@ -584,7 +746,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           -- on the pond.
           topQuad(x0, z0, h, topTile,
                   s.art == "upright" and VOLUME_TOP_SHADE or 1,
-                  (s.class == "water") and waterPush or nil)
+                  (s.class == "water") and waterPush ~= nil)
         end
 
         -- sides: 8px bands wherever the neighbour is lower. Band k spans
@@ -632,7 +794,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                   if d == 5 then shade = 1 end
                   local front = ty
                   while front < ty + 6 do
-                    local fs2 = S.shapeAt[keyOf(tx, front + 1)]
+                    local fs2 = shapeAt[keyOf(tx, front + 1)]
                     if fs2 and fs2.authored and fs2.class == s.class then
                       front = front + 1
                     else
@@ -640,9 +802,9 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                     end
                   end
                   local fk = keyOf(tx, front - band)
-                  local fs = S.shapeAt[fk]
+                  local fs = shapeAt[fk]
                   if fs and fs.authored and fs.class == s.class then
-                    src = S.tileAt[fk]
+                    src = tileAt[fk]
                   end
                 end
                 sideQuad(d, x0, z0, y0, y1, src,
@@ -710,6 +872,18 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return scUV
   end
 
+  local function pushExisting(q, corners, shade)
+    local uv = quadUV(q)
+    if pushRaw then
+      pushRaw(corners[1][1], corners[1][2], corners[1][3], uv[1][1], uv[1][2],
+              corners[2][1], corners[2][2], corners[2][3], uv[2][1], uv[2][2],
+              corners[3][1], corners[3][2], corners[3][3], uv[3][1], uv[3][2],
+              corners[4][1], corners[4][2], corners[4][3], uv[4][1], uv[4][2], shade)
+    else
+      push(corners, uv, shade)
+    end
+  end
+
   for _, q in ipairs(S.objectQuads) do
     Budget.tick()
     local x0 = math.min(q[1][1], q[2][1], q[3][1], q[4][1])
@@ -723,7 +897,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     -- the neighbour will ever draw that geometry
     if q.own or outwardOnEdge(q, x0, z0, x1, z1)
        or keepQuad(x0, z0, x1, z1) then
-      push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade))
+      pushExisting(q, q, groundShades(q, q.shade))
     end
   end
 
@@ -779,7 +953,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           ok = keepQuad(x0, z0, x1, z1)
         end
         if ok then
-          push(sc, quadUV(q), groundShades(sc, q.shade))
+          pushExisting(q, sc, groundShades(sc, q.shade))
         end
       end
     end
@@ -821,17 +995,30 @@ end
 
 local function quadsMesh(quads)
   if #quads == 0 then return nil end
-  local verts, indices, n = {}, {}, 0
+  local sink = newSink()
+  local raw = sink.pushRaw
   for _, q in ipairs(quads) do
-    for i = 1, 4 do
-      local c = q[i]
-      local uv = q.uv and q.uv[i] or { q.u, q.v }
-      verts[#verts + 1] = { c[1], c[2], c[3], uv[1], uv[2], q.shade }
+    local c1, c2, c3, c4 = q[1], q[2], q[3], q[4]
+    local uv = q.uv
+    if raw then
+      if uv then
+        raw(c1[1], c1[2], c1[3], uv[1][1], uv[1][2],
+            c2[1], c2[2], c2[3], uv[2][1], uv[2][2],
+            c3[1], c3[2], c3[3], uv[3][1], uv[3][2],
+            c4[1], c4[2], c4[3], uv[4][1], uv[4][2], q.shade)
+      else
+        raw(c1[1], c1[2], c1[3], q.u, q.v,
+            c2[1], c2[2], c2[3], q.u, q.v,
+            c3[1], c3[2], c3[3], q.u, q.v,
+            c4[1], c4[2], c4[3], q.u, q.v, q.shade)
+      end
+    else
+      local scuv = uv or { { q.u, q.v }, { q.u, q.v },
+                            { q.u, q.v }, { q.u, q.v } }
+      sink.push(q, scuv, q.shade)
     end
-    Voxel3D.pushQuad(indices, n)
-    n = n + 1
   end
-  return Voxel3D.newMesh(verts, indices)
+  return sink.finish()
 end
 
 -- The tall-grass rows as their own mesh: VoxelScene draws it AFTER the
@@ -932,7 +1119,8 @@ end
 -- ---------------------------------------------------------- async builds
 
 local jobs = {}       -- FIFO of pending jobs
-local jobIndex = {}   -- "id:slot" -> job
+local jobIndex = {}   -- key -> job
+local warmStats = { queued = 0, completed = 0, hits = 0, cancelled = 0, errors = 0 }
 
 local clock = (love and love.timer and love.timer.getTime) or os.clock
 
@@ -940,13 +1128,32 @@ local function jobKey(id, slot)
   return id .. ":" .. slot
 end
 
-local function finishJob(job, ok, err)
-  jobIndex[jobKey(job.id, job.slot)] = nil
+local function warmKey(id, slot)
+  return "warm:" .. id .. ":" .. slot
+end
+
+local function removeJob(job)
+  if not job then return end
+  jobIndex[job.key or jobKey(job.id, job.slot)] = nil
   for i, j in ipairs(jobs) do
     if j == job then
       table.remove(jobs, i)
       break
     end
+  end
+end
+
+local function finishJob(job, ok, err)
+  removeJob(job)
+  if job.cacheOnly then
+    if not ok and not job.cancelled then
+      warmStats.errors = warmStats.errors + 1
+      if err then
+        print("[warn] voxel cache warm failed for " .. tostring(job.id)
+              .. ": " .. tostring(err))
+      end
+    end
+    return
   end
   if not ok then
     -- name the reason: in a real session a lost build is a black map
@@ -961,68 +1168,139 @@ local function finishJob(job, ok, err)
   end
 end
 
+local function clearStale(c, slot)
+  if not c.stale then return end
+  c.stale[slot] = nil
+  if not (c.stale.full or c.stale.body or c.stale.aux) then
+    c.stale = nil
+  end
+end
+
+local function buildAux(job, map, c)
+  if c.grass ~= nil and c.flowers ~= nil and c.figures ~= nil
+      and not (c.stale and c.stale.aux) then return end
+  local okG, grass = pcall(buildGrassMesh, map)
+  local okF, flowers = pcall(buildFlowerMesh, map)
+  local okX, figures = pcall(buildFigureMeshes, map)
+  if (gen[job.id] or 0) ~= job.gen then
+    if okG and grass and grass.release then pcall(grass.release, grass) end
+    if okF and flowers and flowers.release then pcall(flowers.release, flowers) end
+    if okX then releaseFigures(figures) end
+    return false
+  end
+  swapSlot(c, "grass", (okG and grass) or false)
+  swapSlot(c, "flowers", (okF and flowers) or false)
+  releaseFigures(c.figures)
+  c.figures = (okX and figures) or false
+  if c.stale then c.stale.aux = nil end
+  return true
+end
+
+local function releasePair(mesh, water)
+  if mesh and mesh.release then pcall(mesh.release, mesh) end
+  if water and water.release then pcall(water.release, water) end
+end
+
 -- A build only lands if the map's generation still matches the one the
--- job was queued under -- invalidate/evict bump it to cancel in-flight
--- work whose inputs went stale.
+-- job was queued under -- invalidate/evict bump it to cancel in-flight work.
+--
+-- v0.3.32 IMPORTANT ORDER: terrain is restored/built BEFORE grass/figures.
+-- That makes a disk hit or freshly completed sector drawable immediately;
+-- decorative meshes can finish during later cooperative slices instead of
+-- delaying the entire world behind them.
 local function runJob(job)
   local map = job.map
-  local c = entry(job.id)
-  if c.grass == nil or c.flowers == nil or c.figures == nil
-     or (c.stale and c.stale.aux) then
-    local okG, grass = pcall(buildGrassMesh, map)
-    local okF, flowers = pcall(buildFlowerMesh, map)
-    local okX, figures = pcall(buildFigureMeshes, map)
-    if (gen[job.id] or 0) ~= job.gen then
-      if okG and grass and grass.release then pcall(grass.release, grass) end
-      if okF and flowers and flowers.release then
-        pcall(flowers.release, flowers)
-      end
-      if okX then releaseFigures(figures) end
+
+  -- Cache-only jobs never allocate GPU meshes.  They are the aggressive PC
+  -- warmer used by Kanto: build a BODY vertex stream once, serialize it, throw
+  -- the native buffer away.  The next real request can upload it without
+  -- rerunning Structures/runGeometry.
+  if job.cacheOnly then
+    if DiskCache.probe(map, job.slot, job.masks) then
+      warmStats.hits = warmStats.hits + 1
       return
     end
-    swapSlot(c, "grass", (okG and grass) or false)
-    swapSlot(c, "flowers", (okF and flowers) or false)
-    releaseFigures(c.figures)
-    c.figures = (okX and figures) or false
-    if c.stale then c.stale.aux = nil end
+    local sink = newSink()
+    local waterSink = newSink()
+    runGeometry(map, job.slot == "body", job.masks, sink, waterSink)
+    if (gen[job.id] or 0) ~= job.gen then return end
+    local stored = DiskCache.store(map, job.slot, job.masks, sink, waterSink)
+    if stored then
+      warmStats.completed = warmStats.completed + 1
+    else
+      warmStats.errors = warmStats.errors + 1
+    end
+    return
   end
+
+  local c = entry(job.id)
+  c.map = map
+
+  -- Persistent hit: upload the already-derived raw vertices and make terrain
+  -- visible BEFORE auxiliary grass/figure work.  Cache.load itself is chunked
+  -- through BuildBudget, so large routes remain cooperative.
+  local hit, cachedMesh, cachedWater = DiskCache.load(map, job.slot, job.masks)
+  if hit then
+    if (gen[job.id] or 0) ~= job.gen then
+      releasePair(cachedMesh, cachedWater)
+      return
+    end
+    swapSlot(c, job.slot, cachedMesh or false)
+    swapSlot(c, waterSlot(job.slot), cachedWater or false)
+    clearStale(c, job.slot)
+    buildAux(job, map, c)
+    return
+  end
+
   local sink = newSink()
   local waterSink = newSink()
   runGeometry(map, job.slot == "body", job.masks, sink, waterSink)
   local mesh = sink.finish()
   local water = waterSink.finish()
   if (gen[job.id] or 0) ~= job.gen then
-    if mesh and mesh.release then pcall(mesh.release, mesh) end
-    if water and water.release then pcall(water.release, water) end
+    releasePair(mesh, water)
     return
   end
+
+  -- LAND FIRST.  From this point the sector can draw even if cache writing or
+  -- decorative meshes spend more cooperative slices.
   swapSlot(c, job.slot, mesh or false)
   swapSlot(c, waterSlot(job.slot), water or false)
-  if c.stale then
-    c.stale[job.slot] = nil
-    if not (c.stale.full or c.stale.body or c.stale.aux) then
-      c.stale = nil
-    end
+  clearStale(c, job.slot)
+
+  buildAux(job, map, c)
+
+  -- Meta is written last by VoxelDiskCache. Failure here never invalidates the
+  -- live mesh; it only means this sector will rebuild next process launch.
+  if DiskCache.enabled() then
+    pcall(DiskCache.store, map, job.slot, job.masks, sink, waterSink)
   end
 end
 
 -- Queue a build unless the slot is already cached or queued. Returns the
 -- cached mesh when there is one (false-cached misses return nil).
--- `urgent` marks the current map's meshes: pump() gives those a bigger
--- slice and runs them before neighbour jobs. A slot refresh() marked
--- stale queues its rebuild AND keeps handing back the old mesh, so a
--- one-block edit never drops the scene to the flat 2D path while the
--- replacement cooks.
+-- `urgent` marks the current map's meshes.  A real render request preempts a
+-- cache-only warmer of the same slot instead of waiting for background work.
 function ChunkMesher.request(map, bodyOnly, masks, urgent)
   local slot = bodyOnly and "body" or "full"
   local c = cache[map.id]
+  if c then c.map = map end
   local stale = c and c.stale and (c.stale[slot] or c.stale.aux)
   if c and c[slot] ~= nil and not stale then return c[slot] or nil end
+
+  local wk = warmKey(map.id, slot)
+  local warm = jobIndex[wk]
+  if warm then
+    warm.cancelled = true
+    warmStats.cancelled = warmStats.cancelled + 1
+    removeJob(warm)
+  end
+
   local key = jobKey(map.id, slot)
   local job = jobIndex[key]
   if not job then
     job = { id = map.id, map = map, slot = slot, masks = masks,
-            urgent = urgent or false, gen = gen[map.id] or 0 }
+            urgent = urgent or false, gen = gen[map.id] or 0, key = key }
     jobIndex[key] = job
     jobs[#jobs + 1] = job
   elseif urgent then
@@ -1031,44 +1309,162 @@ function ChunkMesher.request(map, bodyOnly, masks, urgent)
   return (c and c[slot]) or nil
 end
 
+-- Queue a persistent BODY/FULL derivation without creating a GPU Mesh.  Kanto
+-- uses BODY warmers for every outdoor sector, while ordinary visible requests
+-- opportunistically persist FULL variants with their exact seam masks.
+function ChunkMesher.warmDisk(map, bodyOnly, masks, region)
+  if not (map and map.id and DiskCache.enabled()) then return false, "disabled" end
+  local slot = bodyOnly and "body" or "full"
+  if DiskCache.probe(map, slot, masks) then
+    warmStats.hits = warmStats.hits + 1
+    return true, "hit"
+  end
+  if jobIndex[jobKey(map.id, slot)] then return true, "live" end
+  local key = warmKey(map.id, slot)
+  if jobIndex[key] then return true, "queued" end
+  local job = {
+    id = map.id, map = map, slot = slot, masks = masks, urgent = false,
+    cacheOnly = true, cacheRegion = region or "world", gen = gen[map.id] or 0,
+    key = key,
+  }
+  jobIndex[key] = job
+  jobs[#jobs + 1] = job
+  warmStats.queued = warmStats.queued + 1
+  return true, "queued"
+end
+
+function ChunkMesher.cancelWarmRegion(region)
+  local n = 0
+  for i = #jobs, 1, -1 do
+    local job = jobs[i]
+    if job.cacheOnly and (region == nil or job.cacheRegion == region) then
+      job.cancelled = true
+      jobIndex[job.key] = nil
+      table.remove(jobs, i)
+      n = n + 1
+    end
+  end
+  warmStats.cancelled = warmStats.cancelled + n
+  return n
+end
+
+function ChunkMesher.warmPending(region)
+  local n = 0
+  for _, job in ipairs(jobs) do
+    if job.cacheOnly and (region == nil or job.cacheRegion == region) then n = n + 1 end
+  end
+  return n
+end
+
 function ChunkMesher.pending()
   return #jobs
 end
 
--- Most recent terrain build failure for a map, if any.  A nil value means
--- there is no known failure; callers can then distinguish true async pending
--- from a false-cached build that will never become drawable.
+-- Most recent terrain build failure for a map, if any.
 function ChunkMesher.lastError(mapId)
   return mapId and lastErrors[mapId] or nil
 end
 
--- Advance queued builds inside a per-frame time budget. Urgent jobs (the
--- current map) come first and get the larger slice -- the first voxel
--- frame after a toggle is worth more milliseconds than a neighbour
--- popping in one frame later. `covered` says the world pass is hidden
--- this frame (a warp's fade, a menu): nothing visible can hitch, so the
--- slice opens up and a door fade swallows most of a destination build.
 local URGENT_SLICE = 0.012
 local IDLE_SLICE = 0.005
 local COVERED_SLICE = 0.030
 
-function ChunkMesher.pump(covered)
-  if #jobs == 0 then return end
-  local pick = jobs[1]
-  for _, j in ipairs(jobs) do
-    if j.urgent then
-      pick = j
-      break
+local function buildSlices()
+  if Quality and type(Quality.buildSlices) == "function" then
+    local ok, urgent, idle, covered = pcall(Quality.buildSlices)
+    if ok and tonumber(urgent) and tonumber(idle) and tonumber(covered) then
+      return tonumber(urgent), tonumber(idle), tonumber(covered)
     end
   end
-  local slice = covered and COVERED_SLICE
-                or (pick.urgent and URGENT_SLICE or IDLE_SLICE)
+  return URGENT_SLICE, IDLE_SLICE, COVERED_SLICE
+end
+
+-- Cache warmers are deliberately lower priority than ANY real renderer job.
+-- When the queue contains only warmers, desktop gets a much wider slice so the
+-- user's CPU can crunch Kanto sectors quickly while an already-cached scene is
+-- being played. Phones stay conservative.
+local function cacheWarmSlice(covered, interactive)
+  local osName = EngineCompat.osName()
+  local mobile = osName == "Android" or osName == "iOS"
+  local mode = Quality and Quality.buildMode and Quality.buildMode() or "balanced"
+
+  -- v0.3.43: persistent Kanto cooking must never own a gameplay frame.  The
+  -- old desktop BALANCED/FAST slices were 22-35 ms while the world was visible,
+  -- which by themselves exceeded a 60-Hz frame budget and presented as periodic
+  -- Kanto stutter until every sector happened to be cooked.  During actual
+  -- player motion, background warmers get only a tiny cooperative nibble; when
+  -- standing still they still use spare desktop CPU, and covered/menu frames
+  -- remain the place where FAST LOAD may work aggressively.
+  if interactive and not covered then
+    if mobile then return mode == "fast" and 0.0007 or 0.00035 end
+    return mode == "fast" and 0.0015 or (mode == "smooth" and 0.0005 or 0.0010)
+  end
+
+  if mobile then
+    if mode == "fast" then return covered and 0.010 or 0.0025 end
+    if mode == "smooth" then return covered and 0.004 or 0.0010 end
+    return covered and 0.006 or 0.0018
+  end
+
+  -- Visible gameplay: stay below a normal 16.7 ms frame even when this is the
+  -- only queued work. Covered/menu frames can spend more because the player is
+  -- not steering the world.
+  if mode == "fast" then return covered and 0.040 or 0.010 end
+  if mode == "smooth" then return covered and 0.015 or 0.003 end
+  return covered and 0.028 or 0.006
+end
+
+ChunkMesher._cacheWarmSlice = cacheWarmSlice
+
+-- v0.3.58 Kanto visible-world pacing. Once the CURRENT stitched body is
+-- drawable, route-neighbour prefetch jobs do not need the same large slice as
+-- a missing current map. Keep building the exact same geometry, just spread
+-- that CPU work over more frames so camera/player motion never competes with a
+-- 4.5-10 ms terrain coroutine slice. A cold current sector deliberately uses
+-- the normal urgent path; GoldVoxelBridge only passes "kanto-visible" after
+-- ChunkMesher.peek confirms the current body already exists.
+local function kantoVisibleSlice(urgent)
+  local mode = Quality and Quality.buildMode and Quality.buildMode() or "balanced"
+  if urgent then
+    if mode == "fast" then return 0.0040 end
+    if mode == "smooth" then return 0.0018 end
+    return 0.0028
+  end
+  if mode == "fast" then return 0.0020 end
+  if mode == "smooth" then return 0.0008 end
+  return 0.0013
+end
+ChunkMesher._kantoVisibleSlice = kantoVisibleSlice
+
+local function pickJob()
+  -- 1) current/urgent terrain
+  for _, j in ipairs(jobs) do if not j.cacheOnly and j.urgent then return j end end
+  -- 2) any real visible/prefetch terrain
+  for _, j in ipairs(jobs) do if not j.cacheOnly then return j end end
+  -- 3) persistent background warming
+  return jobs[1]
+end
+
+function ChunkMesher.pump(covered, interactive)
+  if #jobs == 0 then return end
+  local pick = pickJob()
+  local urgentSlice, idleSlice, coveredSlice = buildSlices()
+  local slice
+  if pick.cacheOnly then
+    slice = cacheWarmSlice(covered, interactive == true or interactive == "kanto-visible")
+  elseif interactive == "kanto-visible" and not covered then
+    -- Current Kanto terrain is already drawable; this is neighbour/prefetch
+    -- work. Preserve the mesh exactly but cap its contribution to this visible
+    -- gameplay frame.
+    slice = kantoVisibleSlice(pick.urgent == true)
+  else
+    -- Native worlds and cold/current Kanto terrain keep the normal slice.
+    slice = covered and coveredSlice or (pick.urgent and urgentSlice or idleSlice)
+  end
   local deadline = clock() + slice
   while pick do
-    if not pick.co then
-      pick.co = coroutine.create(runJob)
-    end
-    Budget.begin(pick.co, deadline - clock())
+    if not pick.co then pick.co = coroutine.create(runJob) end
+    Budget.begin(pick.co, math.max(0, deadline - clock()))
     local ok, err = coroutine.resume(pick.co, pick)
     Budget.finish()
     if not ok then
@@ -1076,16 +1472,10 @@ function ChunkMesher.pump(covered)
     elseif coroutine.status(pick.co) == "dead" then
       finishJob(pick, true)
     else
-      return   -- slice spent mid-build; resume next frame
+      return
     end
     if clock() >= deadline or #jobs == 0 then return end
-    pick = jobs[1]
-    for _, j in ipairs(jobs) do
-      if j.urgent then
-        pick = j
-        break
-      end
-    end
+    pick = pickJob()
   end
 end
 
@@ -1098,6 +1488,7 @@ end
 function ChunkMesher.get(map, bodyOnly, masks)
   local slot = bodyOnly and "body" or "full"
   local c = entry(map.id)
+  c.map = map
   if c.grass == nil or c.flowers == nil or (c.stale and c.stale.aux) then
     local okG, grass = pcall(buildGrassMesh, map)
     local okF, flowers = pcall(buildFlowerMesh, map)
@@ -1183,11 +1574,13 @@ function ChunkMesher.refresh(mapId)
     return ChunkMesher.invalidate(mapId)
   end
   Structures.invalidate(mapId)
+  if c and c.map then DiskCache.invalidateMap(c.map) end
   gen[mapId] = (gen[mapId] or 0) + 1
   for i = #jobs, 1, -1 do
     local job = jobs[i]
     if job.id == mapId then
-      jobIndex[jobKey(job.id, job.slot)] = nil
+      job.cancelled = true
+      jobIndex[job.key or jobKey(job.id, job.slot)] = nil
       table.remove(jobs, i)
     end
   end
@@ -1210,13 +1603,19 @@ end
 -- flat-world flash after every house. One set of history makes the
 -- round trip free while staying bounded at two neighbourhoods.
 local prevLive = {}
+local prevLiveSpare = {}
+
+local function clearLiveSet(t)
+  for id in pairs(t or {}) do t[id] = nil end
+  return t
+end
 
 function ChunkMesher.setLive(live, forgetPrevious)
   -- Normal streaming keeps one previous neighbourhood warm for cheap
   -- house/door round trips. OPEN WORLD -> OFF is different: the user is
   -- explicitly asking to shed the expensive far-world residency now, so the
   -- caller may discard that one-generation grace set before eviction.
-  if forgetPrevious then prevLive = {} end
+  if forgetPrevious then clearLiveSet(prevLive) end
   for id, c in pairs(cache) do
     if not live[id] and not prevLive[id] then
       releaseEntry(c)
@@ -1227,12 +1626,26 @@ function ChunkMesher.setLive(live, forgetPrevious)
   end
   for i = #jobs, 1, -1 do
     local job = jobs[i]
-    if not live[job.id] and not prevLive[job.id] then
-      jobIndex[jobKey(job.id, job.slot)] = nil
+    -- Persistent warmers are intentionally independent of GPU residency. They
+    -- may finish a far Kanto sector to disk while the live set stays small.
+    -- TwinRegionWorld explicitly cancels Kanto warmers on RETURN TO JOHTO.
+    if not job.cacheOnly and not live[job.id] and not prevLive[job.id] then
+      job.cancelled = true
+      jobIndex[job.key or jobKey(job.id, job.slot)] = nil
       table.remove(jobs, i)
     end
   end
-  prevLive = live
+
+  -- v0.3.59 owns the previous-live snapshot instead of retaining the caller's
+  -- table by reference. Kanto now reuses one scratch dictionary every frame;
+  -- retaining it here would let the next wipe silently rewrite residency
+  -- history. Two internal sets swap roles so even route changes allocate
+  -- nothing after initialization.
+  clearLiveSet(prevLiveSpare)
+  for id, keep in pairs(live or {}) do
+    if keep then prevLiveSpare[id] = true end
+  end
+  prevLive, prevLiveSpare = prevLiveSpare, prevLive
 end
 
 -- Drop one map's mesh (Cut swapped a block) or all of them (hot reload).
@@ -1244,11 +1657,16 @@ function ChunkMesher.invalidate(mapId)
   if mapId then
     lastErrors[mapId] = nil
     local c = cache[mapId]
+    if c and c.map then DiskCache.invalidateMap(c.map) end
     if c then releaseEntry(c) end
     cache[mapId] = nil
     gen[mapId] = (gen[mapId] or 0) + 1
   else
-    for _, c in pairs(cache) do releaseEntry(c) end
+    for _, c in pairs(cache) do
+      if c.map then DiskCache.invalidateMap(c.map) end
+      releaseEntry(c)
+    end
+    DiskCache.invalidateSignatures()
     cache = {}
     lastErrors = {}
     for id in pairs(gen) do gen[id] = gen[id] + 1 end
@@ -1256,21 +1674,35 @@ function ChunkMesher.invalidate(mapId)
   for i = #jobs, 1, -1 do
     local job = jobs[i]
     if mapId == nil or job.id == mapId then
-      jobIndex[jobKey(job.id, job.slot)] = nil
+      job.cancelled = true
+      jobIndex[job.key or jobKey(job.id, job.slot)] = nil
       table.remove(jobs, i)
     end
   end
 end
 
--- v0.2.66 recovery: persistent disk cache is intentionally removed from the
--- live mesher path. Keep these compatibility probes so newer status/debug code
--- can ask about it without reintroducing any cache I/O or cache-era geometry.
+function ChunkMesher.diskCacheEnabled()
+  -- The persistent format is the raw FFI float sink. A runtime without FFI may
+  -- still READ an existing cache through DiskCache, but it cannot safely emit
+  -- new entries, so do not schedule aggressive warmers there.
+  return DiskCache.enabled() and ffi ~= nil
+end
+
 function ChunkMesher.diskCacheStatus()
-  return { enabled = false, recoveryDisabled = true, revision = "removed-from-live-mesher-v066" }
+  local out = DiskCache.status()
+  out.warmQueued = warmStats.queued
+  out.warmCompleted = warmStats.completed
+  out.warmHits = warmStats.hits
+  out.warmCancelled = warmStats.cancelled
+  out.warmErrors = warmStats.errors
+  out.warmPending = ChunkMesher.warmPending()
+  out.johtoWarmPending = ChunkMesher.warmPending("johto")
+  out.kantoWarmPending = ChunkMesher.warmPending("kanto")
+  return out
 end
 
 function ChunkMesher.clearDiskCache()
-  return false
+  return DiskCache.clear()
 end
 
 Assets.register(function() ChunkMesher.invalidate() end)

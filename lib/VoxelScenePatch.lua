@@ -194,6 +194,37 @@ local POSES = [====[local function posesOf(state, spriteColors)
       if e == state.player then
         me = posed[#posed]
         me.isPlayer = true
+        -- Carry the visible world's movement state on THIS captured pose.  The
+        -- base VoxelScene does this for Johto, but our compatibility replacement
+        -- used to omit it, which left the Kanto proxy's external 3D trainer skin
+        -- with a frozen/stale Johto animation state.
+        me.stadiumVisualMoving = state._stadiumFreeMoveActive == true
+          and state._stadiumFreeVisualMoving == true
+        me.stadiumVisualAnimDist = tonumber(state._stadiumFreeAnimDist) or 0
+        me.stadiumMoveWorldX = tonumber(state._stadiumFreeWorldX) or 0
+        me.stadiumMoveWorldZ = tonumber(state._stadiumFreeWorldZ) or 0
+        -- Continuous FIRST/THIRD movement never sets the gameplay Player.moving
+        -- flag, so pose() arrives standing. Promote the captured presentation
+        -- pose to Gold's native 0/1 walk phase before any sprite/model renderer
+        -- consumes it. DIORAMA already gets this from native grid movement.
+        if me.stadiumVisualMoving and not state._stadiumLiveBattle then
+          -- Tie the 2D card cadence to actual free-roam travel distance.  That
+          -- remains live for analogue movement even on hosts where
+          -- Player.animClock is not advanced by the continuous controller.
+          local q = (tonumber(me.stadiumVisualAnimDist) or 0) % 16
+          me.phase = (q >= 4 and q < 12) and 1 or 0
+          me.flip = e.stepFlip == true
+        elseif not state._stadiumLiveBattle and type(e.walkPhase) == "function" then
+          -- DIORAMA/native grid movement: always refresh from Gold/Silver's
+          -- public Player walk phase instead of trusting a stale pose capture.
+          local okWalk, walk = pcall(e.walkPhase, e)
+          if okWalk and walk ~= nil then me.phase = walk end
+          me.flip = e.stepFlip == true or me.flip == true
+        end
+        if me.sprite and type(me.sprite.def) == "table"
+           and (tonumber(me.sprite.def.frames) or 1) > 1 then
+          me.sprite.def.walker = true
+        end
         if state._stadiumLiveBattle then
           -- Freeze every visual-walk bridge while the battle owns the pose.
           -- Otherwise a movement bit captured on the encounter frame can keep
@@ -201,6 +232,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
           me.stadiumBattleGrounded = true
           me.stadiumVisualMoving = false
           me.stadiumVisualAnimDist = 0
+          me.stadiumMoveWorldX, me.stadiumMoveWorldZ = 0, 0
         end
       end
     end
@@ -224,6 +256,12 @@ end
 -- Replace only the character loop inside drawCast, leaving every terrain,
 -- figure, grass, glass and reflection detail from the installed DS untouched.
 local function patchCastLoop(source)
+  -- v0.4.06's embedded renderer accepts a presentation-only player card scale
+  -- as drawEntity's final argument. Older host forks do not have the helper;
+  -- keep their historical call shape so this structural patch still degrades
+  -- safely instead of making an older VoxelScene depend on a new local.
+  local supportsPlayerCardScale = source:find("local function playerCardScale(p)", 1, true) ~= nil
+
   -- Newer Dramatic Shape releases route character drawing through drawCast().
   -- Patch that seam when present.
   local fn = source:find("local function drawCast", 1, true)
@@ -252,6 +290,10 @@ local function patchCastLoop(source)
     end
   end
 ]====]
+    if supportsPlayerCardScale then
+      block = block:gsub("p%.colors, p%.lift%)",
+        "p.colors, p.lift, playerCardScale(p))")
+    end
     return source:sub(1, a - 1) .. block .. source:sub(glass), "drawCast"
   end
 
@@ -292,6 +334,10 @@ local function patchCastLoop(source)
     end
   end
 ]====]
+  if supportsPlayerCardScale then
+    block = block:gsub("p%.colors, p%.lift%)",
+      "p.colors, p.lift, playerCardScale(p))")
+  end
   local a, b = source:find(old, 1, true)
   return source:sub(1, a - 1) .. block .. source:sub(b + 1), "legacy-render"
 end

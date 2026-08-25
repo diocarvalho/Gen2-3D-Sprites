@@ -230,6 +230,31 @@ end
 -- Does not own persistence; invalidates local cache instead of storing a
 -- parallel truth. Callers that need runtime refresh should go through
 -- Follower:onOptionsChanged / ControlEngine:onOptionsChanged.
+local function clampFollowerGap(value)
+  local n = math.floor(tonumber(value) or 1)
+  if n < 1 then return 1 end
+  if n > 4 then return 4 end
+  return n
+end
+
+function ControlEngine:playerFollowerGap()
+  return clampFollowerGap(self:_opt("follower_player_spacing", 1))
+end
+
+function ControlEngine:pokemonFollowerGap()
+  return clampFollowerGap(self:_opt("follower_pokemon_spacing", 1))
+end
+
+function ControlEngine:_trailDelay(index)
+  index = math.max(1, math.floor(tonumber(index) or 1))
+  return self:playerFollowerGap() + (index - 1) * self:pokemonFollowerGap()
+end
+
+function ControlEngine:_maxTrailDelay(count)
+  count = math.max(1, math.floor(tonumber(count) or self:followerCount()))
+  return self:_trailDelay(count)
+end
+
 function ControlEngine:setFollowerCount(game, n)
   n = math.max(0, math.min(6, math.floor(tonumber(n) or 0)))
   local settings = self.settings
@@ -1268,6 +1293,27 @@ function ControlEngine:_applyConnectionHandoff(ow)
   end
   local dx = (player.cellX or 0) - (snapshot.playerX or 0)
   local dy = (player.cellY or 0) - (snapshot.playerY or 0)
+
+  -- Reject a stale convoy before translating it into the destination map.
+  -- A follower that was already an implausible distance from the source player
+  -- is exactly the bad state that used to reappear at the opposite edge after
+  -- a connection.  Falling back to the normal entry park is invisible and
+  -- deterministic: the pack respawns under the player and walks back out.
+  local maxDist = self:_maxTrailDelay(#snapshot.trailers) + 4
+  for _, trailer in ipairs(snapshot.trailers) do
+    local sx, sy = tonumber(trailer.cellX), tonumber(trailer.cellY)
+    if sx == nil or sy == nil
+       or math.abs(sx - (snapshot.playerX or 0))
+          + math.abs(sy - (snapshot.playerY or 0)) > maxDist then
+      return false
+    end
+    if trailer.targetX ~= nil and trailer.targetY ~= nil
+       and math.abs((trailer.targetX or sx) - (snapshot.playerX or 0))
+          + math.abs((trailer.targetY or sy) - (snapshot.playerY or 0)) > maxDist + 2 then
+      return false
+    end
+  end
+
   ow.npcs = ow.npcs or {}
   ow.entities = ow.entities or {}
   for _, trailer in ipairs(snapshot.trailers) do
@@ -1283,6 +1329,7 @@ function ControlEngine:_applyConnectionHandoff(ow)
   ow.pokepcTrailers = snapshot.trailers
   ow.pokepcTrailCells = snapshot.trailCells
   ow.pokepcTrailHead = head or { x = player.cellX, y = player.cellY }
+  ow._wildsFollowerPathHistory = {}
   ow._wildsFollowerSeamActive = true
   self._pendingMapTrailerSync = false
   self._pendingSpawnAtPlayer = false
@@ -1551,7 +1598,7 @@ function ControlEngine:_seedTrailBehind(ow, anchor, facing, n, game, role)
       local occupied = {}
       occupied[px .. "," .. py] = true
       for i = 1, n do
-        local bx, by = self:_walkableBehind(ow, px, py, facing, i, nil, game, role, occupied)
+        local bx, by = self:_walkableBehind(ow, px, py, facing, self:_trailDelay(i), nil, game, role, occupied)
         goals[i] = { x = bx, y = by }
         occupied[bx .. "," .. by] = true
       end
@@ -1739,6 +1786,7 @@ function ControlEngine:syncTrailers(game, ow, opts)
   if prevSurface ~= surface then
     mapEnter = true
     ow._wildsFollowerTrailSurface = surface
+    ow._wildsFollowerPathHistory = {}
   end
 
   -- Yellow only: re-form the train behind the stock Pikachu when the pack
@@ -1822,6 +1870,7 @@ function ControlEngine:syncTrailers(game, ow, opts)
     ow.pokepcTrailers = trailers
     ow.pokepcTrailCells = goals
     ow.pokepcTrailHead = { x = anchor.cellX, y = anchor.cellY }
+    ow._wildsFollowerPathHistory = {}
     self._lastSyncedCount = wantN
   elseif mapEnter and #trailers > 0 then
     if opts.spawnAtPlayer then
@@ -1858,6 +1907,7 @@ function ControlEngine:syncTrailers(game, ow, opts)
     end
     ow.pokepcTrailCells = goals
     ow.pokepcTrailHead = { x = anchor.cellX, y = anchor.cellY }
+    ow._wildsFollowerPathHistory = {}
   end
 
   local destX = anchor.targetX or anchor.cellX
@@ -1926,14 +1976,19 @@ function ControlEngine:syncTrailers(game, ow, opts)
         head.ledgeHop = nil
       end
       local goals = ow.pokepcTrailCells or {}
-      for i = #trailers, 2, -1 do
-        local prev = goals[i - 1]
-        goals[i] = prev and { x = prev.x, y = prev.y }
-          or { x = head.x, y = head.y }
+      local history = ow._wildsFollowerPathHistory or {}
+      table.insert(history, 1, { x = head.x, y = head.y })
+      local keep = self:_maxTrailDelay(#trailers) + 6
+      while #history > keep do table.remove(history) end
+      for i = 1, #trailers do
+        local released = history[self:_trailDelay(i)]
+        -- Until enough player steps have accumulated for the requested gap,
+        -- keep this trailer on its existing goal.  Fresh-map trailers start
+        -- stacked under the player, so the spacing opens naturally instead of
+        -- teleporting them into position.
+        if released then goals[i] = { x = released.x, y = released.y } end
       end
-      if #trailers >= 1 then
-        goals[1] = { x = head.x, y = head.y }
-      end
+      ow._wildsFollowerPathHistory = history
       ow.pokepcTrailCells = goals
       head.x, head.y = destX, destY
     end
@@ -2018,8 +2073,8 @@ function ControlEngine:syncTrailers(game, ow, opts)
 end
 
 --- Assign one step for a trailer toward (gx, gy). Corner-navigates, handles
--- ledges, and picks the cadence: normal at 1-cell spacing, double-speed for
--- catch-up. Stores the goal on the trailer so the catch-up pass can chain
+-- ledges, and picks the cadence: normal on the configured trail spacing,
+-- double-speed for catch-up. Stores the goal on the trailer so the catch-up pass can chain
 -- consecutive steps without waiting for the next goal shift. Returns true
 -- when a step started; false when blocked (no adjacent follower cell).
 function ControlEngine:_assignTrailerStep(game, ow, npc, gx, gy, surface, role,
@@ -2032,7 +2087,8 @@ function ControlEngine:_assignTrailerStep(game, ow, npc, gx, gy, surface, role,
     -- is so far that waiting would strand it forever; mid-range blocked
     -- trailers wait for the goal to shift instead of teleporting (teleports
     -- read as "dragged along" jumps on followers 2+).
-    if far > 8 then
+    local warpThreshold = math.max(8, self:_maxTrailDelay(#(ow.pokepcTrailers or {})) + 4)
+    if far > warpThreshold then
       placeTrailerAt(npc, gx, gy, npc.facing or facing)
       npc._wildsGoalX, npc._wildsGoalY = nil, nil
     end
@@ -2063,7 +2119,7 @@ function ControlEngine:_assignTrailerStep(game, ow, npc, gx, gy, surface, role,
       npc._wildsGoalX, npc._wildsGoalY = hx, hy
     end
   end
-  -- Normal cadence at 1-cell spacing. Trailers that fell behind (blocked
+  -- Normal cadence at the configured spacing. Trailers that fell behind (blocked
   -- corner, spawn, surface change) walk at double cadence until they close
   -- the gap; the catch-up pass chains the next step the moment one lands so
   -- the straggler moves continuously instead of bursting 8 frames then
@@ -2400,7 +2456,10 @@ function ControlEngine:syncAll(game, ow)
   -- In trainer FOLLOW mode, update the saved fingerprint to the Pokemon that
   -- currently occupies the selected party slot before rebuilding anything.
   pcall(function() self:_syncFollowLeaderBinding(game) end)
-  if ow then pcall(function() self:removeTrailers(ow) end) end
+  if ow then
+    ow._wildsFollowerPathHistory = {}
+    pcall(function() self:removeTrailers(ow) end)
+  end
   -- Never reorder the party here. The default binding is slot 1, so Gold's
   -- own PARTY -> SWITCH operation changes the follower naturally; explicit
   -- FOLLOW selections bind another slot without this mod moving party rows.

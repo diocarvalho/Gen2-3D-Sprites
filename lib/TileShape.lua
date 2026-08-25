@@ -657,6 +657,15 @@ function TileShape.at(map, shapes, tile, tx, ty)
   if not s then return s end
   local cx = math.floor(tx / 2)
   local cy = math.floor(ty / 2)
+  -- KANTO / FOREIGN GEN-1 WATER SAFETY. The projected Kanto tileset may carry
+  -- authored Gen-2 shape pins for a source graphic, but Yellow's cell-level
+  -- water membership is the gameplay truth. A projected tree/wall pin must
+  -- never turn an actual Surf cell into a standing voxel column. Keep this
+  -- exception private to the inactive Gen-1 adapter so native Johto/Gold
+  -- authored waterfall/cliff semantics retain their normal priority.
+  if map._stadiumForeignGen1Map and map:isWaterCell(cx, cy) then
+    return shapes.classes.water
+  end
   -- A HOP LIP outranks the tile's own pin.  The lip is drawn out of the
   -- same two tiles as the mountain face (outdoors) or the cave wall
   -- (indoors), so no pin on those tiles can know that THIS one is the

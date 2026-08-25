@@ -803,6 +803,13 @@ end
 
 function Capture.pollManual(logic)
   if Capture.session or not Capture.installed then return false end
+  -- The shoulder-aim throw minigame is a 3D presentation feature. In native
+  -- 2D, leave roaming Pokemon contact/interact behavior completely untouched
+  -- instead of probing stale free-camera state every input tick.
+  if not voxelEnabled() then
+    Capture.lastReason = "2D mode uses normal visible-wild battles/catching"
+    return false
+  end
   -- L2 / right mouse is HOLD TO AIM, not a throw edge. While held, keep looking
   -- for a valid visible target; this makes entering aim reliable while standing.
   if not manualAimHeld() then return false end

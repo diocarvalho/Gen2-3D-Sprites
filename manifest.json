@@ -1,7 +1,7 @@
 {
   "id": "STADIUM2_OVERWORLD_MODELS",
-  "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver (Gen 2)",
-  "version": "0.2.81",
+  "name": "Pokemon Stadium 2 Overworld Models - Gold/Silver/Crystal (Gen 2)",
+  "version": "0.4.33",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -10,7 +10,8 @@
   "priority": 110,
   "dependencies": [],
   "optional_dependencies": [
-    "red_3d_player"
+    "red_3d_player",
+    "spotify_gold_player"
   ],
   "conflicts": [
     "STADIUM_OVERWORLD_MODELS"
@@ -20,12 +21,21 @@
     "filesystem"
   ],
   "affects_link": false,
-  "description": "Standalone Gold/Silver Gen-2 voxel + Stadium 2 mod. v0.2.81 makes trainer FOLLOW mode track the selected party slot (slot 1 by default), so PARTY -> SWITCH immediately replaces the visible follower instead of keeping the original starter fingerprint. Also refreshes same-species/shiny leader swaps. Keeps full-color 2D followers, DSM7 symmetric eye sampling, National-number Pokedex ordering, independent Pokemon/player 3D toggles, Stadium-style UI, extended OPEN WORLD zoom, seamless followers, roaming Wilds, voxel terrain and Character Selector coexistence.",
+  "description": "v0.4.33 adds first-class Pokemon Crystal compatibility for current Gen1Recomp: Crystal-aware mobile picker routing, per-edition Gold/Silver/Crystal voxel disk-cache namespaces, active Gen-2 engine/version exports, Crystal-inclusive runtime messaging, and MYSTICALMAN/Eusine announcer boss scope. Existing Kanto Open World/Ocean and sector preload behavior is retained.",
   "options_schema": "options.lua",
   "github": "randyadr/Gen2-3D-Sprites",
   "experimental": false,
   "games": [
     "gen2"
   ],
-  "gen2compat": true
+  "gen2compat": true,
+  "optional_imports": [
+    {
+      "id": "stadium1_fx_rom",
+      "name": "Pokemon Stadium (USA) v1.0 ROM (battle FX + announcer cache)",
+      "file": "stadium1_fx.z64",
+      "format": "n64",
+      "md5": "ed1378bc12115f71209a77844965ba50"
+    }
+  ]
 }

@@ -35,6 +35,8 @@ Config.DEFAULTS = {
   follow_control = "trainer", -- trainer | pokemon
   trainer_trail = false,
   follower_count = 1, -- 0–6 visible party followers (Wilds owns Gold slot #1)
+  follower_player_spacing = 1, -- walked tiles between player and follower #1
+  follower_pokemon_spacing = 1, -- walked tiles added between later followers
   -- Peaceful ambient NPCs in towns / safe interiors (not wild battles).
   town_pokemon = true,
   -- Legacy key kept for save migration only (Mon Sprites toggle).

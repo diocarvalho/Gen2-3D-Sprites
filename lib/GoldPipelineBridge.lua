@@ -67,11 +67,14 @@ local function resolveWorld(ctx)
   return nil
 end
 
--- GoldVoxelBridge was originally fed render.compose metrics.  Translate the
--- official drawWorld context without mutating the engine's table.  In
--- particular force the output canvas to the logical window dimensions the
--- pipeline compositor expects; render.compose separately handles HiDPI scaling
--- when the older fallback path is used.
+-- GoldVoxelBridge was originally fed render.compose metrics. Translate the
+-- official drawWorld context without mutating the engine's table. Gold does
+-- NOT use Gen1 Renderer:endFrame for this pass: World:drawPipeline draws the
+-- returned canvas directly at (0,0).  `generation = 2` is therefore part of
+-- the sizing contract -- GoldVoxelBridge must return ctx.width x ctx.height
+-- logical output even on HiDPI Android, while Gen1 keeps its physical
+-- framebuffer worldOverride rules.  Physical metrics are retained only as
+-- diagnostics/compatibility data.
 local function voxelContext(ctx)
   local w = tonumber(ctx and ctx.width)
   local h = tonumber(ctx and ctx.height)
@@ -80,10 +83,16 @@ local function voxelContext(ctx)
     if G and type(G.getDimensions) == "function" then w, h = G.getDimensions() end
   end
   w, h = tonumber(w) or 1, tonumber(h) or 1
+  -- Preserve physical metrics only when the engine actually supplied them.
+  -- Leaving them nil lets GoldVoxelBridge fall through to GameViewport's
+  -- pixelDimensions() on current hosts instead of mistaking LOVE units for
+  -- framebuffer pixels on HiDPI / reserved-viewport layouts.
+  local pw = tonumber(ctx and (ctx.pw or ctx.pixelWidth))
+  local ph = tonumber(ctx and (ctx.ph or ctx.pixelHeight))
   return {
     generation = 2,
     ww = w, wh = h,
-    pw = w, ph = h,
+    pw = pw, ph = ph,
     vw = tonumber(ctx and ctx.vw),
     vh = tonumber(ctx and ctx.vh),
     scale = tonumber(ctx and ctx.scale),

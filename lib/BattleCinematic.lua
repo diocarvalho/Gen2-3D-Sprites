@@ -10,6 +10,7 @@ BattleCinematic.enabled = true
 BattleCinematic.angle = nil
 BattleCinematic.radius = 96
 BattleCinematic.height = 48
+BattleCinematic.fov = 55
 BattleCinematic.manualHold = 0
 BattleCinematic.manualPitch = 0
 BattleCinematic.lastActive = false
@@ -63,10 +64,21 @@ local function settingOn()
   return true
 end
 
+local function stadiumBattleFxPort()
+  local port = V and V.StadiumBattleFXPort
+  if type(port) == "table" then return port end
+  if V and type(V.require) == "function" then
+    local ok, got = pcall(V.require, "StadiumBattleFXPort")
+    if ok and type(got) == "table" then return got end
+  end
+  return nil
+end
+
 function BattleCinematic.reset()
   BattleCinematic.angle = nil
   BattleCinematic.radius = 96
   BattleCinematic.height = 48
+  BattleCinematic.fov = 55
   BattleCinematic.manualHold = 0
   BattleCinematic.manualPitch = 0
   BattleCinematic.t = 0
@@ -112,6 +124,28 @@ local function frameImpl(dt)
   if not (px and pz and ex and ez) then return nil end
   -- Work only with validated numeric coordinates from this point onward.
   p, e = { px, pz }, { ex, ez }
+
+  -- v0.3.20: follow temporary contact-lunge / hit-recoil positions instead of
+  -- framing only the stable manual-control anchors.  These positions are
+  -- presentation-only and never feed back into Gold's battle state.
+  local modernMechanics
+  do
+    local okModern, got = pcall(V.require, "BattleModernMechanics")
+    if okModern and type(got) == "table" then modernMechanics = got end
+  end
+  if modernMechanics and type(modernMechanics.actorPosition) == "function" then
+    local okP, pp = pcall(modernMechanics.actorPosition, "player", arena)
+    if okP and type(pp) == "table" and tonumber(pp[1]) and tonumber(pp[2]) then
+      p = { tonumber(pp[1]), tonumber(pp[2]) }
+    end
+    local okE, ep = pcall(modernMechanics.actorPosition, "enemy", arena)
+    if okE and type(ep) == "table" and tonumber(ep[1]) and tonumber(ep[2]) then
+      e = { tonumber(ep[1]), tonumber(ep[2]) }
+    end
+  end
+  px, pz, ex, ez = p[1], p[2], e[1], e[2]
+  -- Keep DoubleBattleMode's selected-partner midpoint ownership when present;
+  -- the active-side focus below still follows temporary combat offsets.
   local cx = arena.mid and tonumber(arena.mid[1]) or ((px + ex) * 0.5)
   local cz = arena.mid and tonumber(arena.mid[2]) or ((pz + ez) * 0.5)
   if not (cx and cz) then
@@ -135,6 +169,22 @@ local function frameImpl(dt)
   end
   if manualControl then activeSide = "player" end
   if manualAttack then attack = true end
+
+  -- v0.3.21: translate StadiumBattleFX 2.1.7's authored move-camera profile
+  -- into this Gold-safe live-world camera. The source timeline owns subject,
+  -- optical width and a small orbit offset; it never writes battle state.
+  local fxPort = stadiumBattleFxPort()
+  local fxDirective
+  if fxPort and type(fxPort.cameraDirective) == "function" then
+    local okFx, got = pcall(fxPort.cameraDirective)
+    if okFx and type(got) == "table" then
+      fxDirective = got
+      if got.attackerSide == "player" or got.attackerSide == "enemy" then
+        activeSide = got.attackerSide
+        attack = true
+      end
+    end
+  end
 
   dt = math.max(0, math.min(0.1, tonumber(dt) or 1/60))
 
@@ -180,7 +230,13 @@ local function frameImpl(dt)
       local sideSign = activeSide == "player" and 1 or -1
       local bx = -ux + px2 * 0.48 * sideSign
       local bz = -uz + pz2 * 0.48 * sideSign
-      local targetAngle = wrap(math.atan2(bx, bz) + math.sin(BattleCinematic.t * 0.72) * 0.10)
+      local sourceOrbit = 0
+      if fxDirective and BattleCinematic.manualHold <= 0 then
+        sourceOrbit = tonumber(fxDirective.orbit) or 0
+        if activeSide == "enemy" then sourceOrbit = -sourceOrbit end
+      end
+      local targetAngle = wrap(math.atan2(bx, bz)
+        + math.sin(BattleCinematic.t * 0.72) * 0.10 + sourceOrbit)
       BattleCinematic.angle = approachAngle(BattleCinematic.angle, targetAngle, dt * 2.0)
     else
       -- Between turns/menu selection, widen back out and resume the slow orbit.
@@ -193,8 +249,36 @@ local function frameImpl(dt)
   -- Active-turn shots push closer; menu/inter-turn shots leave more breathing room.
   local wantRadius = activeSide and (attack and 69 or 76) or (resolving and 88 or 100)
   local wantHeight = activeSide and (attack and 35 or 40) or 48
+  local wantFov = activeSide and (attack and 51.5 or 53.5) or (resolving and 55.0 or 57.0)
+
+  if fxDirective and attack and BattleCinematic.manualHold <= 0 then
+    -- StadiumBattleFX itself floors portable attack framing at 1.18x, with
+    -- 1.30x for aerial moves, because the animated body can travel far outside
+    -- its idle footprint. Preserve that safety policy in degrees here.
+    local frameMin = fxDirective.profile == "aerial" and 1.30 or 1.18
+    local optical = math.max(frameMin, tonumber(fxDirective.zoom) or 1)
+    optical = optical * (1 + math.max(0, tonumber(fxDirective.compatibilityZoom) or 0))
+    wantFov = math.max(43, math.min(72, wantFov * optical))
+    local nativeElevation = tonumber(fxDirective.elevation) or 0
+    if nativeElevation ~= 0 then
+      -- Stadium1 native camera selectors encode distinct low/high rigs.  The
+      -- combined renderer owns a different world scale, so preserve the angle
+      -- family by translating it into a bounded eye-height offset rather than
+      -- copying Stadium1's absolute camera coordinates.
+      wantHeight = math.max(26, math.min(64, wantHeight + math.sin(nativeElevation) * 18))
+    end
+    if fxDirective.profile == "aerial" then
+      wantHeight = math.max(wantHeight, 46)
+      wantRadius = math.max(wantRadius, 76)
+    elseif fxDirective.profile == "field" or fxDirective.profile == "explosion" then
+      wantRadius = math.max(wantRadius, 88)
+      wantHeight = math.max(wantHeight, 42)
+    end
+  end
+
   BattleCinematic.radius = approach(BattleCinematic.radius, wantRadius, dt * 2.8)
   BattleCinematic.height = approach(BattleCinematic.height, wantHeight, dt * 2.8)
+  BattleCinematic.fov = approach(BattleCinematic.fov or 55, wantFov, dt * 3.4)
 
   -- Focus strongly favors the active Pokemon while retaining enough of the
   -- opponent's side to read the exchange. Between turns it eases to midpoint.
@@ -203,6 +287,15 @@ local function frameImpl(dt)
     local actor = activeSide == "player" and p or e
     local other = activeSide == "player" and e or p
     local actorWeight = attack and 0.82 or 0.74
+    if fxDirective and attack and BattleCinematic.manualHold <= 0 then
+      if fxDirective.subject == "attacker" then
+        actorWeight = 0.91
+      elseif fxDirective.subject == "target" then
+        actorWeight = 0.14
+      elseif fxDirective.subject == "center" or fxDirective.subject == "wide" then
+        actorWeight = 0.50
+      end
+    end
     wantFx = actor[1] * actorWeight + other[1] * (1 - actorWeight)
     wantFz = actor[2] * actorWeight + other[2] * (1 - actorWeight)
   end
@@ -211,16 +304,46 @@ local function frameImpl(dt)
   BattleCinematic.activeSide = activeSide
 
   local a = BattleCinematic.angle
-  local r = BattleCinematic.radius
+  local feedback = { shakeX=0, shakeY=0, zoom=0 }
+  if modernMechanics and type(modernMechanics.cameraFeedback) == "function" then
+    local okFeedback, got = pcall(modernMechanics.cameraFeedback)
+    if okFeedback and type(got) == "table" then feedback = got end
+  end
+  local zoom = math.max(0, math.min(1, tonumber(feedback.zoom) or 0))
+  local r = BattleCinematic.radius * (1 - zoom * 0.055)
   local fx, fz = BattleCinematic.focusX, BattleCinematic.focusZ
   local eyeY = gy + BattleCinematic.height + BattleCinematic.manualPitch * 42
-  local eye = { fx + math.sin(a) * r, eyeY, fz + math.cos(a) * r }
+  local shakeX = tonumber(feedback.shakeX) or 0
+  local shakeY = tonumber(feedback.shakeY) or 0
+  -- StadiumBattleFX 2.1.7 authored attack-camera timelines also carry an
+  -- impact shake channel. Layer it over the v0.3.20 real-damage recoil rather
+  -- than replacing it: the source pulse supplies move timing, while Gold still
+  -- owns whether damage actually happened. The short deterministic window
+  -- avoids per-frame randomness/jitter and never feeds back into battle state.
+  if fxDirective and BattleCinematic.manualHold <= 0 then
+    local authored = math.max(0, tonumber(fxDirective.shake) or 0)
+    local impact = tonumber(fxDirective.impact) or -999
+    local tick = tonumber(fxDirective.tick) or 0
+    local dist = math.abs(tick - impact)
+    if authored > 0 and dist < 9 then
+      local envelope = 1 - dist / 9
+      local seed = (tonumber(fxDirective.moveId) or 0) * 0.173
+      local pulse = authored * envelope * 0.85
+      shakeX = shakeX + math.sin(tick * 2.41 + seed) * pulse
+      shakeY = shakeY + math.cos(tick * 2.07 + seed * 1.7) * pulse * 0.42
+    end
+  end
+  local eye = {
+    fx + math.sin(a) * r + math.cos(a) * shakeX,
+    eyeY + shakeY,
+    fz + math.cos(a) * r - math.sin(a) * shakeX,
+  }
   local focus = { fx, gy + 12, fz }
   local cam = {
     eye = eye,
     focus = focus,
     up = { 0, 1, 0 },
-    fov = math.rad(55),
+    fov = math.rad((BattleCinematic.fov or 55) - zoom * 2.2),
     curve = 0,
     _stadiumBattleCinematic = true,
   }

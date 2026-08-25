@@ -177,12 +177,20 @@ FirstPerson.hostWorld = hostWorld
 
 -- ------- gates
 
+local function world3DEnabled()
+  if V and type(V.world3DEnabled) == "function" then
+    local ok, enabled = pcall(V.world3DEnabled)
+    if ok then return enabled == true end
+  end
+  return true
+end
+
 -- Whether a free-roam rung -- 1ST or 3RD -- is selected and the 3D pass can
 -- carry it. Both stand the camera with the player, so both read the look
 -- inputs, both walk free, and both turn the cards; how far behind the head
 -- the eye ends up is ThirdPerson's business alone.
 function FirstPerson.engaged()
-  return Voxel.isFreeCam(Voxel.level) and Voxel3D.available()
+  return world3DEnabled() and Voxel.isFreeCam(Voxel.level) and Voxel3D.available()
 end
 
 -- Whether the overworld is what the player is looking at: nothing pushed
@@ -238,6 +246,19 @@ end
 
 function FirstPerson.stickY()
   return stick.y or 0
+end
+
+-- Whether the live right stick is actively steering the free-roam camera.
+-- This is intentionally a CAMERA-OWNERSHIP fact, not just an axis threshold:
+-- a stale axis value while a menu/battle owns the screen must never pin a
+-- camera mode or suppress a later settings change. GoldVoxelBridge and the
+-- shadow pass use this so analog look can change yaw/pitch without ever
+-- transiently changing the selected camera or exposing native 2D.
+function FirstPerson.analogLookActive()
+  if not FirstPerson.driving() then return false end
+  local x, y = tonumber(stick.x) or 0, tonumber(stick.y) or 0
+  return math.abs(x) >= FirstPerson.STICK_DEAD
+      or math.abs(y) >= FirstPerson.STICK_DEAD
 end
 
 -- Some controller stacks deliver mapped right-stick events inconsistently once
@@ -427,6 +448,30 @@ end
 -- Hand the body back to whatever else is turning it.
 function FirstPerson.releaseBody()
   FirstPerson.bodyYaw = nil
+end
+
+-- v0.4.16: switching the overworld master switch to 2D can stop VoxelScene
+-- immediately, which means update() may not get one last frame to release the
+-- relative mouse / free-camera rig. Expose an explicit teardown so native 2D
+-- never inherits captured mouse input, stale right-stick look, or a placed 3D
+-- camera from the previous frame. Camera preference itself lives elsewhere and
+-- is intentionally preserved for the next time 3D is enabled.
+function FirstPerson.forceRelease(reason)
+  FirstPerson.bodyYaw = nil
+  FirstPerson.blend = 0
+  wasEngaged = false
+  mouseDX, mouseDY = 0, 0
+  stick.x, stick.y = 0, 0
+  lookTouch = nil
+  touchMove = nil
+  if rig and Voxel3D.camera == rig then Voxel3D.camera = nil end
+  rig = nil
+  if love and love.mouse and type(love.mouse.setRelativeMode) == "function" then
+    pcall(love.mouse.setRelativeMode, false)
+  end
+  captured = false
+  FirstPerson.lastReleaseReason = reason
+  return true
 end
 
 -- The unit look direction, and its flat (ground-plane) part.

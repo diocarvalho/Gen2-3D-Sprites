@@ -34,6 +34,8 @@ function BehaviorTick.new(mod, logic)
   self.voxel = VoxelAdapter.new(mod)
   self._registered = false
   self._lastT = now()
+  self._skippedTicks = 0
+  self._aiTicks = 0
   return self
 end
 
@@ -107,6 +109,40 @@ function BehaviorTick:syncPipelineLevel()
   end
 end
 
+local function performanceTier(mod)
+  local opts = mod and mod.options
+  local picked = "medium"
+  if opts and type(opts.get) == "function" then
+    local ok, value = pcall(opts.get, opts, "performancePreset")
+    if ok and value ~= nil then picked = tostring(value):lower() end
+  end
+  if picked == "auto" then
+    local runtime = mod and mod.exports and mod.exports.performanceRuntime
+    if runtime and type(runtime.status) == "function" then
+      local ok, st = pcall(runtime.status)
+      local tier = ok and st and st.adaptive and st.adaptive.adaptiveTier
+      if tier == "low" or tier == "medium" or tier == "high" then picked = tier end
+    end
+    if picked == "auto" then picked = "medium" end
+  elseif picked == "custom" then
+    local raw = nil
+    if opts and type(opts.get) == "function" then
+      local ok, value = pcall(opts.get, opts, "graphicsResolution")
+      if ok then raw = tonumber(value) end
+    end
+    picked = (raw and raw >= 75) and "high" or "medium"
+  end
+  return picked
+end
+
+local function aiInterval(mod)
+  local tier = performanceTier(mod)
+  if tier == "low" then return 1 / 20 end
+  if tier == "medium" then return 1 / 30 end
+  if tier == "high" then return 1 / 45 end
+  return 1 / 60 -- ULTRA
+end
+
 function BehaviorTick:step(ctx)
   if not Config.isEnabled(self.mod) then return end
   if Config.get(self.mod, "wilds_ai") == false then return end
@@ -116,8 +152,14 @@ function BehaviorTick:step(ctx)
   local t = now()
   local dt = t - (self._lastT or t)
   if dt < 0 then dt = 0 end
+  local interval = aiInterval(self.mod)
+  if dt < interval then
+    self._skippedTicks = (self._skippedTicks or 0) + 1
+    return
+  end
   if dt > 0.1 then dt = 0.1 end
   self._lastT = t
+  self._aiTicks = (self._aiTicks or 0) + 1
 
   local world = self.mod.world
   local ow = world and world.overworld and world:overworld()

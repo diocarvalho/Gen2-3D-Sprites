@@ -1,0 +1,38 @@
+{
+  "id": "weather_fx",
+  "name": "Weather FX + Steel/Fairy/Dark Types",
+  "version": "4.10.0",
+  "api": 2,
+  "games": [
+    "gen1",
+    "gen2"
+  ],
+  "entry": "main.lua",
+  "profile": "content",
+  "category": "MECHANIC",
+  "game_version": "0.0.0-dev || >=0.1.37 <2.0.0",
+  "priority": 120,
+  "dependencies": [],
+  "optional_dependencies": [
+    "DRAMATIC_SHAPE",
+    "DRAMALESS_SHAPE",
+    "STADIUM_BATTLE_FX",
+    "Kanto-Reforged",
+    "FOLLOWERS_EX",
+    "pokegear_cards",
+    "potato_voxel",
+    "POTATO_VOXEL",
+    "STADIUM2_OVERWORLD_MODELS",
+    "CRYSTAL_251"
+  ],
+  "conflicts": [],
+  "incompatible": [],
+  "experimental": false,
+  "affects_link": true,
+  "permissions": [
+    "engine_internals"
+  ],
+  "description": "Weather FX with 300 core Delta Pokémon plus 470 optional Kanto Reforged weather variants, complete Gen 1/2 Pokédex entries, and Steel/Fairy/Dark Types.",
+  "github": "MrKrisSatan/Weather-fx",
+  "credits": "Weather FX by MrKrisSatan; Steel/Fairy/Dark Types and Typing Charts by ZyranCZ. Battle backdrops: CDRX73, DerxwnaKapsyla, http404error, Game Freak. Rain/storm loops: Relic Castle weather tutorial pack. Thunder and wind: Pixabay (royalty-free). 3D atmosphere integration adapted from Kanto Dynamic Weather by Campo (1-Camp0-1)."
+}

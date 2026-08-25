@@ -111,6 +111,20 @@ local function red3dSpecialCard(player)
   if type(player) ~= "table" then return false end
   if player.fishing then return true end
 
+  -- Fly Your Pokemon owns the human rider presentation while airborne. Gold's
+  -- setMap still runs CheckUpdatePlayerSprite on every connection and can
+  -- briefly label an edge cell as SURF/BIKE; treating that temporary ground
+  -- state as authoritative made Character Selector disappear and exposed the
+  -- stock 2D trainer card after unrestricted connection crossings.  The marker
+  -- is mod-owned and the exported state check prevents a stale marker from
+  -- affecting normal Surf/Bike after landing or hot reload.
+  local fly = V and V.mod and V.mod.exports and V.mod.exports.flyYourPokemon
+  local flyState = type(fly) == "table" and fly.state or nil
+  if player._flyYourPokemonFlight3D == true
+      and type(flyState) == "table" and flyState.mode == "flight" then
+    return false
+  end
+
   local world = liveGoldWorld()
   if type(world) ~= "table" then return false end
   if world.fishing then return true end
@@ -125,7 +139,24 @@ local function red3dSpecialCard(player)
   if state == nil then return false end
   if type(red3dFieldMoves.isSurfing) == "function" then
     local ok, yes = pcall(red3dFieldMoves.isSurfing, state)
-    if ok and yes then return true end
+    if ok and yes then
+      -- A custom Visible Surf mount can finish its shore step one tick before
+      -- Gold normalizes playerState. Do not suppress Character Selector's 3D
+      -- player merely because that stale SURF flag survived on a LAND cell.
+      local p = world.player
+      local map = world.map
+      if p and map and type(map.isWaterCell) == "function" then
+        local okWater, inWater = pcall(map.isWaterCell, map, p.cellX, p.cellY)
+        if okWater and inWater ~= true and not p.moving then
+          -- Treat this frame as normal land; FlyYourPokemon's logic tail also
+          -- normalizes the authoritative state so subsequent engine code agrees.
+        else
+          return true
+        end
+      else
+        return true
+      end
+    end
   end
   if type(red3dFieldMoves.isBiking) == "function" then
     local ok, yes = pcall(red3dFieldMoves.isBiking, state)
@@ -139,10 +170,36 @@ local function red3dPokemonControl(player)
     or player._pokepcControlSpecies ~= nil or player.pokepcControlSpecies ~= nil)
 end
 
+-- Kanto is a presentation-local world layered over the still-resident Gold
+-- world.  Surf/Bike/Fishing ownership must therefore come from the visible
+-- Kanto proxy, never from Gold's hidden playerState.  Otherwise a Johto bike
+-- state can make the Kanto 3D trainer disappear, or a Kanto bike can leave the
+-- humanoid mesh drawn on top of the authored bike card.
+local function kantoProxySpecialCard(player)
+  return type(player) == "table" and player._stadiumGen1Excursion == true
+    and (player.fishing == true or player.surfing == true
+      or player.onBike == true or player.biking == true)
+end
+
+local function selectorEntity(player)
+  if type(player) == "table" and type(player._stadiumSourcePlayer) == "table" then
+    return player._stadiumSourcePlayer
+  end
+  return player
+end
+
 local function red3dRendererForPose(p)
   if not playerModelsEnabled() then return nil end
   if not (p and p.isPlayer and type(p.entity) == "table") then return nil end
-  if red3dPokemonControl(p.entity) or red3dSpecialCard(p.entity) then return nil end
+  local posedEntity = p.entity
+  local kantoProxy = posedEntity._stadiumGen1Excursion == true
+  if kantoProxySpecialCard(posedEntity) then return nil end
+  local entity = selectorEntity(posedEntity)
+  -- A Kanto frame intentionally ignores the hidden Johto Surf/Bike state.
+  -- Ordinary Johto keeps the existing engine-owned special-card check.
+  if red3dPokemonControl(entity) or (not kantoProxy and red3dSpecialCard(entity)) then
+    return nil
+  end
 
   local Player = gen2PlayerClass()
   local renderer = Player and Player.red3dPlayerRenderer or nil
@@ -151,7 +208,11 @@ local function red3dRendererForPose(p)
   return renderer
 end
 
-local OverworldStadium = {}
+local OverworldStadium = {
+  kantoPlayerAnimRefreshes = 0,
+  kantoPlayerAnimFallbacks = 0,
+  kantoPlayerAnimRefreshFailures = 0,
+}
 local MAX_DEX = 251
 
 local tagged = setmetatable({}, { __mode = "k" })
@@ -361,9 +422,8 @@ local function externalPokemonDex(entity)
     "_pokepcControlSpecies",
     "_pokepcFollowerSpecies",
     "pokepcFollowerSpecies",
-    "dramaticSkyRideMountSpecies",
-    "skyRideMountSpecies",
-    "_stadiumSkyRideSpecies",
+    "flyYourPokemonMountSpecies",
+    "_flyYourPokemonSpecies",
     "followerSpecies",
     "wildSpecies",
     "spawnSpecies",
@@ -421,9 +481,9 @@ local function knownPokemonEntity(entity)
       or entity._pokepcAsPokemon == true
       or entity._pokepcControlSpecies ~= nil
       or entity._pokepcFollowerSpecies ~= nil
-      or entity.dramaticSkyRideMountSpecies ~= nil
-      or entity.skyRideMountSpecies ~= nil
-      or entity._stadiumSkyRideSpecies ~= nil
+      or entity.flyYourPokemonMountSpecies ~= nil
+      or entity._flyYourPokemonSpecies ~= nil
+      or entity._flyYourPokemonMount == true
       or entity.pikachuFollower == true
       or entity.isPokemonFollower == true then
     return true
@@ -448,17 +508,16 @@ local function spriteDex(sprite)
   if not (Config.autoSpriteSpecies and sprite and sprite.def) then return nil end
   local def = sprite.def
 
-  -- Dramatic Sky Ride tags its generated mount sprite definition with the
-  -- exact species and also names it SKY_RIDE_<SPECIES>. Treat either form as
-  -- authoritative Pokemon identity so the flying mount can stay a Stadium
-  -- model instead of falling back to the generated 2D follower sheet.
-  local skyRideSpecies = speciesDex(def.dramaticSkyRideMountSpecies
-      or def.skyRideMountSpecies)
-  if skyRideSpecies then return skyRideSpecies end
+  -- Fly Your Pokemon tags its generated mount sprite definition with the
+  -- exact species. This keeps the mount eligible for the imported Stadium 2
+  -- renderer without depending on any external flight mod.
+  local mountSpecies = speciesDex(def.flyYourPokemonMountSpecies
+      or def._flyYourPokemonSpecies)
+  if mountSpecies then return mountSpecies end
   if type(def.id) == "string" then
-    local skyName = def.id:upper():match("^SKY_RIDE[_%-](.+)$")
-    local skyDex = skyName and speciesDex(skyName)
-    if skyDex then return skyDex end
+    local mountName = def.id:upper():match("^FLY_YOUR_POKEMON[_%-](.+)$")
+    local mountDex = mountName and speciesDex(mountName)
+    if mountDex then return mountDex end
   end
 
   local explicit = firstDex(def, false)
@@ -643,6 +702,200 @@ local function safeSlotAnim(mon, name)
   local ok, index = pcall(mon.slotAnim, mon, name)
   if ok and type(index) == "number" then return index end
   return nil
+end
+
+-- Some Stadium models use a very subdued primary standby even though their
+-- alternate standby contains the actual airborne body/wing motion. Pidgeotto
+-- is the visible overworld case: the sky entity moves through the world but
+-- the model itself looks frozen. Keep this override deliberately narrow so
+-- species whose normal idle already flaps (Pidgey/Pidgeot, bats, etc.) retain
+-- their authored motion unchanged.
+local AIRBORNE_CLIP_OVERRIDES = {
+  -- Pidgeotto's primary standby can be too subdued to read as flight.  Only
+  -- non-combat Stadium contexts are eligible here: v0.4.23 scanned every
+  -- authored animation and could therefore choose a high-motion ATTACK clip,
+  -- making the bird flap by repeatedly attacking in mid-air.
+  [17] = { "idle_alt", "idle_return", "entrance_alt" }, -- Pidgeotto
+}
+
+-- Contexts that are never valid as an overworld flight loop.  Some Stadium
+-- context slots alias the same underlying animation index, so filtering by
+-- display/name text is not sufficient: reject the actual indices resolved by
+-- every combat/reaction slot before considering a supposedly safe standby.
+local AIRBORNE_COMBAT_CONTEXTS = {
+  "attack_default", "struggle", "faint", "faint_alt", "flinch",
+  "reaction_169", "reaction_170", "reaction_171", "reaction_172",
+  "reaction_173", "reaction_174", "reaction_179", "reaction_180",
+  "reaction_181", "reaction_182",
+}
+
+local function componentMotion(component, angular)
+  if type(component) ~= "table" or #component < 2 then return 0 end
+  local first = tonumber(component[1]) or 0
+  local previous = first
+  local score = 0
+  local count = #component
+  local step = math.max(1, math.floor(count / 18))
+  for i = 1 + step, count, step do
+    local value = tonumber(component[i]) or previous
+    local d = value - previous
+    if angular then
+      -- Stadium rotations are signed binary angles.  Measure the shortest arc
+      -- so a wrap from +32767 to -32768 does not look like giant motion.
+      d = (d + 32768) % 65536 - 32768
+      score = score + math.abs(d) / 32768
+    else
+      score = score + math.abs(d)
+    end
+    previous = value
+  end
+  return score
+end
+
+local function airborneClipMotion(mon, index)
+  local model = mon and mon.model
+  if not (model and index and model.anims and model.anims[index]) then return 0 end
+  model._stadium2AirMotion = model._stadium2AirMotion or {}
+  local cached = model._stadium2AirMotion[index]
+  if cached ~= nil then return cached end
+
+  local okTracks, tracks = pcall(StadiumPack.tracks, model, index)
+  if not okTracks or type(tracks) ~= "table" then
+    model._stadium2AirMotion[index] = 0
+    return 0
+  end
+
+  local score = 0
+  for _, comps in pairs(tracks) do
+    if type(comps) == "table" then
+      -- Rotation carries most visible wing/body motion.  Translation gets a
+      -- much smaller vote so a stage-travel clip cannot beat a real flap just
+      -- because its root moves far through Stadium's battle arena.
+      score = score
+        + componentMotion(comps[4], true)
+        + componentMotion(comps[5], true)
+        + componentMotion(comps[6], true)
+        + componentMotion(comps[1], false) * 0.0005
+        + componentMotion(comps[2], false) * 0.0005
+        + componentMotion(comps[3], false) * 0.0005
+    end
+  end
+  model._stadium2AirMotion[index] = score
+  return score
+end
+
+local function stopAirborneClip(slot, mon)
+  if not slot.airClip then return end
+  if mon and mon.staticPose then
+    -- A Pidgeotto whose ordinary standby failed the static-safety probe may
+    -- still use a validated alternate clip while flying.  Returning to ground
+    -- must explicitly restore the bind pose; merely skipping play("idle")
+    -- leaves the airborne animation selected forever.
+    mon.state, mon.anim, mon.time = "idle", nil, 0
+    mon.loop, mon.done = false, false
+  elseif mon then
+    pcall(mon.play, mon, "idle")
+  end
+  slot.airClip = false
+  slot.airDex = nil
+  slot.airAnim = nil
+  slot.airAnimName = nil
+  slot.airRate = nil
+end
+
+local function startAirborneClip(slot, mon, dex)
+  dex = tonumber(dex)
+  local choices = AIRBORNE_CLIP_OVERRIDES[dex]
+  if not choices then
+    stopAirborneClip(slot, mon)
+    return false
+  end
+
+  -- Do not restart the loop every frame. StadiumMon:update owns the clock once
+  -- the alternate clip is selected, so the wings advance continuously.
+  if slot.airClip and slot.airDex == dex and mon.anim == slot.airAnim then
+    return true
+  end
+
+  local baseIdle = safeSlotAnim(mon, "idle")
+  local forbidden = {}
+  for _, name in ipairs(AIRBORNE_COMBAT_CONTEXTS) do
+    local index = safeSlotAnim(mon, name)
+    if index then forbidden[index] = true end
+  end
+
+  local index, pickedName, bestScore = nil, nil, -1
+  local seen = {}
+  local function consider(candidate, name)
+    if not candidate or candidate == baseIdle or seen[candidate] or forbidden[candidate] then return end
+    seen[candidate] = true
+    local anim = mon and mon.model and mon.model.anims and mon.model.anims[candidate]
+    if not anim then return end
+    local seconds = tonumber(anim.seconds)
+      or ((tonumber(anim.frames) or 0) / (tonumber(StadiumPack.FPS) or 30))
+    -- Keep this a short repeating presentation loop.  Anything long enough to
+    -- read as battle choreography is rejected even if it arrived via an idle
+    -- alias in an older/custom Stadium cache.
+    if seconds < 0.16 or seconds > 3.25 then return end
+    local label = string.lower(tostring(anim.name or name or ""))
+    if label:find("attack", 1, true) or label:find("struggle", 1, true)
+        or label:find("faint", 1, true) or label:find("flinch", 1, true)
+        or label:find("reaction", 1, true) or label:find("death", 1, true) then
+      return
+    end
+    local score = airborneClipMotion(mon, candidate)
+    if score > bestScore then
+      index, pickedName, bestScore = candidate, name or anim.name or ("anim_" .. candidate), score
+    end
+  end
+
+  -- Only compare explicitly flight-safe standby/return contexts.  Do NOT scan
+  -- the entire model animation table: high-motion battle attacks naturally win
+  -- a motion score and were the source of Pidgeotto's attack-loop regression.
+  for _, name in ipairs(choices) do
+    consider(safeSlotAnim(mon, name), name)
+  end
+
+  -- If a cache has no distinct non-combat alternate, prefer the subdued
+  -- primary idle over ever reintroducing an attack loop.
+  index = index or baseIdle
+  pickedName = pickedName or "idle"
+  if not index then
+    stopAirborneClip(slot, mon)
+    return false
+  end
+
+  -- IMPORTANT: do not reject mon.staticPose here for Dex 17. staticPose can be
+  -- the verdict on Pidgeotto's primary idle rather than its whole rig.  An
+  -- explicitly validated alternate standby can still animate safely.
+  local ok, played = pcall(mon.play, mon, "idle", index)
+  if ok and played ~= false then
+    slot.airClip = true
+    slot.airDex = dex
+    slot.airAnim = index
+    slot.airAnimName = pickedName
+    -- Keep the authored cadence.  Speeding an alternate standby up made some
+    -- wing poses read like a repeated strike instead of cruising flight.
+    slot.airRate = 1
+    if dex == 17 and not slot.airLogged and V.mod and V.mod.log
+        and type(V.mod.log.info) == "function" then
+      slot.airLogged = true
+      pcall(V.mod.log.info, V.mod.log,
+        "Pidgeotto flight-safe clip: %s (#%s, motion %.3f, static=%s)",
+        tostring(pickedName), tostring(index), tonumber(bestScore) or 0,
+        tostring(mon.staticPose and true or false))
+    end
+    return true
+  end
+  stopAirborneClip(slot, mon)
+  return false
+end
+
+local function airbornePresentation(entity)
+  if type(entity) ~= "table" then return false end
+  if entity._ambientFlyingPokemon == true then return true end
+  return entity._flyYourPokemonMount == true
+      and tostring(entity._flyYourPokemonMode or ""):lower() == "flight"
 end
 
 local function startWalkClip(slot, mon, dex)
@@ -901,6 +1154,13 @@ end
 function OverworldStadium.canRenderEntity(entity)
   if not modelsEnabled() then return false, nil end
   if type(entity) ~= "table" then return false end
+  if entity._flyYourPokemonMount == true then
+    local options = V.mod and V.mod.options
+    if options and type(options.get) == "function" then
+      local okMode, mode = pcall(options.get, options, "mountRenderer")
+      if okMode and tostring(mode) == "2d" then return false, nil end
+    end
+  end
   local dex = resolveDex({ entity = entity, sprite = entity.sprite,
                            mapId = entity.mapId })
   if not dex then return false end
@@ -1008,72 +1268,59 @@ local function prepareOne(p, dex, dt)
     speciesScale, targetHeight, heightMeters = 1, nil, nil
   end
   mon.scale = speciesScale or 1
+  if type(p.entity) == "table" and p.entity._flyYourPokemonMount == true then
+    local mountScale = tonumber(p.entity._flyYourPokemonScale) or 1
+    mon.scale = mon.scale * mountScale
+    local baseHeight = tonumber(targetHeight)
+      or (type(mon.worldHeight) == "function" and tonumber(mon:worldHeight()))
+    if baseHeight and baseHeight > 0 then
+      p.entity._flyYourPokemonStadiumWorldHeight = baseHeight * mountScale
+    end
+    p.entity._flyYourPokemonStadiumActive = true
+  elseif type(p.entity) == "table" and p.entity._ambientFlyingPokemon == true then
+    -- Ambient sky Pokemon are not player mounts, but use a small per-instance
+    -- presentation scale so a flock does not become a wall of identical rigs.
+    mon.scale = mon.scale * (tonumber(p.entity._ambientFlyingScale) or 1)
+  end
   p.stadiumTargetHeight = targetHeight
   p.stadiumHeightMeters = heightMeters
 
-  pcall(mon.update, mon, dt)
-  local walkBob, walkPitch, walking = 0, 0, false
-  local okWalk, wb, wp, wk = pcall(locomotionFor, slot, p, dex,
-    targetHeight or (type(mon.worldHeight) == "function" and mon:worldHeight()) or 14,
-    dt, mon)
-  if okWalk then walkBob, walkPitch, walking = wb or 0, wp or 0, wk and true or false end
-
   local entity = type(p.entity) == "table" and p.entity or nil
-  local skyMount = entity and entity._stadiumSkyRideMount == true
+  if airbornePresentation(entity) then
+    -- If the reusable Fly Your Pokemon carrier previously held a grounded
+    -- species, clear that old gait state before selecting the airborne clip;
+    -- otherwise stopWalkClip later in this frame could overwrite Pidgeotto's
+    -- first flap with the primary idle.
+    stopWalkClip(slot, mon)
+    startAirborneClip(slot, mon, dex)
+  else
+    stopAirborneClip(slot, mon)
+  end
+  local animDt = tonumber(dt) or 0
+  if slot.airClip then animDt = animDt * (tonumber(slot.airRate) or 1) end
+  pcall(mon.update, mon, animDt)
+  local walkBob, walkPitch, walking = 0, 0, false
+  if entity and airbornePresentation(entity) then
+    -- ALL airborne presentations (ambient sky traffic and Fly Your Pokemon)
+    -- keep the selected flight clip.  v0.4.21 only skipped ground locomotion
+    -- for ambient entities; a mounted Pidgeotto fell through to locomotionFor,
+    -- which selected a ground/idle clip after mon:update and overwrote the flap
+    -- every single frame.
+    slot.walkX, slot.walkZ = tonumber(p.px) or 0, tonumber(p.py) or 0
+    slot.walkBlend = 0
+  else
+    local okWalk, wb, wp, wk = pcall(locomotionFor, slot, p, dex,
+      targetHeight or (type(mon.worldHeight) == "function" and mon:worldHeight()) or 14,
+      dt, mon)
+    if okWalk then walkBob, walkPitch, walking = wb or 0, wp or 0, wk and true or false end
+  end
 
-  -- Ordinary overworld Pokemon use their own pose/facing.  A Sky Ride mount is
-  -- different: the Followers EX NPC is only the Pokemon ID / lifecycle owner.
-  -- Its trail coordinates must NOT decide where the ridden model appears.
-  -- Anchor the rendered Stadium body directly to the live rider position that
-  -- main.lua publishes after Sky Ride and Followers EX finish updating.
-  local renderFacing = (skyMount and entity._stadiumSkyRideAnchorFacing)
-      or p.facing
+  local renderFacing = p.facing
   local fx, fz = facingVector(renderFacing)
-  local x = ((skyMount and tonumber(entity._stadiumSkyRideAnchorPx))
-      or (p.px or 0)) + 8
-  local z = ((skyMount and tonumber(entity._stadiumSkyRideAnchorPy))
-      or (p.py or 0)) + 8
+  local x = (p.px or 0) + 8
+  local z = (p.py or 0) + 8
   local y = (p.gh or 0) + (p.lift or 0) + (walkBob or 0)
 
-  if skyMount then
-    -- StadiumMon documents the same facing convention as the map: +Z is
-    -- SOUTH / "down".  Older compatibility builds flipped the model 180
-    -- degrees, which is why Charizard faced backwards.  No flip is needed.
-    --
-    -- Sky Ride exposes both absolute altitude and relative lift.  Use the
-    -- mount's render-only ground/altitude rather than the follower NPC's own
-    -- grounded pose.  Then lower the Pokemon's feet by a fraction of its
-    -- visual height so the trainer sits on the upper back instead of at the
-    -- Pokemon's feet.  This is purely a render transform; Followers EX's NPC
-    -- remains untouched for landing and normal following.
-    local lift = tonumber(entity._stadiumSkyRideLift) or 0
-    local ground = tonumber(entity._stadiumSkyRideGround)
-    if ground == nil then
-      local absolute = tonumber(entity._stadiumSkyRideAltitude)
-      ground = absolute and (absolute - lift) or (p.gh or 0)
-    end
-
-    local h = tonumber(targetHeight)
-      or (type(mon.worldHeight) == "function" and mon:worldHeight()) or 14
-    -- Approximate the saddle/back point.  Larger winged mounts need the rider
-    -- near the upper half of the body, not at the model origin/feet.
-    local seatFraction = 0.52
-    if dex == 6 then seatFraction = 0.50       -- Charizard
-    elseif dex == 18 then seatFraction = 0.58 -- Pidgeot
-    elseif dex == 22 then seatFraction = 0.58 -- Fearow
-    elseif dex == 42 then seatFraction = 0.50 -- Golbat
-    elseif dex == 142 then seatFraction = 0.50 -- Aerodactyl
-    elseif dex == 144 or dex == 145 or dex == 146 then seatFraction = 0.56
-    elseif dex == 148 then seatFraction = 0.48 -- Dragonair
-    elseif dex == 149 then seatFraction = 0.50 -- Dragonite
-    end
-    local riderFootLift = 7.0
-    y = ground + lift + riderFootLift - h * seatFraction
-  elseif entity and tonumber(entity._stadiumSkyRideLift) then
-    -- Non-mount airborne party members keep their own X/Z trail position but
-    -- follow the same vertical flight lift.
-    y = y + tonumber(entity._stadiumSkyRideLift)
-  end
   local okMatrix, matrix = pcall(mon.matrix, mon, x, y, z, fx, fz)
   if not okMatrix or not matrix then return false end
 
@@ -1082,6 +1329,40 @@ local function prepareOne(p, dex, dt)
       return Mat4.mul(matrix, Mat4.rotateX(walkPitch))
     end)
     if okPitch and pitched then matrix = pitched end
+  end
+
+  -- Fly Your Pokemon keeps genuine Stadium skeletal animation and adds only
+  -- whole-model mounted motion: flight pitch/bank, ground cadence and surf
+  -- buoyancy. The same model_matrix is later used by the shadow pass.
+  if entity and (entity._flyYourPokemonMount == true
+      or entity._ambientFlyingPokemon == true) then
+    local ambientAir = entity._ambientFlyingPokemon == true
+    local mode = ambientAir and "flight" or entity._flyYourPokemonMode
+    local t = tonumber(ambientAir and entity._ambientFlyingAnimTime
+      or entity._flyYourPokemonAnimTime) or 0
+    local climb = tonumber(ambientAir and entity._ambientFlyingClimb
+      or entity._flyYourPokemonClimb) or 0
+    local bank = tonumber(ambientAir and entity._ambientFlyingBank
+      or entity._flyYourPokemonBank) or 0
+    local rx, rz = 0, 0
+    if mode == "flight" then
+      rx = -0.08 + math.max(-0.12, math.min(0.12, climb * -0.012))
+      rz = bank * -0.11 + math.sin(t * 3.3) * 0.018
+    elseif mode == "ground" then
+      rx = math.sin(t * 8.0) * 0.025
+      rz = bank * -0.045
+    elseif mode == "surf" then
+      rx = math.sin(t * 2.4) * 0.035
+      rz = math.sin(t * 1.8) * 0.045
+    end
+    if rx ~= 0 then
+      local okR, rotated = pcall(function() return Mat4.mul(matrix, Mat4.rotateX(rx)) end)
+      if okR and rotated then matrix = rotated end
+    end
+    if rz ~= 0 and type(Mat4.rotateZ) == "function" then
+      local okR, rotated = pcall(function() return Mat4.mul(matrix, Mat4.rotateZ(rz)) end)
+      if okR and rotated then matrix = rotated end
+    end
   end
   mon.model_matrix = matrix
 
@@ -1104,21 +1385,18 @@ local function isPokemonPlayerPose(p, dex)
       or e._pokepcControlSpecies ~= nil or e.pokepcControlSpecies ~= nil) then
     return dex ~= nil or externalPokemonDex(e) ~= nil
   end
-  -- Dramatic Sky Ride must never turn the PLAYER pose into the Stadium mount.
-  -- The existing party follower entity is used as the mount instead. This
-  -- prevents the rider from becoming a duplicate Charizard/Pokemon.
+  -- The player pose stays a trainer. Fly Your Pokemon supplies a separate
+  -- Pokemon mount entity instead of rewriting the player into a Pokemon.
   return false
 end
 
 function OverworldStadium.shouldHidePose(p)
   if not modelsEnabled() then return false end
   local e = p and p.entity
-  if type(e) ~= "table" or e.skyRideRider ~= true then return false end
-  local m = V.mod and V.mod.find and V.mod:find("DRAMATIC_SKY_RIDE")
-  local ex = m and m.exports
-  if ex and type(ex.isFlying) == "function" then
-    local ok, flying = pcall(ex.isFlying)
-    return ok and flying == true
+  -- Fly Your Pokemon may hide only the rider while still rendering its separate
+  -- mount entity. No external flight-mod ownership probe is needed.
+  if p and p.isPlayer and type(e) == "table" and e._flyYourPokemonHideRider == true then
+    return true
   end
   return false
 end
@@ -1129,6 +1407,9 @@ function OverworldStadium.safeShouldHidePose(p)
 end
 
 function OverworldStadium.prepare(posed)
+  -- This is the once-per-VoxelScene frame serial used by the Kanto player-skin
+  -- animation bridge too, even when Stadium Pokemon models are disabled.
+  frameNo = frameNo + 1
   if not modelsEnabled() then
     -- Clear stale model ownership immediately when the option is flipped OFF.
     -- VoxelScene will then draw each pose through its ordinary sprite/card path.
@@ -1140,7 +1421,6 @@ function OverworldStadium.prepare(posed)
     end
     return posed
   end
-  frameNo = frameNo + 1
   if not Config.enabled then return true end
   local dt = dtForFrame()
 
@@ -1187,6 +1467,9 @@ function OverworldStadium.prepare(posed)
     local playerPokemon = isPokemonPlayerPose(p, dexForPose[i])
     if (not p.isPlayer or playerPokemon) and p.entity and dexForPose[i] then
       local dex = dexForPose[i]
+      if type(p.entity) == "table" and p.entity._flyYourPokemonMount == true then
+        p.entity._flyYourPokemonStadiumActive = false
+      end
       -- Keep the resolved identity even when the 3D rig deliberately rejects
       -- this species. Dedicated species fallbacks (notably Lugia) need the
       -- exact Dex number instead of falling through to an unrelated NPC card.
@@ -1306,6 +1589,22 @@ local function drawLugiaFallback(p)
   return okDraw
 end
 
+local KANTO_RENDER_YAW = {
+  down = 0, left = -math.pi / 2, up = math.pi, right = math.pi / 2,
+}
+
+local function kantoYawFromVector(x, z, facing)
+  x, z = tonumber(x) or 0, tonumber(z) or 0
+  if x * x + z * z <= 1e-8 then return KANTO_RENDER_YAW[facing] or 0 end
+  if math.atan2 then return math.atan2(x, z) end
+  if z > 0 then return math.atan(x / z) end
+  if z < 0 then
+    local a = math.atan(x / z)
+    return x >= 0 and (a + math.pi) or (a - math.pi)
+  end
+  return x >= 0 and math.pi / 2 or -math.pi / 2
+end
+
 local function withFreeVisualWalk(p, fn)
   if not (p and type(p.entity) == "table" and type(fn) == "function") then
     return false, nil
@@ -1314,32 +1613,249 @@ local function withFreeVisualWalk(p, fn)
   -- Do not let the free-roam visual-walk bridge re-enable a walking/bobbing
   -- animation on that static battle stand point.
   if p.stadiumBattleGrounded == true then return pcall(fn) end
-  -- Prefer the animation bit captured with this exact VoxelScene pose.  This
-  -- is frame-local and cannot be stale across boot/map transitions.  Keep the
-  -- live-world lookup only as a compatibility fallback for older callers that
-  -- construct a player pose without VoxelScene.
+
   local visual = p.stadiumVisualMoving == true
   if not visual and p.stadiumVisualMoving == nil then
     local world = liveGoldWorld()
     visual = type(world) == "table"
-      and world._stadiumFreeMoveActive == true
       and world._stadiumFreeVisualMoving == true
   end
-  if not visual then return pcall(fn) end
 
-  -- Visual-only bridge: true camera-relative free movement advances px/py and
-  -- animClock without owning Gold's grid-step Player.moving flag. Temporarily
-  -- expose a walking pose ONLY while the external 3D skin is being rendered,
-  -- then restore every gameplay field immediately.
-  local entity = p.entity
-  local oldMoving, oldPhase, oldFlip = entity.moving, p.phase, p.flip
-  entity.moving = true
-  p.phase = 1
-  p.flip = entity.stepFlip == true
+  -- Character Selector compatibility uses the REAL Gold player identity so
+  -- selected skins/accessories remain attached to the same object.  During a
+  -- Kanto excursion, however, the visible player is a presentation-local proxy
+  -- with different position/facing/animation state.  Temporarily mirror that
+  -- render state onto the source player for the selector draw only, then restore
+  -- it immediately.  This fixes stale Johto facing and frozen walk clips in
+  -- Kanto without ever writing Kanto coordinates into the save/world.
+  local proxy = p.entity
+  local entity = selectorEntity(proxy)
+  local bridgeProxy = proxy ~= entity and proxy._stadiumGen1Excursion == true
+
+  local old = {
+    moving = entity.moving,
+    facing = entity.facing,
+    stepFlip = entity.stepFlip,
+    animClock = entity.animClock,
+    progress = entity.progress,
+    targetX = entity.targetX, targetY = entity.targetY,
+    stepFrames = entity.stepFrames,
+    jumping = entity.jumping,
+    hopFrames = entity.hopFrames,
+    red3dMoveStickX = entity.red3dMoveStickX,
+    red3dMoveStickY = entity.red3dMoveStickY,
+    red3dAnalogMoveActive = entity.red3dAnalogMoveActive,
+    surfing = entity.surfing,
+    onBike = entity.onBike,
+    biking = entity.biking,
+    fishing = entity.fishing,
+    red3dFreeBodyYaw = entity.red3dFreeBodyYaw,
+    red3dLastWorldX = entity.red3dLastWorldX,
+    red3dLastWorldZ = entity.red3dLastWorldZ,
+    red3dProjectedBodyYaw = entity.red3dProjectedBodyYaw,
+    stadiumVisualMoving = entity._stadiumVisualMoving,
+    stadiumVisualAnimDist = entity._stadiumVisualAnimDist,
+    stadiumMoveWorldX = entity._stadiumMoveWorldX,
+    stadiumMoveWorldZ = entity._stadiumMoveWorldZ,
+    px = entity.px, py = entity.py,
+    cellX = entity.cellX, cellY = entity.cellY,
+  }
+  local oldPhase, oldFlip = p.phase, p.flip
+
+  if bridgeProxy then
+    entity.facing = p.facing or proxy.facing or entity.facing
+    entity.px, entity.py = p.px or proxy.px or entity.px,
+      p.py or proxy.py or entity.py
+    entity.cellX = proxy.cellX or entity.cellX
+    entity.cellY = proxy.cellY or entity.cellY
+    entity.stepFlip = proxy.stepFlip == true or p.flip == true
+    if proxy.animClock ~= nil then entity.animClock = proxy.animClock end
+    -- Character Selector's authored jump clips are keyed from the real Gold
+    -- player object.  Kanto's visible proxy owns the ledge-hop state instead,
+    -- so expose that state only for the renderer call just like movement.
+    entity.jumping = proxy.jumping == true or proxy.hopping == true
+    entity.hopFrames = proxy.hopFrames
+
+    -- Character Selector's generic voxel renderer checks these loose Player
+    -- fields even on a Gold boot.  Mirror the VISIBLE Kanto card state so the
+    -- hidden Johto mount cannot suppress/re-enable the humanoid by accident.
+    entity.surfing = proxy.surfing == true
+    entity.onBike = proxy.onBike == true or proxy.biking == true
+    entity.biking = proxy.biking == true or proxy.onBike == true
+    entity.fishing = proxy.fishing == true
+
+    -- Character Selector keeps travel-facing continuity on the Player object
+    -- (`red3dFreeBodyYaw` + last world sample).  Those fields are presentation
+    -- state, but the shared Gold player can be rendered by Johto between Kanto
+    -- shadow/main passes.  Keep an independent Kanto copy on the proxy and only
+    -- expose it during this render call.  First use starts at the current Kanto
+    -- position so the Johto->Kanto coordinate jump is never interpreted as a
+    -- movement vector.
+    local kx = tonumber(p.px) or tonumber(proxy.px) or 0
+    local kz = tonumber(p.py) or tonumber(proxy.py) or 0
+    local facingChanged = proxy._stadiumRed3dFacing ~= nil
+      and proxy._stadiumRed3dFacing ~= entity.facing
+    if proxy._stadiumRed3dFreeBodyYaw == nil then
+      proxy._stadiumRed3dFreeBodyYaw = kantoYawFromVector(
+        p.stadiumMoveWorldX, p.stadiumMoveWorldZ, entity.facing)
+    elseif not visual and facingChanged then
+      -- Kanto changes facing while standing for explicit interactions/warps.
+      -- Character Selector intentionally retains travel yaw while an idle camera
+      -- orbits, so only a real Kanto facing transition gets a turn-in-place
+      -- update. Rebase the travel sample too so the turn is not mistaken for
+      -- translation on the next model-matrix call.
+      proxy._stadiumRed3dFreeBodyYaw = KANTO_RENDER_YAW[entity.facing]
+        or proxy._stadiumRed3dFreeBodyYaw
+      proxy._stadiumRed3dProjectedBodyYaw = proxy._stadiumRed3dFreeBodyYaw
+      proxy._stadiumRed3dLastWorldX, proxy._stadiumRed3dLastWorldZ = kx, kz
+    end
+    proxy._stadiumRed3dFacing = entity.facing
+    entity.red3dFreeBodyYaw = proxy._stadiumRed3dFreeBodyYaw
+    entity.red3dLastWorldX = proxy._stadiumRed3dLastWorldX or kx
+    entity.red3dLastWorldZ = proxy._stadiumRed3dLastWorldZ or kz
+    entity.red3dProjectedBodyYaw = proxy._stadiumRed3dProjectedBodyYaw
+      or proxy._stadiumRed3dFreeBodyYaw
+  end
+
+  if visual then
+    entity.moving = true
+    -- Some Character Selector skins choose their clip from Player.progress /
+    -- targetX/targetY rather than walkPhase() alone. DIORAMA gets those fields
+    -- naturally from Gen-2 Player:update; true-direction THIRD PERSON does not.
+    -- Mirror a native 16-frame step only for the renderer call, then restore it.
+    local clock = tonumber(proxy.animClock) or tonumber(entity.animClock) or 0
+    entity.progress = math.floor(clock % 16)
+    entity.stepFrames = 16
+    local wx = tonumber(p.stadiumMoveWorldX) or 0
+    local wz = tonumber(p.stadiumMoveWorldZ) or 0
+    local dx, dz = 0, 0
+    if math.abs(wx) >= math.abs(wz) and math.abs(wx) > 1e-5 then
+      dx = wx > 0 and 1 or -1
+    elseif math.abs(wz) > 1e-5 then
+      dz = wz > 0 and 1 or -1
+    end
+    local cx = tonumber(entity.cellX) or 0
+    local cy = tonumber(entity.cellY) or 0
+    entity.targetX, entity.targetY = cx + dx, cy + dz
+    entity._stadiumVisualMoving = true
+    entity._stadiumVisualAnimDist = tonumber(p.stadiumVisualAnimDist) or 0
+    entity._stadiumMoveWorldX, entity._stadiumMoveWorldZ = wx, wz
+    -- Current Character Selector uses these public movement fields to choose
+    -- walk/run blend for several imported rigs.  Kanto already carries the
+    -- camera-relative analogue magnitude in the pose; mirror it render-only.
+    entity.red3dMoveStickX = wx
+    entity.red3dMoveStickY = wz
+    entity.red3dAnalogMoveActive = (wx * wx + wz * wz) > 1e-6
+    if p.phase == nil then
+      local q = clock % 16
+      p.phase = (q >= 4 and q < 12) and 1 or 0
+    end
+    p.flip = proxy.stepFlip == true or p.flip == true
+  elseif bridgeProxy then
+    entity.moving = false
+  end
+
   local ok, result = pcall(fn)
-  entity.moving, p.phase, p.flip = oldMoving, oldPhase, oldFlip
+  if bridgeProxy then
+    -- drawVoxel()/voxelModelMatrix may advance these fields from actual Kanto
+    -- displacement.  Capture that result before restoring the hidden Johto
+    -- player's own presentation state.
+    proxy._stadiumRed3dFreeBodyYaw = entity.red3dFreeBodyYaw
+      or proxy._stadiumRed3dFreeBodyYaw
+    proxy._stadiumRed3dLastWorldX = entity.red3dLastWorldX
+      or proxy._stadiumRed3dLastWorldX
+    proxy._stadiumRed3dLastWorldZ = entity.red3dLastWorldZ
+      or proxy._stadiumRed3dLastWorldZ
+    proxy._stadiumRed3dProjectedBodyYaw = entity.red3dProjectedBodyYaw
+      or proxy._stadiumRed3dProjectedBodyYaw
+  end
+  entity.moving = old.moving
+  entity.facing = old.facing
+  entity.stepFlip = old.stepFlip
+  entity.animClock = old.animClock
+  entity.progress = old.progress
+  entity.targetX, entity.targetY = old.targetX, old.targetY
+  entity.stepFrames = old.stepFrames
+  entity.jumping = old.jumping
+  entity.hopFrames = old.hopFrames
+  entity.red3dMoveStickX = old.red3dMoveStickX
+  entity.red3dMoveStickY = old.red3dMoveStickY
+  entity.red3dAnalogMoveActive = old.red3dAnalogMoveActive
+  entity.surfing = old.surfing
+  entity.onBike = old.onBike
+  entity.biking = old.biking
+  entity.fishing = old.fishing
+  entity.red3dFreeBodyYaw = old.red3dFreeBodyYaw
+  entity.red3dLastWorldX = old.red3dLastWorldX
+  entity.red3dLastWorldZ = old.red3dLastWorldZ
+  entity.red3dProjectedBodyYaw = old.red3dProjectedBodyYaw
+  entity._stadiumVisualMoving = old.stadiumVisualMoving
+  entity._stadiumVisualAnimDist = old.stadiumVisualAnimDist
+  entity._stadiumMoveWorldX = old.stadiumMoveWorldX
+  entity._stadiumMoveWorldZ = old.stadiumMoveWorldZ
+  entity.px, entity.py = old.px, old.py
+  entity.cellX, entity.cellY = old.cellX, old.cellY
+  p.phase, p.flip = oldPhase, oldFlip
   return ok, result
 end
+
+OverworldStadium._withFreeVisualWalk = withFreeVisualWalk
+OverworldStadium._kantoProxySpecialCard = kantoProxySpecialCard
+OverworldStadium._red3dRendererForPose = red3dRendererForPose
+
+-- Character Selector v3.x prepares its voxel skeleton in beginVoxelFrame(),
+-- then drawVoxel()/drawVoxelShadow() consume the cached voxelFrameKey.  Gold's
+-- native selector pipeline refreshes that cache from the live Johto player, but
+-- Kanto is rendered through this mod's presentation-local proxy and manually
+-- delegates to drawVoxel().  Without an explicit refresh the selector can keep
+-- reusing the hidden Johto player's idle frame even while the Kanto proxy moves.
+--
+-- Refresh only Kanto proxies.  Johto keeps the selector's own working frame
+-- owner.  The key check also catches another pipeline rewriting the selector's
+-- cached frame between Kanto's shadow/reflection/main passes.
+local function refreshKantoPlayerSkinAnimation(p, renderer)
+  local proxy = p and p.entity
+  if not (type(proxy) == "table" and proxy._stadiumGen1Excursion == true) then
+    return true
+  end
+  if type(renderer) ~= "table" then return false end
+
+  if type(renderer.beginVoxelFrame) ~= "function" then
+    -- Older selector builds do not expose beginVoxelFrame.  Clearing a stale
+    -- cached frame makes updateVoxelMesh fall back to animationState(), which
+    -- samples the Kanto pose/displacement passed to drawVoxel instead of the
+    -- last Johto frame.
+    if renderer.voxelFrameKey ~= nil then
+      renderer.voxelFrameKey = nil
+      renderer.voxelUploadedKey = nil
+      OverworldStadium.kantoPlayerAnimFallbacks =
+        OverworldStadium.kantoPlayerAnimFallbacks + 1
+    end
+    return true
+  end
+
+  if renderer._stadiumKantoAnimFrame == frameNo
+      and renderer._stadiumKantoAnimKey == renderer.voxelFrameKey then
+    return true
+  end
+
+  local ok, result = withFreeVisualWalk(p, function()
+    renderer:beginVoxelFrame(selectorEntity(proxy), p)
+    return true
+  end)
+  if not ok or result == false then
+    OverworldStadium.kantoPlayerAnimRefreshFailures =
+      OverworldStadium.kantoPlayerAnimRefreshFailures + 1
+    return false
+  end
+  renderer._stadiumKantoAnimFrame = frameNo
+  renderer._stadiumKantoAnimKey = renderer.voxelFrameKey
+  OverworldStadium.kantoPlayerAnimRefreshes =
+    OverworldStadium.kantoPlayerAnimRefreshes + 1
+  return true
+end
+
+OverworldStadium._refreshKantoPlayerSkinAnimation = refreshKantoPlayerSkinAnimation
 
 function OverworldStadium.draw(p)
   if not modelsEnabled() then return false end
@@ -1371,6 +1887,7 @@ function OverworldStadium.drawPlayerSkin(p)
   if not playerModelsEnabled() then return false end
   local renderer = red3dRendererForPose(p)
   if not renderer then return false end
+  if not refreshKantoPlayerSkinAnimation(p, renderer) then return false end
 
   local okVoxel, Voxel3D = pcall(V.require, "Voxel3D")
   local okFP, FirstPerson = pcall(V.require, "FirstPerson")
@@ -1379,7 +1896,7 @@ function OverworldStadium.drawPlayerSkin(p)
   end
 
   local ok, result = withFreeVisualWalk(p, function()
-    return renderer:drawVoxel(p.entity, p, Voxel3D, Mat4, FirstPerson)
+    return renderer:drawVoxel(selectorEntity(p.entity), p, Voxel3D, Mat4, FirstPerson)
   end)
   if not ok then
     logOnce("red3d-draw",
@@ -1410,13 +1927,14 @@ end
 function OverworldStadium.castPlayerSkin(p, shadowMap)
   local renderer = red3dRendererForPose(p)
   if not renderer or type(renderer.drawVoxelShadow) ~= "function" then return false end
+  if not refreshKantoPlayerSkinAnimation(p, renderer) then return false end
   local okVoxel, Voxel3D = pcall(V.require, "Voxel3D")
   local okFP, FirstPerson = pcall(V.require, "FirstPerson")
   if not okVoxel or type(Voxel3D) ~= "table" or not okFP or type(FirstPerson) ~= "table" then
     return false
   end
   local ok, result = withFreeVisualWalk(p, function()
-    return renderer:drawVoxelShadow(p.entity, p, Voxel3D, Mat4, shadowMap, FirstPerson)
+    return renderer:drawVoxelShadow(selectorEntity(p.entity), p, Voxel3D, Mat4, shadowMap, FirstPerson)
   end)
   if not ok then
     logOnce("red3d-shadow",
@@ -1442,6 +1960,12 @@ end
 
 function OverworldStadium.cast(p, shadowMap)
   if not modelsEnabled() then return false end
+  local entity = p and p.entity
+  if type(entity) == "table" and entity._ambientFlyingPokemon == true then
+    return false -- ambient sky traffic never pays for sun-shadow geometry
+  end
+  if type(entity) == "table" and entity._flyYourPokemonMount == true
+      and entity._flyYourPokemonShadow == false then return false end
   local mon = p and p.stadiumMon
   local matrix = p and p.stadiumMatrix
   if not (mon and mon.rig and matrix and shadowMap) then return false end

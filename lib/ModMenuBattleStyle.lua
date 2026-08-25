@@ -31,6 +31,15 @@ local ManagerClass
 local activeGame
 local fonts = {}
 
+local function controllerPrompt(text)
+  local C = mod and mod.exports and mod.exports.controllerLayout
+  if C and type(C.prompt) == "function" then
+    local ok, value = pcall(C.prompt, text)
+    if ok and value then return value end
+  end
+  return tostring(text or "")
+end
+
 local function customUIEnabled()
   local options = mod and mod.options
   if not (options and type(options.get) == "function") then return true end
@@ -82,6 +91,10 @@ local function roundRect(mode, x, y, w, h, r)
 end
 
 local function uiScaleFor(ww, wh)
+  local helper = mod and mod.exports and mod.exports.mobileUiScale
+  if helper and type(helper.scale) == "function" then
+    return helper.scale(ww, wh, 0.18, 1.15)
+  end
   return math.max(0.18, math.min(1, math.min(ww / 800, wh / 600)))
 end
 
@@ -153,7 +166,7 @@ local function footer(text, x, y, w, h, gap, wh, s, warning)
   else
     G.setColor(1, 1, 1, 0.58)
   end
-  G.printf(cleanText(warning and warning ~= "" and warning or text),
+  G.printf(cleanText(controllerPrompt(warning and warning ~= "" and warning or text)),
     x + gap * 1.5, y + h - math.max(30 * s, wh * 0.037),
     w - gap * 3, "left")
 end

@@ -32,20 +32,46 @@ local SpriteBillboards = {}
 
 local meshes = {}
 
--- One flat 16x16 quad UV-mapped to a whole frame. A hair of inset keeps
+-- One flat quad UV-mapped to the current frame. Vanilla is 16x16; custom
+-- player definitions may supply larger frameWidth/frameHeight + foot anchors. A hair of inset keeps
 -- the sampler inside this frame rather than picking up the neighbouring
 -- one along the shared edge.
 local function buildCard(def, frame)
-  local ok, img = pcall(Assets.image, def.image)
+  local img = def and def._stadiumImage or nil
+  local ok = img ~= nil
+  if not img then ok, img = pcall(Assets.image, def.image) end
   if not (ok and img) then return nil end
   local iw, ih = img:getDimensions()
-  local fy = frame * 16
-  if fy + 16 > ih then fy = 0 end
-  local u0, u1 = 0.02 / iw, (16 - 0.02) / iw
-  local v0, v1 = (fy + 0.05) / ih, (fy + 15.95) / ih
+
+  -- v0.3.38: custom players are not required to be 16x16. The 2D engine
+  -- already exposes the real frame dimensions and foot anchor on the sprite
+  -- definition; the voxel card must honor the same contract. The old fixed
+  -- 16x16 quad sampled only a 16px slice and treated x=8 as the pivot, which
+  -- drew wider custom characters (for example Sonic) visibly left/right of
+  -- their actual player/collision body.
+  local fw = math.max(1, tonumber(def.frameWidth) or 16)
+  local fh = math.max(1, tonumber(def.frameHeight) or 16)
+  local anchorX = tonumber(def.anchorX) or fw / 2
+  local anchorY = tonumber(def.anchorY) or fh
+  if fw > iw then fw = iw end
+  if fh > ih then fh = ih end
+
+  local fy = frame * fh
+  if fy + fh > ih then fy = 0 end
+  local insetX, insetY = math.min(0.02, fw * 0.001), math.min(0.05, fh * 0.002)
+  local u0, u1 = insetX / iw, (fw - insetX) / iw
+  local v0, v1 = (fy + insetY) / ih, (fy + fh - insetY) / ih
+
+  -- billboardMatrix/casterMatrix translate mesh x=8 onto the CELL CENTER.
+  -- Place the authored anchor there, while y=0 remains the authored foot
+  -- point. Default 16x16 definitions therefore produce the exact old quad.
+  local left = 8 - anchorX
+  local right = left + fw
+  local bottom = anchorY - fh
+  local top = anchorY
   local verts = {
-    { 0, 0, 0, u0, v1, 1 }, { 16, 0, 0, u1, v1, 1 },
-    { 16, 16, 0, u1, v0, 1 }, { 0, 16, 0, u0, v0, 1 },
+    { left,  bottom, 0, u0, v1, 1 }, { right, bottom, 0, u1, v1, 1 },
+    { right, top,    0, u1, v0, 1 }, { left,  top,    0, u0, v0, 1 },
   }
   local indices = {}
   Voxel3D.pushQuad(indices, 0)
@@ -62,7 +88,9 @@ end
 -- ground whether or not anything hides it; and the sun must see the same
 -- outline the camera does, or a shadow stops matching what casts it.
 function SpriteBillboards.mesh(def, frame)
-  local key = def.image .. "#" .. frame
+  local key = table.concat({ tostring(def.image), tostring(frame),
+    tostring(def.frameWidth or 16), tostring(def.frameHeight or 16),
+    tostring(def.anchorX or "auto"), tostring(def.anchorY or "auto") }, "#")
   if meshes[key] == nil then
     local ok, m = pcall(buildCard, def, frame)
     meshes[key] = (ok and m) or false

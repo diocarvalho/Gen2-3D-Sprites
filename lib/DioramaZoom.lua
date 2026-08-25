@@ -12,6 +12,8 @@ local LIMITS = {
   far = 4.00,
   world = 8.00,
   extreme = 12.00,
+  twin = 16.00,
+  atlas = 24.00,
 }
 
 local function optionMax()

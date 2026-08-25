@@ -1,0 +1,48 @@
+CUSTOM PLAYER SPRITE FORMAT — v0.3.00
+
+Open: MOD SETTINGS -> 3D MODELS
+
+1. PLAYER SPRITE SHEET
+   A / Confirm / Right = choose or replace an image
+   Left                = remove the imported image
+
+2. CUSTOM PLAYER SPRITE
+   ON  = use the imported animated trainer
+   OFF = restore the normal Gold / Character Selector player
+
+IMAGE TYPES
+- PNG (recommended; alpha transparency is preserved)
+- JPG / JPEG (accepted, but has no alpha transparency)
+- BMP (accepted; transparency depends on source/decoder)
+
+SHEET LAYOUT
+Use ONE vertical strip containing exactly 6 equal-height frames:
+
+  Frame 1  Stand Down
+  Frame 2  Stand Up
+  Frame 3  Stand Left
+  Frame 4  Walk Down
+  Frame 5  Walk Up
+  Frame 6  Walk Left
+
+Right-facing does not need its own artwork. Gen1Recomp mirrors the Left frames
+automatically, matching Gold's native SpriteRenderer behavior. During walking,
+Gold's existing step clock chooses the stand/walk pose and alternates the
+up/down leg mirror. Bike movement, turning and ledge-jump vertical offsets stay
+attached to the same player object.
+
+EXAMPLES OF VALID DIMENSIONS
+- 16 x 96   -> six 16x16 frames
+- 24 x 144  -> six 24x24 frames
+- 32 x 192  -> six 32x32 frames
+- 48 x 288  -> six 48x48 frames
+
+Rectangular frames are also accepted as long as the total sheet height divides
+evenly by 6. The bottom-center of each frame is used as the character's ground
+anchor.
+
+VOXEL / 3D WORLD
+The same custom SpriteRenderer object is used by the voxel player-card pose, so
+the 2D and voxel presentations use the same facing/walk animation. While a
+valid custom player is enabled, it visually takes priority over the optional
+3D Character Selector human model. Stadium Pokémon models are unaffected.

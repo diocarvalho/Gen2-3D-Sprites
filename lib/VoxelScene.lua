@@ -26,6 +26,8 @@ local Water = V.require("Water")
 local VoxelGrid = V.require("VoxelGrid")
 local DayNight = V.require("DayNight")
 local FirstPerson = V.require("FirstPerson")
+local ThirdPerson = V.require("ThirdPerson")
+local Quality = V.require("Quality")
 local BattleCinematic = V.require("BattleCinematic")
 local BattleBillboard = V.require("BattleBillboard")
 local Pokedex = V.require("Pokedex")
@@ -33,6 +35,114 @@ local PaletteFX = require("src.render.PaletteFX")
 local Map = require("src.world.gen2.Map")
 
 local VoxelScene = {}
+
+-- v0.3.59 Kanto frame-scratch helpers. These are methods rather than locals so
+-- this already-large module does not spend extra main-chunk local slots. Native
+-- Johto callers that do not provide `_stadiumFrameScratch` keep the historical
+-- fresh-table behavior.
+function VoxelScene._scratchArray(scratch, name)
+  if not scratch then return {} end
+  local t = scratch[name]
+  if not t then t = {}; scratch[name] = t end
+  for i = #t, 1, -1 do t[i] = nil end
+  return t
+end
+
+-- Arrays such as neighbour mesh readiness may contain holes, so Lua's `#`
+-- cannot safely tell us how much of the previous frame must be cleared. Keep a
+-- tiny high-water mark on the scratch object and clear that numeric range in
+-- place. This avoids allocating replacement arrays without retaining stale
+-- meshes when a nearer slot becomes nil.
+function VoxelScene._scratchIndexed(scratch, name, count)
+  if not scratch then return {} end
+  local t = scratch[name]
+  if not t then t = {}; scratch[name] = t end
+  local countKey = name .. "Count"
+  local prev = tonumber(scratch[countKey]) or 0
+  local n = math.max(prev, math.max(0, tonumber(count) or 0))
+  for i = 1, n do t[i] = nil end
+  scratch[countKey] = math.max(0, tonumber(count) or 0)
+  return t
+end
+
+-- Map-id live sets are dictionaries rather than arrays. Reuse their table too;
+-- the live set is presentation scratch only and ChunkMesher copies it into its
+-- own two-generation residency buffer when membership actually changes.
+function VoxelScene._scratchSet(scratch, name)
+  if not scratch then return {} end
+  local t = scratch[name]
+  if not t then t = {}; scratch[name] = t end
+  for k in pairs(t) do t[k] = nil end
+  return t
+end
+
+function VoxelScene._sameSet(a, b)
+  for k, v in pairs(a or {}) do if v and not (b and b[k]) then return false end end
+  for k, v in pairs(b or {}) do if v and not (a and a[k]) then return false end end
+  return true
+end
+
+function VoxelScene._copySet(dst, src)
+  dst = dst or {}
+  for k in pairs(dst) do dst[k] = nil end
+  for k, v in pairs(src or {}) do if v then dst[k] = true end end
+  return dst
+end
+
+function VoxelScene._scratchRecord(scratch, poolName, index)
+  if not scratch then return {} end
+  local pool = scratch[poolName]
+  if not pool then pool = {}; scratch[poolName] = pool end
+  local rec = pool[index]
+  if not rec then
+    rec = {}; pool[index] = rec
+  else
+    for k in pairs(rec) do rec[k] = nil end
+  end
+  return rec
+end
+
+function VoxelScene._trimScratchPool(scratch, poolName, used)
+  if not scratch then return end
+  local pool = scratch[poolName]
+  if not pool then return end
+  used = math.max(0, math.floor(tonumber(used) or 0))
+  local key = poolName .. "Used"
+  local prev = tonumber(scratch[key])
+  if prev == nil then prev = #pool end
+  if used < prev then
+    for i = used + 1, prev do
+      local rec = pool[i]
+      if rec then for k in pairs(rec) do rec[k] = nil end end
+    end
+  end
+  scratch[key] = used
+end
+
+function VoxelScene._neighborModel(nb)
+  local x, z = tonumber(nb and nb.ox) or 0, tonumber(nb and nb.oy) or 0
+  if nb and nb._stadiumModel and nb._stadiumModelX == x and nb._stadiumModelZ == z then
+    return nb._stadiumModel
+  end
+  local model = Mat4.translate(x, 0, z)
+  if nb then
+    nb._stadiumModel, nb._stadiumModelX, nb._stadiumModelZ = model, x, z
+  end
+  return model
+end
+
+function VoxelScene._waterRow(scratch, list, mesh, texture, model)
+  local i = #list + 1
+  local row
+  if scratch then
+    row = VoxelScene._scratchRecord(scratch, "waterPool", i)
+  else
+    row = {}
+  end
+  row[1], row[2], row[3] = mesh, texture, model
+  list[i] = row
+  return row
+end
 
 -- What the active display mode actually paints with.
 --
@@ -268,13 +378,55 @@ end
 -- ground along the sun line (Voxel3D.shadowMatrix). Runs inside
 -- beginShadows, which supplies the translucent black; the texture is only
 -- consulted for its alpha, so no palette work is needed.
-local function drawShadow(sprite, px, py, facing, phase, flip, gh, lift)
+local fastShadowMesh, fastShadowTex
+local function ensureFastShadow()
+  if fastShadowMesh and fastShadowTex then return fastShadowMesh, fastShadowTex end
+  if not (love and love.graphics and love.image and love.image.newImageData) then return nil end
+  local ok, mesh, tex = pcall(function()
+    local data = love.image.newImageData(32, 16)
+    for y = 0, 15 do
+      for x = 0, 31 do
+        local nx = (x - 15.5) / 15.5
+        local ny = (y - 7.5) / 7.5
+        local d = nx * nx + ny * ny
+        local a = math.max(0, math.min(1, (1.0 - d) * 2.5))
+        data:setPixel(x, y, 1, 1, 1, a)
+      end
+    end
+    local image = love.graphics.newImage(data)
+    image:setFilter("linear", "linear")
+    local verts = {
+      { -11, 0, -5.5, 0, 0, 1 }, { 11, 0, -5.5, 1, 0, 1 },
+      { 11, 0,  5.5, 1, 1, 1 }, { -11, 0,  5.5, 0, 1, 1 },
+    }
+    local indices = {}
+    Voxel3D.pushQuad(indices, 0)
+    return Voxel3D.newMesh(verts, indices), image
+  end)
+  if ok then fastShadowMesh, fastShadowTex = mesh, tex end
+  return fastShadowMesh, fastShadowTex
+end
+
+local shadowMatrixScaled
+local function drawShadow(sprite, px, py, facing, phase, flip, gh, lift,
+                          visualScale)
+  if Quality.blobShadows and Quality.blobShadows() then
+    local mesh, tex = ensureFastShadow()
+    if not (mesh and tex) then return end
+    local air = math.max(0, tonumber(lift) or 0)
+    local scale = math.max(0.55, 1 - air / 96)
+      * math.max(0.05, tonumber(visualScale) or 1)
+    local model = Mat4.mul(Mat4.translate((px or 0) + 8, (gh or 0) + Voxel3D.SHADOW_EPS, (py or 0) + 8),
+                           Mat4.scale(scale, 1, scale))
+    Voxel3D.draw(mesh, tex, model)
+    return
+  end
   local def = sprite.def
   local frame, mirror = frameFor(def, facing, phase, flip)
   local mesh = SpriteBillboards.shadowQuad(def, frame)
   if not mesh then return end
   Voxel3D.draw(mesh, sprite:resolveImage(),
-               Voxel3D.shadowMatrix(px, py, gh, lift, mirror))
+               shadowMatrixScaled(px, py, gh, lift, mirror, visualScale))
 end
 
 -- Where a billboard character's card stands: on the middle of its cell at
@@ -306,7 +458,7 @@ local function leanAngle()
   return VoxelScene.spriteLean or V.require("VoxelState").angle
 end
 
-local function billboardMatrix(px, py, y, mirror)
+local function billboardMatrix(px, py, y, mirror, visualScale)
   local b = FirstPerson.cardBlend()
   local m = Mat4.translate(px + 8, y, py + 8)
   if b > 0 then
@@ -314,11 +466,53 @@ local function billboardMatrix(px, py, y, mirror)
   end
   m = Mat4.mul(m, Mat4.rotateX((leanAngle() - math.pi / 2) * (1 - b)))
   if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
+  local scale = tonumber(visualScale) or 1
+  if math.abs(scale - 1) > 1e-6 then
+    -- The mesh is centred by the final -8 translation and its feet sit at y=0.
+    -- Scaling BEFORE that centring therefore shrinks around the feet/cell centre
+    -- instead of pulling the trainer sideways or underground.
+    m = Mat4.mul(m, Mat4.scale(scale, scale, 1))
+  end
   return Mat4.mul(m, Mat4.translate(-8, 0, 0))
 end
 
 local function billboardPull()
   return VoxelScene.pull(math.max(leanAngle(), 0.05))
+end
+
+-- One presentation scale for the player's card, its occlusion silhouette and
+-- both shadow paths.  Keeping all four copies on the same transform is what
+-- prevents the fix for a giant third-person trainer from leaving behind an
+-- oversized shadow/ghost outline.
+local function playerCardScale(p)
+  if not (p and p.isPlayer and p.sprite and p.sprite.def) then return 1 end
+  return ThirdPerson.playerCardScale(p.sprite.def.frameHeight or 16)
+end
+
+local function casterMatrixScaled(px, py, y, mirror, visualScale)
+  local scale = tonumber(visualScale) or 1
+  if math.abs(scale - 1) <= 1e-6 then
+    return Voxel3D.casterMatrix(px, py, y, mirror)
+  end
+  local m = Mat4.translate(px + 8, y, py + 8)
+  if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
+  m = Mat4.mul(m, Mat4.scale(scale, scale, 1))
+  m = Mat4.mul(m, Mat4.translate(-8, 0, 0))
+  return Mat4.mul(m, Mat4.scale(1, 1, 0))
+end
+
+shadowMatrixScaled = function(px, py, gh, lift, mirror, visualScale)
+  local scale = tonumber(visualScale) or 1
+  if math.abs(scale - 1) <= 1e-6 then
+    return Voxel3D.shadowMatrix(px, py, gh, lift, mirror)
+  end
+  local card = casterMatrixScaled(px, py, gh + (lift or 0), mirror, scale)
+  local squash = { 1, Voxel3D.SHADOW_KX, 0, 0,
+                   0, 0,                 0, 0,
+                   0, Voxel3D.SHADOW_KZ, 1, 0,
+                   0, 0,                 0, 1 }
+  local m = Mat4.mul(squash, Mat4.mul(Mat4.translate(0, -gh, 0), card))
+  return Mat4.mul(Mat4.translate(0, gh + Voxel3D.SHADOW_EPS, 0), m)
 end
 
 -- An authored FIGURE's card -- a person the tileset draws INTO a piece of
@@ -358,9 +552,27 @@ local function figureCaster(f, offX, offZ)
 end
 
 -- Every figure on `map`, drawn with `draw(mesh, model, caster)`.
-local function eachFigure(map, offX, offZ, draw)
+local function eachFigure(map, offX, offZ, draw, view)
+  local pad = 96
+  if view and Quality and type(Quality.figureCullPadding) == "function" then
+    local ok, got = pcall(Quality.figureCullPadding, view.vw, view.vh)
+    if ok and tonumber(got) then pad = tonumber(got) end
+  end
+  offX, offZ = offX or 0, offZ or 0
   for _, f in ipairs(ChunkMesher.figures(map) or {}) do
-    draw(f.mesh, figureMatrix(f, offX, offZ), figureCaster(f, offX, offZ))
+    local visible = true
+    if view then
+      local wx = (tonumber(f.wx) or 0) + offX
+      local wz = (tonumber(f.wz) or 0) + offZ
+      local fw = math.max(16, tonumber(f.w) or 16)
+      visible = wx + fw >= view.cx - view.vw * 0.5 - pad
+        and wx - fw <= view.cx + view.vw * 0.5 + pad
+        and wz + 32 >= view.cy - view.vh * 0.5 - pad
+        and wz - 32 <= view.cy + view.vh * 0.5 + pad
+    end
+    if visible then
+      draw(f.mesh, figureMatrix(f, offX, offZ), figureCaster(f, offX, offZ))
+    end
   end
 end
 
@@ -373,7 +585,7 @@ end
 -- `lift` raises the figure off the ground plane (ledge hops arc UP in 3D,
 -- where the 2D path could only slide the sprite north).
 local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
-                          lift)
+                          lift, visualScale)
   local def = sprite.def
   local tex = sprite:resolveImage()
   if colors and not def.trueColor then
@@ -398,9 +610,9 @@ local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
   -- (castShadows draws this mesh through ShadowMap.snug) -- is where each
   -- vertex asks whether the light reached it; see ShadowMap.snug for why
   -- the lookup must match the stored transform to the letter
-  Voxel3D.draw(mesh, tex, billboardMatrix(px, py, y, mirror),
+  Voxel3D.draw(mesh, tex, billboardMatrix(px, py, y, mirror, visualScale),
                billboardPull(),
-               ShadowMap.snug(Voxel3D.casterMatrix(px, py, y, mirror)))
+               ShadowMap.snug(casterMatrixScaled(px, py, y, mirror, visualScale)))
   return true
 end
 
@@ -426,7 +638,8 @@ local function drawGhost(p)
     tex = TerrainAtlas.forSprite(def.image, p.colors) or tex
   end
   local y = p.gh + (p.lift or 0)
-  Voxel3D.draw(mesh, tex, billboardMatrix(p.px, p.py, y, mirror),
+  local visualScale = playerCardScale(p)
+  Voxel3D.draw(mesh, tex, billboardMatrix(p.px, p.py, y, mirror, visualScale),
                billboardPull())
 end
 
@@ -440,6 +653,7 @@ end
 -- actually changes (a map crossing), not every frame.
 local lastLiveKey = nil
 local lastOpenWorld = nil
+local lastResidencyRegion = nil
 
 -- Request everything `state`'s frame wants and evict what it no longer
 -- does; returns the current map's terrain mesh (or nil while it builds)
@@ -483,11 +697,214 @@ local function openWorldFullMasks(state, rec)
 end
 
 local function readyNeighbor(state, i)
+  -- Terrain/water residency is intentionally broader than decorative detail.
+  -- Distant maps can keep filling the horizon while grass/flowers/figures and
+  -- their extra shadow draws are skipped outside a tighter camera apron.
+  local detail = state and state._stadiumNeighborDetailReady
+  if detail ~= nil then return detail[i] ~= nil end
   local ready = state and state._stadiumNeighborReady
   return ready == nil or ready[i] ~= nil
 end
 
 VoxelScene.openWorldFullMasks = openWorldFullMasks
+
+-- v0.3.59: calculate quality padding and expanded camera bounds once per
+-- rendered frame. Older code called the Quality functions through pcall once
+-- for every neighbour/actor test, even though vw/vh and the quality preset are
+-- constant for the whole frame.
+function VoxelScene._prepareCullView(view, cx, cy, vw, vh)
+  view = view or {}
+  cx, cy = tonumber(cx) or 0, tonumber(cy) or 0
+  vw, vh = tonumber(vw) or 160, tonumber(vh) or 144
+  view.cx, view.cy, view.vw, view.vh = cx, cy, vw, vh
+  local halfW, halfH = vw * 0.5, vh * 0.5
+  view.x1, view.y1, view.x2, view.y2 =
+    cx - halfW, cy - halfH, cx + halfW, cy + halfH
+
+  local function pad(name, fallback)
+    local fn = Quality and Quality[name]
+    if type(fn) == "function" then
+      local ok, got = pcall(fn, vw, vh)
+      if ok and tonumber(got) then return tonumber(got) end
+    end
+    return fallback
+  end
+
+  view.worldPad = pad("worldCullPadding", math.huge)
+  view.detailPad = pad("detailCullPadding", 96)
+  view.actorPad = pad("actorCullPadding", 96)
+
+  if view.worldPad == math.huge then
+    view.worldX1, view.worldY1, view.worldX2, view.worldY2 =
+      -math.huge, -math.huge, math.huge, math.huge
+  else
+    view.worldX1, view.worldY1 = view.x1 - view.worldPad, view.y1 - view.worldPad
+    view.worldX2, view.worldY2 = view.x2 + view.worldPad, view.y2 + view.worldPad
+  end
+  view.detailX1, view.detailY1 = view.x1 - view.detailPad, view.y1 - view.detailPad
+  view.detailX2, view.detailY2 = view.x2 + view.detailPad, view.y2 + view.detailPad
+  view.actorX1, view.actorY1 = view.x1 - view.actorPad, view.y1 - view.actorPad
+  view.actorX2, view.actorY2 = view.x2 + view.actorPad, view.y2 + view.actorPad
+  return view
+end
+
+-- Far-map culling is the v0.2.86 open-world performance hinge.  OPEN WORLD
+-- still owns the complete graph, but a map several screens outside the camera
+-- no longer burns mesh uploads, terrain draws, grass draws, water draws and
+-- shadow work every frame.  As the camera zooms/pans toward it, the same map
+-- becomes visible and streams back through the existing async mesher.
+local function neighborVisible(state, nb)
+  if not (state and nb and nb.map and nb.map.def) then return false end
+  local view = state._stadiumCullView
+  if not view then return true end
+  local pad = view.worldPad
+  if pad == nil then
+    VoxelScene._prepareCullView(view, view.cx, view.cy, view.vw, view.vh)
+    pad = view.worldPad
+  end
+  if pad == math.huge then return true end
+  -- Include the full voxel apron (8 blocks = 256 world px) in the visibility
+  -- test so a border forest cannot pop at the camera edge.
+  local apron = 288
+  local x1 = (tonumber(nb.ox) or 0) - apron
+  local y1 = (tonumber(nb.oy) or 0) - apron
+  local x2 = (tonumber(nb.ox) or 0) + (tonumber(nb.map.def.width) or 0) * 32 + apron
+  local y2 = (tonumber(nb.oy) or 0) + (tonumber(nb.map.def.height) or 0) * 32 + apron
+  return x2 >= view.worldX1 and x1 <= view.worldX2
+     and y2 >= view.worldY1 and y1 <= view.worldY2
+end
+
+VoxelScene.neighborVisible = neighborVisible
+
+-- A tighter visibility box for expensive decorative passes. The terrain mesh
+-- keeps its much wider apron so an OPEN WORLD survey never exposes empty sky;
+-- only grass/flowers/authored figures and far-map shadow casters use this.
+local function neighborDetailVisible(state, nb)
+  if not (state and nb and nb.map and nb.map.def) then return false end
+  local view = state._stadiumCullView
+  if not view then return true end
+  if view.detailPad == nil then
+    VoxelScene._prepareCullView(view, view.cx, view.cy, view.vw, view.vh)
+  end
+  local apron = 96
+  local x1 = (tonumber(nb.ox) or 0) - apron
+  local y1 = (tonumber(nb.oy) or 0) - apron
+  local x2 = (tonumber(nb.ox) or 0) + (tonumber(nb.map.def.width) or 0) * 32 + apron
+  local y2 = (tonumber(nb.oy) or 0) + (tonumber(nb.map.def.height) or 0) * 32 + apron
+  return x2 >= view.detailX1 and x1 <= view.detailX2
+     and y2 >= view.detailY1 and y1 <= view.detailY2
+end
+
+VoxelScene.neighborDetailVisible = neighborDetailVisible
+
+
+local function rectHitsView(r, cx, cy, vw, vh, pad)
+  if not r then return false end
+  pad = tonumber(pad) or 96
+  local vx1, vy1 = cx - vw * 0.5 - pad, cy - vh * 0.5 - pad
+  local vx2, vy2 = cx + vw * 0.5 + pad, cy + vh * 0.5 + pad
+  return (tonumber(r.x2) or -math.huge) >= vx1
+     and (tonumber(r.x1) or math.huge) <= vx2
+     and (tonumber(r.y2) or -math.huge) >= vy1
+     and (tonumber(r.y1) or math.huge) <= vy2
+end
+
+-- A perimeter ocean can be many screens away from the player.  Do not start
+-- Water.begin's reflection/depth copy merely because the toggle is ON; only do
+-- the expensive pass once at least one coastline strip can contribute pixels.
+local function oceanVisible(ocean, cx, cy, vw, vh)
+  if not ocean then return false end
+  local rects = ocean.rects
+  if type(rects) == "table" and #rects > 0 then
+    for _, r in ipairs(rects) do
+      if rectHitsView(r, cx, cy, vw, vh, 160) then return true end
+    end
+    return false
+  end
+  return rectHitsView(ocean.bounds, cx, cy, vw, vh, 160)
+end
+
+VoxelScene.oceanVisible = oceanVisible
+
+-- v0.4.31 persistent sector preloader. Kanto already has a whole-region BODY
+-- cooker in TwinRegionWorld; native Johto previously relied almost entirely on
+-- visible/predicted render requests. That meant a sector could be perfectly
+-- known in the connection graph but still have no persistent BODY cache until
+-- the player was already approaching it. Warm nearby prepared Johto maps into
+-- VoxelDiskCache ahead of time without allocating GPU meshes. Real renderer
+-- jobs always preempt these cache-only jobs in ChunkMesher.
+VoxelScene._sectorDiskWarmSeen = VoxelScene._sectorDiskWarmSeen or {}
+
+function VoxelScene._scheduleNeighborDiskWarm(state, neighbors)
+  if not (state and state.map and state.map.id) then return 0 end
+  if state._stadiumYellowKanto == true then return 0 end
+  if not (ChunkMesher and type(ChunkMesher.diskCacheEnabled) == "function"
+      and ChunkMesher.diskCacheEnabled()
+      and type(ChunkMesher.warmDisk) == "function") then return 0 end
+
+  local osName = nil
+  if love and love.system and type(love.system.getOS) == "function" then
+    local ok, got = pcall(love.system.getOS)
+    if ok then osName = got end
+  end
+  local mobile = osName == "Android" or osName == "iOS"
+  local mode = Quality and type(Quality.buildMode) == "function"
+    and Quality.buildMode() or "balanced"
+  local targetPending
+  if mobile then
+    targetPending = mode == "fast" and 2 or 1
+  else
+    targetPending = mode == "fast" and 6 or (mode == "smooth" and 2 or 4)
+  end
+
+  local regionTag = "johto"
+  local pending = type(ChunkMesher.warmPending) == "function"
+    and ChunkMesher.warmPending(regionTag) or 0
+  if pending >= targetPending then return 0 end
+
+  local seen = VoxelScene._sectorDiskWarmSeen
+  local queued = 0
+  local function consider(nb)
+    if pending >= targetPending then return end
+    local map = nb and nb.map
+    local id = map and map.id
+    if not id or id == state.map.id or seen[id] then return end
+    local ok, status = ChunkMesher.warmDisk(map, true, nil, regionTag)
+    if ok then
+      -- A hit/live/queued result all mean this prepared sector no longer needs
+      -- probing every presentation frame. Real invalidation/build paths still
+      -- persist edited geometry when a map changes later.
+      seen[id] = true
+      if status == "queued" then
+        pending = pending + 1
+        queued = queued + 1
+        VoxelScene.sectorPreloadQueued = (VoxelScene.sectorPreloadQueued or 0) + 1
+      elseif status == "hit" then
+        VoxelScene.sectorPreloadHits = (VoxelScene.sectorPreloadHits or 0) + 1
+      elseif status == "live" then
+        VoxelScene.sectorPreloadLive = (VoxelScene.sectorPreloadLive or 0) + 1
+      end
+    end
+  end
+
+  -- Direct connections first, then second ring, then any deeper map already
+  -- prepared by the active quality radius. This fills the disk cache in the
+  -- same order the player is most likely to reach those sectors.
+  for depth = 1, 3 do
+    for _, nb in ipairs(neighbors or {}) do
+      if math.floor(tonumber(nb.depth) or 99) == depth then consider(nb) end
+      if pending >= targetPending then break end
+    end
+    if pending >= targetPending then break end
+  end
+  if pending < targetPending then
+    for _, nb in ipairs(neighbors or {}) do
+      if (tonumber(nb.depth) or 99) > 3 then consider(nb) end
+      if pending >= targetPending then break end
+    end
+  end
+  return queued
+end
 
 function VoxelScene.prefetch(state)
   local Voxel = V.require("VoxelState")
@@ -498,38 +915,104 @@ function VoxelScene.prefetch(state)
   -- is evicted -- meshes released, analysis dropped -- so memory stays
   -- bounded by the neighbourhood instead of growing with every area
   -- ever visited.
-  local liveKey = (state._stadiumOpenWorldNeighbors and "open|" or "stream|")
-    .. state.map.id
-  local live = { [state.map.id] = true }
-  for _, nb in ipairs(state.neighbors or {}) do
-    live[nb.map.id] = true
-    liveKey = liveKey .. "|" .. nb.map.id
+  local residencyRegion = tostring(state._stadiumResidencyRegion or "world")
+  -- Do not let background Johto cache-only jobs retain prepared Johto map
+  -- adapters after the player explicitly switches into Kanto. Kanto owns its
+  -- own region warmer and RETURN TO JOHTO already cancels that queue.
+  if residencyRegion == "kanto" and lastResidencyRegion ~= nil
+      and lastResidencyRegion ~= residencyRegion
+      and type(ChunkMesher.cancelWarmRegion) == "function" then
+    pcall(ChunkMesher.cancelWarmRegion, "johto")
   end
-  if liveKey ~= lastLiveKey then
-    local openWorld = state._stadiumOpenWorldNeighbors == true
-    local trimFarNow = lastOpenWorld == true and not openWorld
-    lastLiveKey = liveKey
-    lastOpenWorld = openWorld
-    ChunkMesher.setLive(live, trimFarNow)
-    -- RED++ bakes one atlas per map, so its animated copy is per map too
-    -- and is bounded by the same neighbourhood
-    TerrainAtlas.setLive(live)
+  local openWorld = state._stadiumOpenWorldNeighbors == true
+  local neighbors = state.neighbors or {}
+  local scratch = state._stadiumFrameScratch
+  local visibleFlags = scratch
+    and VoxelScene._scratchIndexed(scratch, "neighborVisible", #neighbors) or nil
+  local live = scratch and VoxelScene._scratchSet(scratch, "live") or {}
+  live[state.map.id] = true
+
+  -- v0.3.59 computes neighbour visibility once. The previous path repeated the
+  -- same camera/quality/bounds test for residency and again for mesh requests.
+  for i, nb in ipairs(neighbors) do
+    local visible = neighborVisible(state, nb)
+    if visibleFlags then visibleFlags[i] = visible end
+    -- Directly connected maps stay warm for seamless crossings even when the
+    -- camera currently faces away from them. Far maps are resident only while
+    -- their expanded bounds can contribute to the current view.
+    if (tonumber(nb.depth) or 1) <= 1 or visible then
+      live[nb.map.id] = true
+    end
   end
 
-  -- masks: where connected neighbour BODIES sit, so each full map's border
-  -- ring is suppressed under the maps touching it. In OPEN WORLD every map is
-  -- a full voxel island with its own outside apron; in streaming mode this is
-  -- the historical current-map-only full mesh.
-  local masks
-  if state._stadiumOpenWorldNeighbors then
-    masks = openWorldFullMasks(state, { map = state.map, ox = 0, oy = 0 })
+  if scratch then
+    scratch.liveApplied = scratch.liveApplied or {}
+    local membershipChanged = not VoxelScene._sameSet(live, scratch.liveApplied)
+    local regionChanged = lastResidencyRegion ~= nil
+      and residencyRegion ~= lastResidencyRegion
+    local modeChanged = scratch.liveAppliedOpenWorld ~= openWorld
+      or scratch.liveAppliedRegion ~= residencyRegion
+    if membershipChanged or modeChanged or regionChanged then
+      -- Normal house/route streaming keeps one previous neighbourhood warm. A
+      -- Johto<->Yellow switch is different: the inactive region cannot be
+      -- reached without an explicit transition, so evict it immediately.
+      local trimFarNow = regionChanged or (lastOpenWorld == true and not openWorld)
+      ChunkMesher.setLive(live, trimFarNow)
+      TerrainAtlas.setLive(live)
+      VoxelScene._copySet(scratch.liveApplied, live)
+      scratch.liveAppliedOpenWorld = openWorld
+      scratch.liveAppliedRegion = residencyRegion
+    end
+    -- A scalar sentinel deliberately makes the next non-scratch/native-world
+    -- live key differ even if it returns to the exact Johto map seen before
+    -- Kanto. Do NOT retain the scratch table here: RETURN TO JOHTO must be able
+    -- to release every Kanto map/mesh reference even if 3D is disabled before
+    -- the native world performs another prefetch.
+    lastLiveKey = "__stadium_scratch_live__"
+    lastOpenWorld = openWorld
+    lastResidencyRegion = residencyRegion
   else
-    masks = {}
-    for _, nb in ipairs(state.neighbors or {}) do
-      if nb.depth == nil or nb.depth <= 1 then
-        masks[#masks + 1] = { nb.ox, nb.oy,
-                              nb.ox + nb.map.def.width * 32,
-                              nb.oy + nb.map.def.height * 32 }
+    -- Native/non-scratch callers retain the historical string signature.
+    local liveKey = residencyRegion .. "|"
+      .. (openWorld and "open|" or "stream|") .. state.map.id
+    for _, nb in ipairs(neighbors) do
+      if live[nb.map.id] then liveKey = liveKey .. "|" .. nb.map.id end
+    end
+    if liveKey ~= lastLiveKey then
+      local regionChanged = lastResidencyRegion ~= nil
+        and residencyRegion ~= lastResidencyRegion
+      local trimFarNow = regionChanged or (lastOpenWorld == true and not openWorld)
+      lastLiveKey = liveKey
+      lastOpenWorld = openWorld
+      lastResidencyRegion = residencyRegion
+      ChunkMesher.setLive(live, trimFarNow)
+      TerrainAtlas.setLive(live)
+    end
+  end
+
+  -- Prebuild nearby native-Johto BODY sectors into the persistent cache before
+  -- they become visible. Kanto has its own whole-region scheduler, so this is
+  -- intentionally a no-op there.
+  VoxelScene._scheduleNeighborDiskWarm(state, neighbors)
+
+  -- masks: where connected neighbour BODIES sit, so each full map's border
+  -- ring is suppressed under the maps touching it. Kanto's shared-body mode
+  -- never draws those synthetic FULL aprons, so v0.3.59 skips the entire
+  -- placement/mask construction path there instead of allocating dead tables
+  -- at presentation FPS.
+  local sharedBodies = state._stadiumSharedWorldBodies == true
+  local masks
+  if not sharedBodies then
+    if openWorld then
+      masks = openWorldFullMasks(state, { map = state.map, ox = 0, oy = 0 })
+    else
+      masks = {}
+      for _, nb in ipairs(neighbors) do
+        if nb.depth == nil or nb.depth <= 1 then
+          masks[#masks + 1] = { nb.ox, nb.oy,
+                                nb.ox + nb.map.def.width * 32,
+                                nb.oy + nb.map.def.height * 32 }
+        end
       end
     end
   end
@@ -548,16 +1031,66 @@ function VoxelScene.prefetch(state)
   -- cut out of that build's own geometry (ChunkMesher.pair), so the two
   -- always come from the same slot and a lake is never drawn twice or left
   -- as a hole.
-  ChunkMesher.request(state.map, false, masks, true)
-  local terrain, water = ChunkMesher.pair(state.map, false)
-  if not terrain then
+  -- Kanto's persistent BODY cache is also the instant stand-in for direct
+  -- warps / KANTO FREE ROAM resumes that did not approach this map through a
+  -- visible seam. Queue BODY first so a disk hit can land in one cooperative
+  -- upload pass; the exact FULL mesh remains urgent and replaces it as soon as
+  -- its apron/seam variant is ready.
+  if state._stadiumYellowKanto == true and ChunkMesher.diskCacheEnabled
+      and ChunkMesher.diskCacheEnabled() then
+    ChunkMesher.request(state.map, true, nil, true)
+  end
+  if sharedBodies then
+    -- v0.3.42 Kanto shares one connected world-space.  A FULL mesh contains
+    -- this map's synthetic border/apron; drawing one for every Yellow map is
+    -- what produced the enormous repeated rock/tree belts.  Render the actual
+    -- authored bodies only and stitch them with the already-solved neighbour
+    -- offsets, exactly like one continuous world component.
+    ChunkMesher.request(state.map, true, nil, true)
+  else
+    ChunkMesher.request(state.map, false, masks, true)
+  end
+  local terrain, water = ChunkMesher.pair(state.map, sharedBodies)
+  if not terrain and not sharedBodies then
     terrain, water = ChunkMesher.pair(state.map, true)
   end
-  local nbMesh, nbWater = {}, {}
-  local openWorld = state._stadiumOpenWorldNeighbors == true
-  for i, nb in ipairs(state.neighbors or {}) do
-    if openWorld then
-      -- Full meshes on ALL connected maps. This is the important difference
+  local nbMesh = scratch
+    and VoxelScene._scratchIndexed(scratch, "nbMesh", #neighbors) or {}
+  local nbWater = scratch
+    and VoxelScene._scratchIndexed(scratch, "nbWater", #neighbors) or {}
+  local detailReady = scratch
+    and VoxelScene._scratchIndexed(scratch, "detailReady", #neighbors) or {}
+  local culled = 0
+  for i, nb in ipairs(neighbors) do
+    local visible
+    if visibleFlags then visible = visibleFlags[i] == true
+    else visible = neighborVisible(state, nb) end
+    if not visible then
+      culled = culled + 1
+      -- A direct/predicted sector should be READY before the camera reaches the
+      -- seam. Build its cheaper body mesh cooperatively while it is still
+      -- offscreen; once visible/open-world the full bordered mesh is requested
+      -- and can temporarily draw this already-finished body instead of popping
+      -- in only after the player starts walking into it.
+      if nb.prefetch == true or (tonumber(nb.depth) or 99) <= 1 then
+        -- v0.3.32 persistent-cache path: Kanto prefetches BOTH the cheap BODY
+        -- stand-in and the exact FULL/seam-masked mesh while the sector is
+        -- still offscreen. BODY normally comes straight from the background
+        -- disk warmer; FULL then finishes before the camera reaches the seam.
+        -- This deliberately spends more desktop CPU ahead of time to remove
+        -- zone pop rather than waiting for visibility to trigger the expensive
+        -- variant for the first time.
+        ChunkMesher.request(nb.map, true, nil, false)
+        if openWorld and not sharedBodies and state._stadiumYellowKanto == true
+            and ChunkMesher.diskCacheEnabled
+            and ChunkMesher.diskCacheEnabled() then
+          local nbMasks = openWorldFullMasks(state, nb)
+          ChunkMesher.request(nb.map, false, nbMasks, false)
+        end
+      end
+      nbMesh[i], nbWater[i] = nil, nil
+    elseif openWorld and not sharedBodies then
+      -- Full meshes on all connected maps that can contribute to this camera.
       -- from the old one-ring streamer: body-only meshes have no border/apron,
       -- so a world-scale camera exposes empty void at the outside perimeter.
       -- Each map gets masks for its own connected seams and retains its outer
@@ -572,9 +1105,11 @@ function VoxelScene.prefetch(state)
         nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
       end
     else
+      -- Shared-world Kanto and ordinary non-open-world neighbours both use
+      -- authored BODY geometry here; no per-map synthetic apron is resident.
       ChunkMesher.request(nb.map, true, nil, nb.urgent == true)
       nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, true)
-      if not nbMesh[i] then
+      if not nbMesh[i] and not sharedBodies then
         nbMesh[i], nbWater[i] = ChunkMesher.pair(nb.map, false)
       end
     end
@@ -585,6 +1120,14 @@ function VoxelScene.prefetch(state)
   -- world down with it. This directly prevents the all-flat fallback seen in
   -- v0.2.46 while the full region is warming.
   state._stadiumNeighborReady = nbMesh
+  for i, nb in ipairs(neighbors) do
+    if nbMesh[i] and neighborDetailVisible(state, nb) then
+      detailReady[i] = nbMesh[i]
+    end
+  end
+  state._stadiumNeighborDetailReady = detailReady
+  state._stadiumCulledNeighbors = culled
+  VoxelScene.culledNeighbors = culled
   Voxel.ready = terrain ~= nil
   return terrain, nbMesh, water, nbWater
 end
@@ -602,30 +1145,82 @@ end
 -- below). Only that one entry gets the see-through treatment: NPCs and the
 -- ghosts standing on a neighbour map are left to honest occlusion, because
 -- it is only your own character you cannot afford to lose behind a roof.
+local function actorVisible(state, px, py)
+  local view = state and state._stadiumCullView
+  if not view then return true end
+  if view.actorPad == nil then
+    VoxelScene._prepareCullView(view, view.cx, view.cy, view.vw, view.vh)
+  end
+  px, py = tonumber(px) or 0, tonumber(py) or 0
+  return px + 24 >= view.actorX1 and px - 24 <= view.actorX2
+     and py + 32 >= view.actorY1 and py - 32 <= view.actorY2
+end
+
+local function followerEntity(e)
+  return type(e) == "table" and (e.wildsFollower == true or e.isFollower == true
+    or e.isPokemonFollower == true or e.pokepcTrailer == true
+    or e._wildsFollowerSpecies ~= nil or e._pokepcFollowerSpecies ~= nil)
+end
+
+local function followerLift(state, e, vy)
+  local lift = (tonumber(e and e.py) or 0) - (tonumber(vy) or tonumber(e and e.py) or 0)
+  if not followerEntity(e) then return lift end
+  -- Follower sheets for serpentine/levitating species often draw the artwork
+  -- several pixels above the 2D tile. That is a sprite-composition offset, not
+  -- real world altitude. Preserve real ledge hops and water bobbing, but ground
+  -- ordinary land followers so Gyarados/Haunter/etc. do not float in 3D.
+  if e.jumping == true or e.hopping == true then return lift end
+  -- Ghost callers already have the foreign map itself. Accept either a render
+  -- state or a map so Kanto does not allocate `{ map = ... }` once per ghost.
+  local map = state and (state.map or (state.def and state))
+  if map and type(map.isWaterCell) == "function" and e.cellX and e.cellY then
+    local ok, water = pcall(map.isWaterCell, map, e.cellX, e.cellY)
+    if ok and water == true then return lift end
+  end
+  return 0
+end
+
 local function posesOf(state, spriteColors)
   local colors = spriteColors(state.map)
-  local posed = {}
+  local scratch = state and state._stadiumFrameScratch
+  local posed = VoxelScene._scratchArray(scratch, "posed")
   local me = nil
   for _, g in ipairs(state.ghosts or {}) do
+    -- pose() still runs exactly once so off-screen hops/spinners keep time; the
+    -- renderer simply avoids building ground/palette/draw work for a card that
+    -- cannot contribute to this camera.
     local sprite, vx, vy, facing, phase, flip = g.npc:pose()
-    posed[#posed + 1] = {
-      sprite = sprite, px = vx + g.ox, py = g.npc.py + g.oy,
-      facing = facing, phase = phase, flip = flip,
-      gh = groundAt(g.map or state.map, g.npc.cellX, g.npc.cellY),
-      lift = g.npc.py - vy, colors = spriteColors(g.map or state.map),
-    }
+    local px, py = vx + g.ox, g.npc.py + g.oy
+    if actorVisible(state, px, py) then
+      local pi = #posed + 1
+      local p = VoxelScene._scratchRecord(scratch, "posePool", pi)
+      p.sprite, p.px, p.py = sprite, px, py
+      p.facing, p.phase, p.flip = facing, phase, flip
+      p.gh = groundAt(g.map or state.map, g.npc.cellX, g.npc.cellY)
+      p.lift, p.colors = followerLift(g.map or state.map, g.npc, vy), spriteColors(g.map or state.map)
+      p.isPlayer = nil
+      p.stadiumVisualMoving, p.stadiumVisualAnimDist = nil, nil
+      p.stadiumMoveWorldX, p.stadiumMoveWorldZ = nil, nil
+      posed[pi] = p
+    end
   end
   for _, e in ipairs(state.entities or {}) do
     if not (state.flyAnim and e == state.player)
        and not e._stadiumCaptureHidden then
       local sprite, vx, vy, facing, phase, flip = e:pose()
-      posed[#posed + 1] = {
-        sprite = sprite, px = vx, py = e.py,
-        facing = facing, phase = phase, flip = flip,
-        gh = groundAt(state.map, e.cellX, e.cellY),
-        lift = e.py - vy, colors = colors,
-      }
-      if e == state.player then
+      local visible = e == state.player or actorVisible(state, vx, e.py)
+      if visible then
+        local pi = #posed + 1
+        local p = VoxelScene._scratchRecord(scratch, "posePool", pi)
+        p.sprite, p.px, p.py = sprite, vx, e.py
+        p.facing, p.phase, p.flip = facing, phase, flip
+        p.gh, p.lift, p.colors = groundAt(state.map, e.cellX, e.cellY), followerLift(state, e, vy), colors
+        p.isPlayer = nil
+        p.stadiumVisualMoving, p.stadiumVisualAnimDist = nil, nil
+        p.stadiumMoveWorldX, p.stadiumMoveWorldZ = nil, nil
+        posed[pi] = p
+      end
+      if e == state.player and visible then
         me = posed[#posed]
         -- marked so the camera draw can leave the card out in first
         -- person, where it would fill the lens from inside; the SUN pass
@@ -638,9 +1233,36 @@ local function posesOf(state, spriteColors)
         me.stadiumVisualMoving = state._stadiumFreeMoveActive == true
           and state._stadiumFreeVisualMoving == true
         me.stadiumVisualAnimDist = tonumber(state._stadiumFreeAnimDist) or 0
+        me.stadiumMoveWorldX = tonumber(state._stadiumFreeWorldX) or 0
+        me.stadiumMoveWorldZ = tonumber(state._stadiumFreeWorldZ) or 0
+        -- THIRD PERSON owns continuous px/py directly and intentionally leaves
+        -- Gen-2 Player.moving false. That is correct for collision, but pose()
+        -- therefore returns the standing frame before this renderer sees the
+        -- presentation-only movement bit. Repair the captured PLAYER pose here
+        -- so every renderer path (stock/custom sprite card AND external 3D skin)
+        -- gets the same walk phase DIORAMA receives from native grid movement.
+        if me.stadiumVisualMoving and not state._stadiumLiveBattle then
+          -- Tie the 2D card cadence to actual free-roam travel distance.  That
+          -- remains live for analogue movement even on hosts where
+          -- Player.animClock is not advanced by the continuous controller.
+          local q = (tonumber(me.stadiumVisualAnimDist) or 0) % 16
+          me.phase = (q >= 4 and q < 12) and 1 or 0
+          me.flip = e.stepFlip == true
+        elseif not state._stadiumLiveBattle and type(e.walkPhase) == "function" then
+          -- DIORAMA/native grid movement: always refresh from Gold/Silver's
+          -- public Player walk phase instead of trusting a stale pose capture.
+          local okWalk, walk = pcall(e.walkPhase, e)
+          if okWalk and walk ~= nil then me.phase = walk end
+          me.flip = e.stepFlip == true or me.flip == true
+        end
+        if me.sprite and type(me.sprite.def) == "table"
+           and (tonumber(me.sprite.def.frames) or 1) > 1 then
+          me.sprite.def.walker = true
+        end
       end
     end
   end
+  VoxelScene._trimScratchPool(scratch, "posePool", #posed)
   return posed, me
 end
 
@@ -715,7 +1337,7 @@ local function drawCast(state, posed, atlasFor)
   for _, p in ipairs(posed) do
     if not (p.isPlayer and hideMe) then
       drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                 p.colors, p.lift)
+                 p.colors, p.lift, playerCardScale(p))
     end
   end
   -- back on for everything textured from the atlas again -- figures, grass
@@ -727,13 +1349,13 @@ local function drawCast(state, posed, atlasFor)
   eachFigure(state.map, 0, 0, function(mesh, model, caster)
     Voxel3D.draw(mesh, atlasFor(state.map), model, figPull,
                  ShadowMap.snug(caster))
-  end)
+  end, state._stadiumCullView)
   for i, nb in ipairs(state.neighbors or {}) do
     if readyNeighbor(state, i) then
       eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
         Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull,
                      ShadowMap.snug(caster))
-      end)
+      end, state._stadiumCullView)
     end
   end
   -- and the seams are back on for the terrain art that follows: grass and
@@ -812,8 +1434,15 @@ function VoxelScene.drawWater(draws, cast)
     end
   end
   local plain = not curved
-  if Water.enabled() and Voxel3D.depthReadable() then
-    local mirror, depth = Voxel3D.beginWater(cast)
+  local reflectionLevel = Water.level()
+  if reflectionLevel > 0 and Voxel3D.depthReadable() then
+    -- SKY / FAST never samples the reflected world. Skip both the full-scene
+    -- mirror copy and the duplicate character/figure draw; only FULL SSR pays
+    -- for those. The depth texture remains attached/detached exactly as before
+    -- so shore/building occlusion is unchanged.
+    local fullWorldReflection = reflectionLevel >= 2
+    local mirror, depth = Voxel3D.beginWater(fullWorldReflection and cast or nil,
+                                             fullWorldReflection)
     local w, h = Voxel3D.size()
     local ok = mirror and depth and Water.begin({
       reflect = mirror, depth = depth,
@@ -904,92 +1533,133 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
                            atlasFor, water, nbWater, battleCards, battleToken)
   if not ShadowMap.available() then return end
   local sig = shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
+  local ocean = state and state._stadiumOcean
+  local oceanHere = oceanVisible(ocean, cx, cy, vw, vh)
+  if oceanHere and ocean and ocean.mesh then sig = sig .. "|ocean" .. tostring(ocean.mesh) end
   -- a staged fight's pics move every frame the animation does, and the sun
   -- has to follow them (VR frames only; see render)
   if battleToken then sig = sig .. "|btl" .. tostring(battleToken) end
   if not ShadowMap.stale(sig) then return end
-  if not ShadowMap.begin(cx, cy, vw, vh) then return end
 
-  ShadowMap.draw(terrain, atlasFor(state.map), nil)
-  for i, nb in ipairs(state.neighbors or {}) do
-    if nbMesh[i] then
-      ShadowMap.draw(nbMesh[i], atlasFor(nb.map),
-                     Mat4.translate(nb.ox, 0, nb.oy))
-    end
+  -- v0.4.07 controller-look stability. FirstPerson.signature() includes yaw
+  -- because a settled free-camera view deserves a refitted sun frustum, but
+  -- rebuilding that full shadow pass on EVERY right-stick sample can hit a
+  -- driver/mesh failure or a severe forest/caster spike exactly while the
+  -- player is looking around. Reuse the last valid sun map while analog look
+  -- is moving; the first frame after the stick settles refreshes it once.
+  -- This changes only shadows -- never the camera, terrain or 3D renderer.
+  if type(FirstPerson.analogLookActive) == "function"
+      and FirstPerson.analogLookActive() and ShadowMap.active() then
+    VoxelScene.shadowLookDeferrals = (VoxelScene.shadowLookDeferrals or 0) + 1
+    return
   end
-  -- The water surface, which the terrain mesh no longer carries (it is its
-  -- own reflective pass now -- see Water). The sun still has to see it, or
-  -- the map the light records has a hole at every lake and the frustum's
-  -- far plane answers for the surface a shoreline tree's shadow falls on.
-  ShadowMap.draw(water, atlasFor(state.map), nil)
-  for i, nb in ipairs(state.neighbors or {}) do
-    if nbWater and nbWater[i] then
-      ShadowMap.draw(nbWater[i], atlasFor(nb.map),
-                     Mat4.translate(nb.ox, 0, nb.oy))
-    end
+
+  local okBegin, beganOrErr = pcall(ShadowMap.begin, cx, cy, vw, vh)
+  if not okBegin then
+    if type(ShadowMap.abort) == "function" then pcall(ShadowMap.abort) end
+    VoxelScene.shadowRefreshErrors = (VoxelScene.shadowRefreshErrors or 0) + 1
+    VoxelScene.lastShadowError = tostring(beganOrErr)
+    return
   end
-  -- flower billboards live outside the terrain mesh (they draw after the
-  -- characters, pulled -- see render), but the sun still sees them: a
-  -- handful of cutouts per meadow, unlike the grass left out below.
-  -- Every thin card from here down is SNUGGED toward the sun along its own
-  -- ray (ShadowMap.snug) so its shadow keeps contact with its feet instead
-  -- of starting a bias-width away.
-  ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
-                 ShadowMap.snug(nil))
-  for i, nb in ipairs(state.neighbors or {}) do
-    if readyNeighbor(state, i) then
-      ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+  if not beganOrErr then return end
+  local okShadow, shadowErr = pcall(function()
+    ShadowMap.draw(terrain, atlasFor(state.map), nil)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if nbMesh[i] and readyNeighbor(state, i) then
+        ShadowMap.draw(nbMesh[i], atlasFor(nb.map),
+                       VoxelScene._neighborModel(nb))
+      end
     end
-  end
-  -- From here down it is the CAST, marked as such in the map (see
-  -- ShadowMap.sprites) so water can decline them: everything the world casts
-  -- still shades a lake, a silhouette of somebody standing beside it does
-  -- not. Ground, roofs and the characters themselves take them as before.
-  ShadowMap.sprites(true)
-  -- authored figures cast too, for the same reason the flowers do: a
-  -- handful of cards per map, and a person with no shadow reads as pasted on
-  eachFigure(state.map, 0, 0, function(mesh, _, caster)
-    ShadowMap.draw(mesh, atlasFor(state.map), ShadowMap.snug(caster))
+    -- The water surface, which the terrain mesh no longer carries (it is its
+    -- own reflective pass now -- see Water). The sun still has to see it, or
+    -- the map the light records has a hole at every lake and the frustum's
+    -- far plane answers for the surface a shoreline tree's shadow falls on.
+    ShadowMap.draw(water, atlasFor(state.map), nil)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if nbWater and nbWater[i] and readyNeighbor(state, i) then
+        ShadowMap.draw(nbWater[i], atlasFor(nb.map),
+                       VoxelScene._neighborModel(nb))
+      end
+    end
+    -- v0.2.82's optional world ocean is already in world coordinates and sits
+    -- below native lake surfaces. Put it in the light pass too so the shadow
+    -- frustum records a real surface beyond the stitched land instead of its
+    -- far plane.
+    if oceanHere and ocean and ocean.mesh and ocean.texture then
+      ShadowMap.draw(ocean.mesh, ocean.texture, ocean.model)
+    end
+    -- flower billboards live outside the terrain mesh (they draw after the
+    -- characters, pulled -- see render), but the sun still sees them: a
+    -- handful of cutouts per meadow, unlike the grass left out below.
+    -- Every thin card from here down is SNUGGED toward the sun along its own
+    -- ray (ShadowMap.snug) so its shadow keeps contact with its feet instead
+    -- of starting a bias-width away.
+    ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
+                   ShadowMap.snug(nil))
+    for i, nb in ipairs(state.neighbors or {}) do
+      if readyNeighbor(state, i) then
+        ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                       ShadowMap.snug(VoxelScene._neighborModel(nb)))
+      end
+    end
+    -- From here down it is the CAST, marked as such in the map (see
+    -- ShadowMap.sprites) so water can decline them: everything the world casts
+    -- still shades a lake, a silhouette of somebody standing beside it does
+    -- not. Ground, roofs and the characters themselves take them as before.
+    ShadowMap.sprites(true)
+    -- authored figures cast too, for the same reason the flowers do: a
+    -- handful of cards per map, and a person with no shadow reads as pasted on
+    eachFigure(state.map, 0, 0, function(mesh, _, caster)
+      ShadowMap.draw(mesh, atlasFor(state.map), ShadowMap.snug(caster))
+    end, state._stadiumCullView)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if readyNeighbor(state, i) then
+        eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
+          ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
+        end, state._stadiumCullView)
+      end
+    end
+    for _, p in ipairs(posed) do
+      local def = p.sprite.def
+      -- viewFacing, exactly as the camera draw picks it (see viewFacing for
+      -- why the two passes must agree): in first person the sun's card
+      -- swaps frame as the eye circles, which costs a redraw the signature
+      -- already charges for (FirstPerson.signature) and keeps a card from
+      -- fringing against a mirror-flipped record of itself
+      local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip)
+      local mesh = SpriteBillboards.shadowQuad(def, frame)
+      if mesh then
+        ShadowMap.draw(mesh, p.sprite:resolveImage(),
+                       ShadowMap.snug(
+                         casterMatrixScaled(p.px, p.py, p.gh + (p.lift or 0),
+                                            mirror, playerCardScale(p))))
+      end
+    end
+    -- a staged fight's mons (VR frames only): the same cards the eye pass
+    -- stands on the arena, snugged like every thin card, marked as the cast
+    -- so the water can decline them like everybody else's silhouette
+    for _, card in ipairs(battleCards or {}) do
+      ShadowMap.draw(BattleBillboard.mesh(), card.tex, ShadowMap.snug(card.model))
+    end
+    -- Gold v0.1.89 keeps battles in the normal overworld camera. The Stadium
+    -- combatants therefore belong to this ordinary world shadow pass instead of
+    -- BattleScene's separate staged pass.
+    if state and state._stadiumLiveBattle then
+      pcall(function() V.require("Stadium").cast(ShadowMap) end)
+    end
+    ShadowMap.sprites(false)
+
   end)
-  for i, nb in ipairs(state.neighbors or {}) do
-    if readyNeighbor(state, i) then
-      eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
-        ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
-      end)
-    end
+  if okShadow then
+    ShadowMap.finish(sig)
+  else
+    if type(ShadowMap.abort) == "function" then pcall(ShadowMap.abort) end
+    VoxelScene.shadowRefreshErrors = (VoxelScene.shadowRefreshErrors or 0) + 1
+    VoxelScene.lastShadowError = tostring(shadowErr)
+    -- Shadows are optional presentation. The main Voxel3D pass proceeds in
+    -- this same frame with the blank/decal fallback instead of bubbling the
+    -- failure out to GoldPipelineBridge, which would expose native 2D.
   end
-  for _, p in ipairs(posed) do
-    local def = p.sprite.def
-    -- viewFacing, exactly as the camera draw picks it (see viewFacing for
-    -- why the two passes must agree): in first person the sun's card
-    -- swaps frame as the eye circles, which costs a redraw the signature
-    -- already charges for (FirstPerson.signature) and keeps a card from
-    -- fringing against a mirror-flipped record of itself
-    local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip)
-    local mesh = SpriteBillboards.shadowQuad(def, frame)
-    if mesh then
-      ShadowMap.draw(mesh, p.sprite:resolveImage(),
-                     ShadowMap.snug(
-                       Voxel3D.casterMatrix(p.px, p.py, p.gh + (p.lift or 0),
-                                            mirror)))
-    end
-  end
-  -- a staged fight's mons (VR frames only): the same cards the eye pass
-  -- stands on the arena, snugged like every thin card, marked as the cast
-  -- so the water can decline them like everybody else's silhouette
-  for _, card in ipairs(battleCards or {}) do
-    ShadowMap.draw(BattleBillboard.mesh(), card.tex, ShadowMap.snug(card.model))
-  end
-  -- Gold v0.1.89 keeps battles in the normal overworld camera. The Stadium
-  -- combatants therefore belong to this ordinary world shadow pass instead of
-  -- BattleScene's separate staged pass.
-  if state and state._stadiumLiveBattle then
-    pcall(function() V.require("Stadium").cast(ShadowMap) end)
-  end
-  ShadowMap.sprites(false)
-
-  ShadowMap.finish(sig)
 end
 
 -- Render the world. Without `eyes`, one frame into one canvas -- the flat
@@ -999,15 +1669,22 @@ end
 -- canvases comes back: the VR path, two eyes over one shared shadow map,
 -- pose capture and glint step.
 function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
+  local cam = state.camera
+  local cx, cy = cam.x + vw / 2, cam.y + vh / 2
+  local frameScratch = state and state._stadiumFrameScratch
+  if frameScratch then
+    state._stadiumCullView = VoxelScene._prepareCullView(
+      frameScratch.cullView, cx, cy, vw, vh)
+  else
+    state._stadiumCullView = VoxelScene._prepareCullView({}, cx, cy, vw, vh)
+  end
+
   -- With nothing cached at all (the first frame of a fresh toggle),
   -- return nil: the engine keeps the 2D path for the frame and
   -- Voxel.ready holds the camera tween at flat, so the switch waits
   -- invisibly instead of freezing or tilting an empty stage.
   local terrain, nbMesh, water, nbWater = VoxelScene.prefetch(state)
   if not terrain then return nil end
-
-  local cam = state.camera
-  local cx, cy = cam.x + vw / 2, cam.y + vh / 2
 
   -- the hour's light, before anything is cast or drawn: point the shared
   -- rig at the clock (or at noon, indoors -- a cave at midnight is exactly
@@ -1024,6 +1701,25 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     end
   end
   Voxel3D.tint = DayNight.tint(outdoor or DayNight.isCanopy(state.map))
+  -- Yellow Rock Tunnel darkness is presentation-local to the Kanto companion
+  -- world. Multiply the normal day/night light instead of swapping shaders or
+  -- palettes, so FLASH can lift it instantly without rebuilding any sector.
+  if state and type(state._stadiumDarkTint) == "table" then
+    local t, d = Voxel3D.tint or { 1, 1, 1 }, state._stadiumDarkTint
+    if frameScratch then
+      local tint = frameScratch.darkTint
+      tint[1] = (tonumber(t[1]) or 1) * (tonumber(d[1]) or 1)
+      tint[2] = (tonumber(t[2]) or 1) * (tonumber(d[2]) or 1)
+      tint[3] = (tonumber(t[3]) or 1) * (tonumber(d[3]) or 1)
+      Voxel3D.tint = tint
+    else
+      Voxel3D.tint = {
+        (tonumber(t[1]) or 1) * (tonumber(d[1]) or 1),
+        (tonumber(t[2]) or 1) * (tonumber(d[2]) or 1),
+        (tonumber(t[3]) or 1) * (tonumber(d[3]) or 1),
+      }
+    end
+  end
   -- and the window glass: the tileset's own panes (found in its art --
   -- GlassMask), lit after dark. Outdoors only, like everything the clock
   -- touches, which also keeps any pane-shaped art in an interior tileset
@@ -1034,7 +1730,8 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   local g = VoxelScene.glintStep(glint, cx, cy)
   Voxel3D.glassPhase, Voxel3D.glassGlint = g.phase, g.amp
 
-  local atlasCache = {}
+  local atlasCache = frameScratch and frameScratch.atlasCache or {}
+  if frameScratch then for k in pairs(atlasCache) do atlasCache[k] = nil end end
   local function atlasFor(map)
     if not map then return nil end
     local key = map.id or tostring(map)
@@ -1070,6 +1767,19 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- A VR frame skips all of it: the caller brought its own cameras, and
   -- its own idea of the scene centre with them.
   if not eyes then
+    -- ThirdPerson's boom collision must use the map graph THIS frame renders,
+    -- not whatever world object happens to remain installed on Game2.  The
+    -- distinction matters in Yellow/Kanto free roam, where Johto intentionally
+    -- stays resident underneath while this state points at a foreign Kanto map.
+    if ThirdPerson and type(ThirdPerson.setWorldContext) == "function" then
+      if frameScratch then
+        local wc = frameScratch.worldContext
+        wc.map, wc.neighbors = state.map, state.neighbors or {}
+        ThirdPerson.setWorldContext(wc)
+      else
+        ThirdPerson.setWorldContext({ map = state.map, neighbors = state.neighbors or {} })
+      end
+    end
     local fpRig, fpCx, fpCy = FirstPerson.frame(me, cx, cy, vw, vh)
     if fpRig then cx, cy = fpCx, fpCy end
     -- Gold live-overworld battles get a real Stadium-style orbit around both
@@ -1134,23 +1844,24 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   for i, nb in ipairs(state.neighbors or {}) do
     if nbMesh[i] then
       Voxel3D.draw(nbMesh[i], atlasFor(nb.map),
-                   Mat4.translate(nb.ox, 0, nb.oy))
+                   VoxelScene._neighborModel(nb))
     end
   end
   if liveBattleArena then Voxel3D.battleOcclusion(nil) end
 
-  -- Without a shadow map (headless, or a driver that could not make the
-  -- canvas) the old flat decals stand in: ground-only, characters only,
+  -- Without a shadow map because the DRIVER cannot make one, the old flat
+  -- decals stand in: ground-only, characters only. SHADOW QUALITY = OFF skips
+  -- this block too, so OFF is visually and computationally different.
   -- but better than a world with nothing under anybody. They go down
   -- first, as decals the characters then stand over -- depth-tested
   -- against the terrain just drawn (a shadow behind a building stays
   -- hidden) but never depth-writing, so the grass pass at the end of the
   -- frame still wins its feet-overdraw fights.
-  if not Voxel3D.shadowsActive() then
+  if not Voxel3D.shadowsActive() and not Quality.shadowsOff() then
     Voxel3D.beginShadows()
     for _, p in ipairs(posed) do
       drawShadow(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                 p.lift)
+                 p.lift, playerCardScale(p))
     end
     Voxel3D.endShadows()
   end
@@ -1163,16 +1874,26 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- lake would otherwise wear one as a black smear. Water covers them,
   -- which is the same answer the shadow map's own pass gives (see
   -- ShadowMap.sprites) -- people do not shadow water either way.
-  local waterDraws = {}
+  local waterDraws = VoxelScene._scratchArray(frameScratch, "waterDraws")
   if water then
-    waterDraws[#waterDraws + 1] = { water, atlasFor(state.map), nil }
+    VoxelScene._waterRow(frameScratch, waterDraws, water, atlasFor(state.map), nil)
   end
   for i, nb in ipairs(state.neighbors or {}) do
     if nbWater and nbWater[i] then
-      waterDraws[#waterDraws + 1] = { nbWater[i], atlasFor(nb.map),
-                                      Mat4.translate(nb.ox, 0, nb.oy) }
+      VoxelScene._waterRow(frameScratch, waterDraws, nbWater[i], atlasFor(nb.map),
+        VoxelScene._neighborModel(nb))
     end
   end
+  -- The ocean is a single four-vertex plane beneath both regions. Feeding it
+  -- through the existing water pass gives it the same sky/world reflections
+  -- as native lakes without introducing a second renderer or shader stack.
+  local ocean = state._stadiumOcean
+  local oceanHere = oceanVisible(ocean, cx, cy, vw, vh)
+  if oceanHere and ocean and ocean.mesh and ocean.texture then
+    VoxelScene._waterRow(frameScratch, waterDraws, ocean.mesh, ocean.texture, ocean.model)
+  end
+  VoxelScene.oceanCulled = ocean ~= nil and not oceanHere
+  VoxelScene._trimScratchPool(frameScratch, "waterPool", #waterDraws)
   -- the cast goes into the reflection copy only -- see drawWater for why it
   -- cannot be composited yet and why it is drawn through the same function
   -- the real pass below uses
@@ -1295,7 +2016,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   for i, nb in ipairs(state.neighbors or {}) do
     if readyNeighbor(state, i) then
       Voxel3D.draw(ChunkMesher.grass(nb.map), atlasFor(nb.map),
-                   Mat4.translate(nb.ox, 0, nb.oy), pull)
+                   VoxelScene._neighborModel(nb), pull)
     end
   end
   -- flower billboards: pulled like the characters and the grass, MINUS
@@ -1316,8 +2037,8 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   for i, nb in ipairs(state.neighbors or {}) do
     if readyNeighbor(state, i) then
       Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                   Mat4.translate(nb.ox, 0, nb.oy), fpull,
-                   ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+                   VoxelScene._neighborModel(nb), fpull,
+                   ShadowMap.snug(VoxelScene._neighborModel(nb)))
     end
   end
   if liveBattleArena then Voxel3D.battleOcclusion(nil) end

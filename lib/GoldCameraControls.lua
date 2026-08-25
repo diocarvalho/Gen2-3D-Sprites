@@ -55,6 +55,12 @@ local DELTA_DIR = {
 local FieldMoves, Permissions, Runtime, Player
 local unpackResults = (table and table.unpack) or unpack
 
+local function palletExcursionActive()
+  local twin = V and V.TwinRegionWorld
+  return type(twin) == "table" and type(twin.excursionIsActive) == "function"
+    and twin.excursionIsActive() == true
+end
+
 function Controls.directionFromWorld(x, z, previous)
   x, z = tonumber(x) or 0, tonumber(z) or 0
   if math.abs(x) < 1e-6 and math.abs(z) < 1e-6 then return nil end
@@ -107,8 +113,16 @@ local function nativeSpecialState(world)
   return false
 end
 
+local function world3DEnabled()
+  if V and type(V.world3DEnabled) == "function" then
+    local ok, enabled = pcall(V.world3DEnabled)
+    if ok then return enabled == true end
+  end
+  return true
+end
+
 local function freeInputEligible(world)
-  return FirstPerson.driving()
+  return world3DEnabled() and FirstPerson.driving()
     and world and world.map and world.player
     and not nativeSpecialState(world)
 end
@@ -346,7 +360,9 @@ local function freeTick(world)
   local wx = tonumber(world._stadiumFreeIntentX) or 0
   local wz = tonumber(world._stadiumFreeIntentZ) or 0
   local mag = math.sqrt(wx * wx + wz * wz)
-  if mag > 1 then wx, wz, mag = wx / mag, wz / mag, 1 end
+  if mag > 1 then
+    wx, wz, mag = wx / mag, wz / mag, 1
+  end
 
   if mag <= 1e-6 then
     -- Hold the last travel bearing while standing. First-person A/interact is
@@ -416,6 +432,17 @@ local function freeTick(world)
   end
 end
 
+function Controls.release(world)
+  world = world or (V and V.game and V.game.world)
+  if world then clearFreeState(world, true) end
+  Controls.lastDir = nil
+  Controls.lastWorldX, Controls.lastWorldZ = 0, 0
+  if FirstPerson and type(FirstPerson.releaseBody) == "function" then
+    pcall(FirstPerson.releaseBody)
+  end
+  return true
+end
+
 function Controls.install()
   if Controls.installed then return true end
 
@@ -442,12 +469,25 @@ function Controls.install()
 
   local vanillaPollInput = World.pollInput
   function World:pollInput(input)
+    -- PALLET TELEPORT has its own presentation-local 16px movement loop in
+    -- TwinRegionWorld. Do not let those same directions move the hidden Gold
+    -- player underneath it. START/menu input is handled by Game2/StateStack,
+    -- outside World:pollInput, so RETURN TO JOHTO remains reachable normally.
+    if palletExcursionActive() then
+      self.heldDir = nil
+      self._stadiumFreeIntentX, self._stadiumFreeIntentZ = nil, nil
+      Controls.lastDir = nil
+      Controls.lastWorldX, Controls.lastWorldZ = 0, 0
+      return nil
+    end
+
     local out = vanillaPollInput(self, input)
 
-    if not FirstPerson.driving() then
+    if not world3DEnabled() or not FirstPerson.driving() then
       Controls.lastDir = nil
       Controls.lastWorldX, Controls.lastWorldZ = 0, 0
       self._stadiumFreeIntentX, self._stadiumFreeIntentZ = nil, nil
+      if not world3DEnabled() then clearFreeState(self, true) end
       return out
     end
 
@@ -486,6 +526,13 @@ function Controls.install()
   function World:stepBody(...)
     local out = { vanillaStepBody(self, ...) }
 
+    if palletExcursionActive() then
+      -- Gold NPC/script/time simulation may continue, but the hidden player
+      -- must not receive continuous free-roam displacement while Kanto is up.
+      clearFreeState(self, false)
+      return unpackResults(out)
+    end
+
     if freeTickEligible(self) then
       freeTick(self)
     else
@@ -507,6 +554,9 @@ function Controls.install()
   if type(World.interact) == "function" then
     local vanillaInteract = World.interact
     function World:interact(...)
+      -- v0.2.85 Yellow Kanto owns its own travel/warps/NPC presentation while
+      -- active; never activate an invisible Johto NPC/warp under that view.
+      if palletExcursionActive() then return nil end
       if FirstPerson.driving() and Voxel.isFirstPerson(Voxel.level)
          and self.player and not self.player.moving then
         local dir = Controls.directionFromYaw()

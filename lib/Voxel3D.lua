@@ -35,6 +35,18 @@ local DayNight = V.require("DayNight")
 local GlassMask = V.require("GlassMask")
 local PixelCanvas = V.require("PixelCanvas")
 local DioramaZoom = V.require("DioramaZoom")
+local Quality = V.require("Quality")
+
+-- Weather depends back on renderer-facing modules in some builds, so keep it
+-- lazy to avoid initialization cycles. Once resolved, do not pay pcall + module
+-- lookup every sky/overlay frame. A failed early lookup is retried later.
+local weatherCached = nil
+local function weatherModule()
+  if weatherCached then return weatherCached end
+  local ok, mod = pcall(V.require, "Weather")
+  if ok and type(mod) == "table" then weatherCached = mod end
+  return weatherCached
+end
 
 local Voxel3D = {}
 
@@ -139,6 +151,8 @@ local SHADER = [[
   uniform float sunDark;      // how far into black a shadow goes; 0 = off
   uniform float sunBias;
   uniform vec2 sunTexel;
+  uniform float sunMode;      // 0 LOW hard, 1 HIGH 2x2, 2 SOFT wide 3x3
+  uniform float sunRadius;    // SOFT kernel radius in shadow-map texels
 
   // LIVE BATTLE VISIBILITY. Terrain is one combined depth-tested mesh, so
   // individual trees/walls/bushes cannot be alpha-sorted independently. During
@@ -161,9 +175,10 @@ local SHADER = [[
     return c.r + c.g * (1.0 / 255.0);
   }
 
-  // 1.0 in full sun, 1.0 - sunDark in full shadow. Four taps half a texel
-  // out on the diagonals: a 2x2 box filter, which is what turns the
-  // shadow map's texel staircase into a one-pixel soft edge.
+  // 1.0 in full sun, 1.0 - sunDark in full shadow. The quality row now
+  // genuinely changes the filter: LOW = one hard comparison, HIGH = the old
+  // 2x2 PCF edge, SOFT = a visibly wider 3x3 kernel. OFF never reaches this
+  // shader with sunDark > 0 and VoxelScene also suppresses fallback decals.
   float sunlight(vec3 p) {
     if (sunDark <= 0.0) return 1.0;
     // outside the sun's frustum nothing was recorded, so nothing occludes
@@ -173,18 +188,33 @@ local SHADER = [[
     // Ease the shadows off at the frustum's rim. The map covers the ground
     // the camera can see out to a cap, and past the low rungs -- 75 degrees
     // especially -- the horizon is further than any box worth paying for.
-    // Without this the covered region simply ENDS, drawing a hard line
-    // across the middle distance where every shadow stops at once; with it
-    // the far field just loses them, which reads as distance.
     vec2 e = min(p.xy, 1.0 - p.xy);
     float edge = smoothstep(0.0, 0.06, min(e.x, e.y));
     if (edge <= 0.0) return 1.0;
     float z = p.z - sunBias;
-    float lit = step(z, sunDepth(p.xy + sunTexel * vec2(-0.5, -0.5)))
-              + step(z, sunDepth(p.xy + sunTexel * vec2( 0.5, -0.5)))
-              + step(z, sunDepth(p.xy + sunTexel * vec2(-0.5,  0.5)))
-              + step(z, sunDepth(p.xy + sunTexel * vec2( 0.5,  0.5)));
-    return 1.0 - sunDark * edge * (1.0 - lit * 0.25);
+    float lit;
+    if (sunMode < 0.5) {
+      lit = step(z, sunDepth(p.xy));
+    } else if (sunMode < 1.5) {
+      lit = (step(z, sunDepth(p.xy + sunTexel * vec2(-0.5, -0.5)))
+           + step(z, sunDepth(p.xy + sunTexel * vec2( 0.5, -0.5)))
+           + step(z, sunDepth(p.xy + sunTexel * vec2(-0.5,  0.5)))
+           + step(z, sunDepth(p.xy + sunTexel * vec2( 0.5,  0.5)))) * 0.25;
+    } else {
+      vec2 r = sunTexel * max(1.0, sunRadius);
+      lit = 0.0;
+      lit += step(z, sunDepth(p.xy + r * vec2(-1.0, -1.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2( 0.0, -1.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2( 1.0, -1.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2(-1.0,  0.0)));
+      lit += step(z, sunDepth(p.xy));
+      lit += step(z, sunDepth(p.xy + r * vec2( 1.0,  0.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2(-1.0,  1.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2( 0.0,  1.0)));
+      lit += step(z, sunDepth(p.xy + r * vec2( 1.0,  1.0)));
+      lit *= (1.0 / 9.0);
+    }
+    return 1.0 - sunDark * edge * (1.0 - lit);
   }
 
 #ifdef VOXEL_GRID
@@ -345,19 +375,26 @@ local returnCanvas = nil
 -- restore the caller's outer canvas for Android whole-frame composition. Keep
 -- that nesting fix only on mobile; on desktop the outer Gold present canvas is
 -- later replaced by the native 2D scene, which hides the voxel result.
+local preserveCallerCanvasCached = nil
 local function preserveCallerCanvas()
+  if preserveCallerCanvasCached ~= nil then return preserveCallerCanvasCached end
+  local result = false
   local okPlatform, Platform = pcall(require, "src.core.Platform")
   if okPlatform and type(Platform) == "table" and type(Platform.detect) == "function" then
     local okInfo, info = pcall(Platform.detect)
     if okInfo and type(info) == "table" and type(info.os) == "string" then
-      return info.os == "Android" or info.os == "iOS"
+      result = info.os == "Android" or info.os == "iOS"
+      preserveCallerCanvasCached = result
+      return result
     end
   end
   local ok, name = pcall(function()
     local sys = love and love.system
     return sys and sys.getOS and sys.getOS()
   end)
-  return ok and (name == "Android" or name == "iOS") or false
+  result = ok and (name == "Android" or name == "iOS") or false
+  preserveCallerCanvasCached = result
+  return result
 end
 
 function Voxel3D.canvasRestorePolicy()
@@ -407,7 +444,20 @@ end
 -- either the readable depth canvas or the internal buffer.
 local function depthTarget()
   if held and held.depth then
-    return { held.canvas, depthstencil = held.depth }
+    local target = held.depthTarget
+    if not target or target[1] ~= held.canvas or target.depthstencil ~= held.depth then
+      target = { held.canvas, depthstencil = held.depth }
+      held.depthTarget = target
+    end
+    return target
+  end
+  if held then
+    local target = held.internalDepthTarget
+    if not target or target[1] ~= held.canvas then
+      target = { held.canvas, depth = true }
+      held.internalDepthTarget = target
+    end
+    return target
   end
   return { canvas, depth = true }
 end
@@ -424,6 +474,27 @@ local function releaseSlot(slotHeld)
 end
 
 local IDENTITY = Mat4.identity()
+
+-- Per-scene draw-uniform state. `pull` is identical across long runs of actor
+-- cards/grass and identity matrices repeat across world meshes. Avoid sending
+-- those uniforms again when the scene shader already contains the exact value.
+-- Non-identity matrices are always resent because callers may mutate Mat4 tables
+-- in place between draws.
+local drawIdentityModel = false
+local drawIdentitySun = false
+local drawPull = nil
+local function resetDrawUniformCache()
+  drawIdentityModel, drawIdentitySun, drawPull = false, false, nil
+end
+
+-- Tiny vectors sent every frame. Shader:send copies them synchronously, so one
+-- reusable set avoids presentation-frame table garbage.
+local ONE3 = { 1, 1, 1 }
+local ZERO2 = { 0, 0 }
+local ZERO3 = { 0, 0, 0 }
+local sunTexelScratch = { 0, 0 }
+local glassSizeScratch = { 1, 1 }
+local curveScratch = { 0, 0, 0 }
 
 -- Whether the driver admits to supporting derivatives. Only a hint --
 -- the compile below is the real test -- but it saves building a shader
@@ -981,8 +1052,8 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
                 sky.bands and Voxel3D.skyBody(w, h) or nil)
     end
     do
-      local okWeather, Weather = pcall(V.require, "Weather")
-      if okWeather and type(Weather) == "table" and type(Weather.paintSky) == "function" then
+      local Weather = weatherModule()
+      if Weather and type(Weather.paintSky) == "function" then
         pcall(Weather.paintSky, w, h, hy, Voxel3D.cell, skyRay)
       end
     end
@@ -1010,7 +1081,13 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   pcall(sh.send, sh, "sunDark", map and Voxel3D.SHADOW_ALPHA or 0)
   pcall(sh.send, sh, "sunBias", ShadowMap.bias)
   local texel = 1 / ShadowMap.res
-  pcall(sh.send, sh, "sunTexel", { texel, texel })
+  sunTexelScratch[1], sunTexelScratch[2] = texel, texel
+  pcall(sh.send, sh, "sunTexel", sunTexelScratch)
+  local sq = Quality.shadows()
+  local sm = (sq == "soft" and 2) or (sq == "high" and 1) or 0
+  pcall(sh.send, sh, "sunMode", sm)
+  local radius = (sq == "soft" and math.max(1.5, math.min(4.0, ShadowMap.softness()))) or 1.0
+  pcall(sh.send, sh, "sunRadius", radius)
   if grid then
     pcall(sh.send, sh, "gridDark", VoxelGrid.DARK)
     pcall(sh.send, sh, "gridWidth", VoxelGrid.width())
@@ -1022,7 +1099,7 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   pcall(sh.send, sh, "ghost", 0)
   pcall(sh.send, sh, "ghostColor", Voxel3D.GHOST_COLOR)
   -- the hour's light, as the caller last set it (see Voxel3D.tint)
-  pcall(sh.send, sh, "dayTint", Voxel3D.tint or { 1, 1, 1 })
+  pcall(sh.send, sh, "dayTint", Voxel3D.tint or ONE3)
   -- the window glass: the tileset's mask (or the blank -- the sampler is
   -- declared either way, and unbound is a driver-dependent crash), how lit
   -- the panes are, and the movement-fed glint as the caller last set it
@@ -1030,7 +1107,8 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   if mask then
     pcall(sh.send, sh, "glassMask", mask)
     local ok, mw, mh = pcall(mask.getDimensions, mask)
-    pcall(sh.send, sh, "glassSize", { ok and mw or 1, ok and mh or 1 })
+    glassSizeScratch[1], glassSizeScratch[2] = ok and mw or 1, ok and mh or 1
+    pcall(sh.send, sh, "glassSize", glassSizeScratch)
   end
   pcall(sh.send, sh, "glassNight", Voxel3D.glassNight or 0)
   pcall(sh.send, sh, "glassPhase", Voxel3D.glassPhase or 0)
@@ -1041,10 +1119,10 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   -- scene start prevents a failed/early battle frame from leaking visibility
   -- rules into Pokemon cards, attack FX, or the next free-roam frame.
   pcall(sh.send, sh, "battleOccOn", 0)
-  pcall(sh.send, sh, "battleOccEye", Voxel3D.eye or { 0, 0, 0 })
-  pcall(sh.send, sh, "battleOccA", { 0, 0 })
-  pcall(sh.send, sh, "battleOccB", { 0, 0 })
-  pcall(sh.send, sh, "battleOccMid", { 0, 0 })
+  pcall(sh.send, sh, "battleOccEye", Voxel3D.eye or ZERO3)
+  pcall(sh.send, sh, "battleOccA", ZERO2)
+  pcall(sh.send, sh, "battleOccB", ZERO2)
+  pcall(sh.send, sh, "battleOccMid", ZERO2)
   pcall(sh.send, sh, "battleOccGround", 0)
   pcall(sh.send, sh, "battleOccRadius", 26)
   pcall(sh.send, sh, "battleOccBubble", 46)
@@ -1054,13 +1132,15 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   local placed = Voxel3D.camera
   Voxel3D.curveK = (placed and placed.curve) or WorldCurve.k(vh)
   Voxel3D.curveX, Voxel3D.curveZ = cx, cy
-  pcall(sh.send, sh, "curve", { cx, cy, Voxel3D.curveK })
+  curveScratch[1], curveScratch[2], curveScratch[3] = cx, cy, Voxel3D.curveK
+  pcall(sh.send, sh, "curve", curveScratch)
   -- clip w at the focus point, the reference depth project() reports scale
   -- against (so scale == 1 for anything standing at the view centre)
   local m = Voxel3D.vp
   Voxel3D.focusW = m[13] * cx + m[14] * 0 + m[15] * cy + m[16]
   activeShader = sh
   active = true
+  resetDrawUniformCache()
   return true
 end
 
@@ -1162,6 +1242,9 @@ end
 --
 -- `paint`, when given, is called with the MIRROR bound and the scene shader
 -- set, to add things that must be REFLECTED without being composited yet.
+-- `copyColor` defaults true. SKY-only water passes set it false because their
+-- shader never samples the world reflection; skipping that full-scene blit and
+-- duplicate cast draw is a large fill-rate win while depth occlusion remains.
 --
 -- The characters are the whole reason it exists. Gen 1 draws people over
 -- the world and water is world, so the cast has to composite AFTER the
@@ -1182,7 +1265,7 @@ end
 -- did.
 --
 -- MUST be paired with endWater, which puts the frame back together.
-function Voxel3D.beginWater(paint)
+function Voxel3D.beginWater(paint, copyColor)
   if not (active and canvas and held and held.depth) then return nil end
   if not held.mirror then
     local ok, c = pcall(love.graphics.newCanvas, held.w, held.h)
@@ -1211,7 +1294,9 @@ function Voxel3D.beginWater(paint)
   -- frame rather than the frame composited against something
   love.graphics.setBlendMode("alpha", "premultiplied")
   love.graphics.setColor(1, 1, 1, 1)
-  love.graphics.draw(canvas)
+  if copyColor ~= false then
+    love.graphics.draw(canvas)
+  end
   love.graphics.setBlendMode("alpha")
   if paint and activeShader then
     love.graphics.setDepthMode("lequal", false)
@@ -1465,10 +1550,31 @@ function Voxel3D.draw(mesh, texture, model, pull, sunModel)
   local sh = activeShader
   if not sh then return end
   if texture then mesh:setTexture(texture) end
-  -- LOVE defaults matrix uniforms to column-major; Mat4 is row-major
-  pcall(sh.send, sh, "model", "row", model or IDENTITY)
-  pcall(sh.send, sh, "sunModel", "row", sunModel or model or IDENTITY)
-  pcall(sh.send, sh, "pull", pull or 0)
+  -- LOVE defaults matrix uniforms to column-major; Mat4 is row-major. Identity
+  -- is the only matrix cached by value: non-nil Mat4 tables may be mutated in
+  -- place by callers and are therefore always sent.
+  if model then
+    pcall(sh.send, sh, "model", "row", model)
+    drawIdentityModel = false
+  elseif not drawIdentityModel then
+    pcall(sh.send, sh, "model", "row", IDENTITY)
+    drawIdentityModel = true
+  end
+
+  local resolvedSun = sunModel or model
+  if resolvedSun then
+    pcall(sh.send, sh, "sunModel", "row", resolvedSun)
+    drawIdentitySun = false
+  elseif not drawIdentitySun then
+    pcall(sh.send, sh, "sunModel", "row", IDENTITY)
+    drawIdentitySun = true
+  end
+
+  local resolvedPull = pull or 0
+  if drawPull ~= resolvedPull then
+    pcall(sh.send, sh, "pull", resolvedPull)
+    drawPull = resolvedPull
+  end
   love.graphics.draw(mesh)
 end
 
@@ -1526,8 +1632,8 @@ function Voxel3D.endScene()
   love.graphics.setDepthMode()
   love.graphics.setMeshCullMode("none")
   do
-    local okWeather, Weather = pcall(V.require, "Weather")
-    if okWeather and type(Weather) == "table" and type(Weather.paintOverlay) == "function" then
+    local Weather = weatherModule()
+    if Weather and type(Weather.paintOverlay) == "function" then
       pcall(Weather.paintOverlay, canvasW, canvasH)
     end
   end
@@ -1603,6 +1709,7 @@ function Voxel3D.restoreSceneState(state)
   Voxel3D.focusW = state.focusW
   Voxel3D.lookFlat = state.lookFlat
   Voxel3D.descent = state.descent
+  resetDrawUniformCache()
   return true
 end
 
@@ -1627,8 +1734,8 @@ function Voxel3D.invalidate()
   -- the sky is part of this pass and holds a shader of its own
   Sky.invalidate()
   do
-    local okWeather, Weather = pcall(V.require, "Weather")
-    if okWeather and type(Weather) == "table" and type(Weather.invalidate) == "function" then
+    local Weather = weatherModule()
+    if Weather and type(Weather.invalidate) == "function" then
       pcall(Weather.invalidate)
     end
   end

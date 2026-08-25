@@ -57,7 +57,7 @@ local RING = 32
 
 -- v0.2.03 keeps the ENTIRE expanded outdoor apron on the round-tree path.
 -- There is no inner carve cutoff followed by bare/void scenery: all 32 tiles
--- on every side are eligible for the same Johto cylinder/canopy hulls.
+-- on every side are eligible for the same profile-authored Gen-2 tree hulls.
 local ROUND_RING = 32
 
 -- object-mode gates
@@ -89,6 +89,11 @@ local cache = {}
 local atlasData = {}
 
 local function pixels(tileset)
+  -- v0.2.85 foreign Yellow Kanto: the inactive Yellow cache is not mounted
+  -- over Gold, so its decoded grayscale atlas pixels ride on the private
+  -- tileset clone instead of being re-opened through Assets by path.
+  local carried = tileset and tileset._stadiumPixelData
+  if carried and type(carried.getPixel) == "function" then return carried end
   local path = tileset.image
   if atlasData[path] == nil then
     local ok, data = pcall(Assets.imageData, path)
@@ -181,6 +186,24 @@ local function keyOf(tx, ty)
   return (ty + 64) * 4096 + (tx + 64)
 end
 
+-- True when an off-body tile of the private Yellow/Kanto adapter extends a
+-- water edge. The old shared Gen-1 void-fill rule repeated TREE_WALL_BLOCK
+-- around every OVERWORLD map, which is fine for a flat top-down viewport but
+-- becomes a giant upright forest prism when a coastal/water edge is viewed in
+-- 3D. Use the nearest real edge cell as the authority instead.
+function Structures._foreignEdgeWater(map, tx, ty, tw, th)
+  if not (map and map._stadiumForeignGen1Map and type(map.isWaterCell) == "function") then
+    return false
+  end
+  if tx >= 0 and ty >= 0 and tx < tw and ty < th then return false end
+  if tw <= 0 or th <= 0 then return false end
+  local sx = math.min(math.max(tx, 0), tw - 1)
+  local sy = math.min(math.max(ty, 0), th - 1)
+  local cx, cy = math.floor(sx / 2), math.floor(sy / 2)
+  local ok, water = pcall(map.isWaterCell, map, cx, cy)
+  return ok and water == true
+end
+
 -- The measured height at one tile, or nil -- WITHOUT building the map.
 -- Entity placement asks this every frame and must never be the thing that
 -- forces a build: before the mesher has been round, every cell answers its
@@ -202,6 +225,36 @@ function Structures.forMap(map)
 
   local def = map.def
   local tw, th = def.width * 4, def.height * 4
+  local function foreignWaterFillTile()
+    if not map._stadiumForeignGen1Map then return nil end
+    local values = tileset and tileset.waterTiles
+    if type(values) == "table" then
+      for _, v in ipairs(values) do
+        v = tonumber(v)
+        if v then return v end
+      end
+      for k, v in pairs(values) do
+        if v == true and tonumber(k) then return tonumber(k) end
+      end
+    end
+    return 0x14
+  end
+  local kantoWaterFillTile = foreignWaterFillTile()
+
+  -- v0.4.00: Kanto void belt. The private Yellow adapter can have no usable
+  -- border block on some maps, leaving real holes around the imported map in
+  -- tilted/open-world views. Fill every off-body non-water apron cell with
+  -- Kanto's authored pale tree crown instead of leaving sky/white void.
+  -- The four ids are one complete 16x16 tree cell from TilesetKanto.
+  local function foreignKantoTreeFillTile(tx, ty)
+    if not (map._stadiumForeignGen1Map and Map.isOutdoor(def)
+        and tileset and tileset.id == "TilesetKanto") then return nil end
+    local quad = { 0x2A, 0x2B, 0x3A, 0x3B }
+    local px = tx % 2
+    local py = ty % 2
+    return quad[py * 2 + px + 1]
+  end
+
   local x0, x1 = -RING, tw + RING - 1
   local y0, y1 = -RING, th + RING - 1
 
@@ -264,10 +317,18 @@ function Structures.forMap(map)
                   and prof.tilesets[tileset.id]
     if type(entry) == "table" then
       local set, any = {}, false
-      for _, class in ipairs({ "cylinder", "planter", "canopy" }) do
-        for _, t in ipairs(type(entry[class]) == "table" and entry[class] or {}) do
-          set[t] = true
-          any = true
+      -- v0.3.27 profiles can name the actual tree artwork explicitly.  This
+      -- prevents a non-tree round prop listed under `cylinder` from teaching
+      -- the open-world border filler that rocks/urns are forest.  Old profiles
+      -- remain compatible through the cylinder/planter/canopy fallback.
+      if type(entry.tree_art) == "table" then
+        for _, t in ipairs(entry.tree_art) do set[t] = true; any = true end
+      else
+        for _, class in ipairs({ "cylinder", "planter", "canopy" }) do
+          for _, t in ipairs(type(entry[class]) == "table" and entry[class] or {}) do
+            set[t] = true
+            any = true
+          end
         end
       end
       if any then goldTreeTiles = set end
@@ -454,6 +515,16 @@ function Structures.forMap(map)
     local inRoundRing = not (tx < -ROUND_RING or ty < -ROUND_RING
                          or tx >= tw2 + ROUND_RING
                          or ty >= th2 + ROUND_RING)
+    -- Kanto water edges extend as WATER, not the global Gen-1 tree-wall void
+    -- fill. Return an explicit class marker so TileShape never reinterprets
+    -- the off-body coordinate through the map's unrelated border block.
+    if kantoWaterFillTile and Structures._foreignEdgeWater(map, tx, ty, tw2, th2) then
+      return kantoWaterFillTile, "water"
+    end
+    local kantoTree = foreignKantoTreeFillTile(tx, ty)
+    if kantoTree then
+      return kantoTree, "kanto_tree"
+    end
     if hullRingOnly and not inRoundRing then
       return nil
     end
@@ -469,7 +540,7 @@ function Structures.forMap(map)
   for ty = y0, y1 do
     for tx = x0, x1 do
       Budget.tick()
-      local tile = tileLookup(tx, ty)
+      local tile, forcedClass = tileLookup(tx, ty)
       if tile then
         local k = keyOf(tx, ty)
         local s
@@ -480,8 +551,14 @@ function Structures.forMap(map)
           -- interior, walkable floor, which flattens the wall to a plate
           s = shapes.classes.shell
         else
-          s = TileShape.at(map, shapes, tile, tx, ty)
-          if s and void and void[tile] and not s.authored then
+          if forcedClass == "water" then
+            s = shapes.classes.water
+          elseif forcedClass == "kanto_tree" then
+            s = shapes.classes.cylinder
+          else
+            s = TileShape.at(map, shapes, tile, tx, ty)
+          end
+          if s and void and void[tile] and not s.authored and forcedClass ~= "water" then
             s = shapes.classes.void
           end
 
@@ -722,6 +799,69 @@ function Structures.forMap(map)
   end
 
   -- ---- model each region: carve out per-pixel objects, volume the rest --
+  -- KANTO ROOF-PRISM CLEANUP. Some private Yellow/Kanto regions can still
+  -- leave behind roof-only structural leftovers after the real building pass.
+  -- Those leftovers are not houses: they lack Kanto's facade/base/door
+  -- vocabulary, but the generic volume builder still turns them into giant
+  -- pink rectangular prisms. Leaving them flat is safer than standing them
+  -- up, because the base terrain/hedge mesh already exists under them.
+  local KANTO_ORPHAN_ROOF = {
+    [0x05] = true, [0x06] = true, [0x07] = true, [0x08] = true, [0x09] = true,
+    [0x4C] = true, [0x4D] = true, [0x22] = true, [0x25] = true, [0x26] = true,
+    [0x28] = true, [0x29] = true, [0x32] = true,
+  }
+  local KANTO_BUILDING_BASE = {
+    [0x1A] = true, [0x1B] = true, [0x1C] = true, [0x1D] = true,
+    [0x3C] = true, [0x4A] = true,
+  }
+  local KANTO_BUILDING_FACADE = {
+    [0x0A] = true, [0x0B] = true, [0x0C] = true, [0x0F] = true,
+    [0x1F] = true, [0x2F] = true, [0x3F] = true, [0x44] = true,
+    [0x45] = true, [0x4B] = true,
+  }
+  function Structures._skipForeignKantoRoofPrism(map, S, region)
+    if not (map and map._stadiumForeignGen1Map and map.tileset
+            and map.tileset.id == "TilesetKanto") then
+      return false
+    end
+    local total, roof, base, facade = 0, 0, 0, 0
+    local seen = {}
+    for _, c in ipairs(region.tiles or {}) do
+      local k = keyOf(c[1], c[2])
+      local t = S.tileAt[k]
+      if t then
+        total = total + 1
+        seen[k] = t
+        if KANTO_ORPHAN_ROOF[t] then roof = roof + 1 end
+        if KANTO_BUILDING_BASE[t] then base = base + 1 end
+        if KANTO_BUILDING_FACADE[t] then facade = facade + 1 end
+      end
+    end
+    if total < 8 then return false end
+    local w = region.maxX - region.minX + 1
+    local h = region.maxY - region.minY + 1
+    if w < 4 then return false end
+    -- v0.3.92: the screenshot-confirmed purple slabs are not legitimate
+    -- buildings; they are large roof-textured structural components. Remove
+    -- them outright instead of trying to recolor them. Large imported-Kanto
+    -- leftovers need only substantial roof evidence to be flattened. Small
+    -- leftovers retain the older conservative rule.
+    local roofRatio = roof / math.max(1, total)
+    local large = (w >= 8 and h >= 5) or total >= 48
+    if large then
+      if roofRatio < 0.30 then return false end
+    else
+      if h > 8 or roofRatio < 0.60 then return false end
+      if base > 0 or facade > 0 then return false end
+    end
+    for y = region.minY, region.maxY do
+      for x = region.minX, region.maxX - 1 do
+        local a, b = seen[keyOf(x, y)], seen[keyOf(x + 1, y)]
+        if a == 0x0B and b == 0x0C then return false end
+      end
+    end
+    return true
+  end
   local data = pixels(tileset)
   for _, region in ipairs(regions) do
     local leftover = region.tiles
@@ -729,7 +869,22 @@ function Structures.forMap(map)
       leftover = Structures.extractObjects(S, map, region, data, perRow)
     end
     if #leftover > 0 then
-      Structures.buildVolume(S, map, leftover)
+      if Structures._skipForeignKantoRoofPrism(map, S, region) then
+        -- v0.3.81 only skipped buildVolume here. That was insufficient:
+        -- ChunkMesher falls back to `s.h` whenever S.runs has no entry, so the
+        -- original upright shape still rendered as the same giant pink box.
+        -- Claim the rejected roof fragment as synthesized ground instead.
+        -- S.ground=false is resolved to this map's dominant ground tile at the
+        -- end of forMap(), so no magenta roof texel is left lying flat either.
+        for _, c in ipairs(leftover) do
+          local k = keyOf(c[1], c[2])
+          S.skip[k] = true
+          S.ground[k] = false
+          S.shapeAt[k] = shapes.classes.ground
+        end
+      else
+        Structures.buildVolume(S, map, leftover)
+      end
     end
   end
 
@@ -968,7 +1123,7 @@ local PLANTER_SPRAY = { rows = 24, depth = 5 }
 -- silhouette that makes it read as leaves.
 local function roundTemplate(S, map, data, cx, cy, groundTiles, N, capRows,
                              NYin, spray, baseRows, bodyRows, wellRows,
-                             taperVox)
+                             taperVox, treeCrown)
   -- The canvas is NX wide and NX DEEP (a hull is round in plan, so its
   -- depth is its width) by NY tall. NX = 16 is one cell, 32 a 2x2-cell
   -- group; NY defaults to NX -- a ball -- and NY = 2 * NX is a drawing
@@ -1059,18 +1214,19 @@ local function roundTemplate(S, map, data, cx, cy, groundTiles, N, capRows,
       end
     end
   end
-  -- JOHTO TREE ARCHETYPE OVERRIDE. The tall route/town tree wall is drawn
-  -- edge-to-edge as dithered canopy artwork. A silhouette flood therefore has
-  -- no honest empty margin to discover and can resolve to a full 16x32 mass,
-  -- which produces the textured rectangular blocks seen in Gold's tilted
-  -- voxel camera. For Johto tree pins, geometry is authored explicitly as a
-  -- stepped crown narrowing into a short trunk while every surviving voxel
-  -- still samples the ORIGINAL Gold tile texel. This changes shape only; it
-  -- does not replace/recolor the game's artwork.
-  local treeSet = tostring(map.tileset.id or "")
-  local johtoTree = (treeSet == "TilesetJohto" or treeSet == "TilesetJohtoModern")
-                    and NX == 16 and (NY == 16 or NY == 32)
-  if johtoTree then
+  -- GEN-2 TREE ARCHETYPE OVERRIDE. Some outdoor tree drawings run right to
+  -- the edge of their 16px canvas, so a silhouette flood has no honest empty
+  -- margin to discover and can resolve to a square/rectangular mass.  The old
+  -- implementation fixed that only when the TILESET NAME was Johto, leaving
+  -- Kanto's equally round route/town trees on the weaker generic hull path.
+  --
+  -- `treeCrown` is now derived from the active voxel profile's OWN tree art.
+  -- This makes the proven stepped crown a Gen-2 feature rather than a Johto
+  -- privilege, while collision-derived cylinders such as boulders, cut trees
+  -- and urns remain ordinary round props.  Surviving voxels still sample the
+  -- ORIGINAL Gold tile texel: this changes shape only, never artwork/color.
+  local authoredTree = treeCrown and NX == 16 and (NY == 16 or NY == 32)
+  if authoredTree then
     local function halfWidth(y)
       if NY == 32 then
         if y <= 2 then return 4 end
@@ -1706,10 +1862,18 @@ function Structures.buildCylinders(S, map, x0, x1, y0, y1, groundTiles)
   -- a potted plant's crown is a flat spray of leaves; a TREE's crown is a
   -- ball, and capping it to the spray depth is what makes one read as thin
   local planterSpray = PLANTER_SPRAY
+  local treeCrownTiles = nil
+  local planterTreeCrown = false
   do
     local okP, prof = pcall(V.data, "voxel_heights")
     local entry = okP and type(prof) == "table" and prof.tilesets
                   and prof.tilesets[map.tileset.id]
+    if entry and type(entry.tree_crown) == "table" then
+      local set = {}
+      for _, t in ipairs(entry.tree_crown) do set[t] = true end
+      treeCrownTiles = next(set) and set or nil
+    end
+    planterTreeCrown = entry and entry.planter_tree_crown == true or false
     if entry and entry.planter_spray ~= nil then
       local ps = entry.planter_spray
       planterSpray = (type(ps) == "table" and (tonumber(ps.rows) or 0) > 0)
@@ -1733,6 +1897,22 @@ function Structures.buildCylinders(S, map, x0, x1, y0, y1, groundTiles)
     if entry and type(entry.can_taper) == "number" then
       canTaper = entry.can_taper
     end
+  end
+
+  local function cellUsesTreeCrown(cx, cy)
+    if not treeCrownTiles then return false end
+    local hits = 0
+    for dy = 0, 1 do
+      for dx = 0, 1 do
+        if treeCrownTiles[S.tileAt[keyOf(cx * 2 + dx, cy * 2 + dy)]] then
+          hits = hits + 1
+        end
+      end
+    end
+    -- Two source tiles is enough for a clipped/edge tree cell, but a single
+    -- coincidental reused tile must not turn an unrelated round prop into a
+    -- tree crown.  Canonical Johto/Kanto trees contribute all four.
+    return hits >= 2
   end
 
   -- cells consumed by a 2x2 `canopy` group; the scan runs north to
@@ -1817,13 +1997,15 @@ function Structures.buildCylinders(S, map, x0, x1, y0, y1, groundTiles)
                 ids[#ids + 1] = S.tileAt[keyOf(cx * 2 + dx, cy * 2 + dy)]
               end
             end
-            local sig = tsid .. "|p32|" .. gsig .. "|"
-                        .. table.concat(ids, ":")
+            local treeCrown = planterTreeCrown
+            local sig = tsid .. "|p32|" .. (treeCrown and "tree|" or "")
+                        .. gsig .. "|" .. table.concat(ids, ":")
             local tpl = roundCache[sig]
             if not tpl then
               local tq, tbg = roundTemplate(S, map, data, cx, cy,
                                             groundTiles, 16, nil, 32,
-                                            planterSpray)
+                                            planterSpray, nil, nil, nil, nil,
+                                            treeCrown)
               tpl = { quads = tq, bg = tbg }
               roundCache[sig] = tpl
             end
@@ -1854,7 +2036,9 @@ function Structures.buildCylinders(S, map, x0, x1, y0, y1, groundTiles)
         local taper = s.class == "can" and canTaper or nil
         local ground = false
         if data then
-          local sig = tsid .. (cap and ("|c" .. cap) or "")
+          local treeCrown = cellUsesTreeCrown(cx, cy)
+          local sig = tsid .. (treeCrown and "|tree" or "")
+            .. (cap and ("|c" .. cap) or "")
             .. (base and ("|b" .. base) or "")
             .. (tall and ("|h" .. tall) or "")
             .. (well and ("|w" .. well) or "")
@@ -1867,7 +2051,7 @@ function Structures.buildCylinders(S, map, x0, x1, y0, y1, groundTiles)
           if not tpl then
             local tq, tbg = roundTemplate(S, map, data, cx, cy,
                                           groundTiles, 16, cap, nil, nil,
-                                          base, tall, well, taper)
+                                          base, tall, well, taper, treeCrown)
             tpl = { quads = tq, bg = tbg }
             roundCache[sig] = tpl
           end

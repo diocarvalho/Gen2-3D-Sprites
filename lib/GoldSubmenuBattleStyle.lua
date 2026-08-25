@@ -29,6 +29,15 @@ local StartMenuClass = nil
 local SaveModule = nil
 local PartyModelPreview = nil
 
+local function controllerPrompt(text)
+  local C = mod and mod.exports and mod.exports.controllerLayout
+  if C and type(C.prompt) == "function" then
+    local ok, value = pcall(C.prompt, text)
+    if ok and value then return value end
+  end
+  return tostring(text or "")
+end
+
 local function customUIEnabled()
   local options = mod and mod.options
   if not (options and type(options.get) == "function") then return true end
@@ -72,6 +81,10 @@ local function roundRect(mode, x, y, w, h, r)
 end
 
 local function uiScaleFor(ww, wh)
+  local helper = mod and mod.exports and mod.exports.mobileUiScale
+  if helper and type(helper.scale) == "function" then
+    return helper.scale(ww, wh, 0.18, 1.15)
+  end
   return math.max(0.18, math.min(1, math.min(ww / 800, wh / 600)))
 end
 
@@ -164,7 +177,7 @@ local function footer(G, text, x, y, w, h, gap, wh, s, warning)
   else
     G.setColor(1, 1, 1, 0.58)
   end
-  G.printf(cleanText(warning and warning ~= "" and warning or text),
+  G.printf(cleanText(controllerPrompt(warning and warning ~= "" and warning or text)),
     x + gap * 1.5, y + h - math.max(30 * s, wh * 0.037),
     w - gap * 3, "left")
 end
@@ -1237,14 +1250,14 @@ local function pokedexRenderer(screen, ww, wh)
     }
     local geo = drawInfoRows(ww, wh, "POKéDEX ENTRY", cleanText(name), rows,
       { widthFrac = 0.46, maxW = 620, rowScale = 0.071,
-        footer = "LEFT/RIGHT ACTION    CROSS/A SELECT    CIRCLE/B LIST" })
+        footer = "UP/DOWN ACTION    CROSS/A SELECT    CIRCLE/B LIST" })
     pokedexModelPanel(screen, row, geo, ww, wh)
     drawMessage(ww, wh, geo.x, cleanText(name), pokedexEntryText(screen, row),
       { heightFrac = 0.20, maxH = 160 * uiScaleFor(ww, wh) })
     local actions = { "PAGE", "AREA", "CRY", "PRNT" }
     drawSmallChoice(ww, wh, "ENTRY ACTION", "POKéDEX", actions,
       tonumber(screen.entryAction) or 1, { widthFrac = 0.30, maxW = 400,
-        footer = "LEFT/RIGHT SELECT    CROSS/A CONFIRM    CIRCLE/B BACK" })
+        footer = "UP/DOWN SELECT    CROSS/A CONFIRM    CIRCLE/B BACK" })
   else
     local labels = {}
     local optionRows = type(screen.optionRows) == "function" and screen:optionRows() or nil
@@ -1281,6 +1294,30 @@ local function patchScreen(path, renderer)
     Class.order = function(self, ...)
       if customUIEnabled() then return numberedDexOrder(self and self.dex) end
       return nativeOrder(self, ...)
+    end
+  end
+
+  -- The native Gen-2 entry action bar is horizontal, so the cart/engine uses
+  -- LEFT/RIGHT for PAGE / AREA / CRY / PRNT.  Our custom skin deliberately
+  -- presents those actions as a vertical phone-friendly list; make its input
+  -- match what is drawn.  LEFT/RIGHT still reach the native handler as a
+  -- compatibility shortcut, while UP/DOWN now advances this vertical list.
+  if path == "src.ui.gen2.PokedexMenu" and type(Class.update) == "function" then
+    local nativeUpdate = Class.update
+    Class.update = function(self, ...)
+      if customUIEnabled() and self and self._stadium2PauseSkin
+         and self.view == "entry" and not self.newEntry then
+        local input = self.game and self.game.input
+        if input and type(input.wasPressed) == "function" then
+          local count = 4
+          if input:wasPressed("down") then
+            self.entryAction = ((tonumber(self.entryAction) or 1) % count) + 1
+          elseif input:wasPressed("up") then
+            self.entryAction = ((tonumber(self.entryAction) or 1) - 2) % count + 1
+          end
+        end
+      end
+      return nativeUpdate(self, ...)
     end
   end
 

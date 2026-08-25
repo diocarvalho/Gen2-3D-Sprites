@@ -15,9 +15,20 @@ local M = {
   draws = 0,
   target = "src.ui.gen2.StartMenu",
   lastError = nil,
+  spotifyCards = 0,
+  spotifyLastError = nil,
 }
 
 local fonts = {}
+
+local function controllerPrompt(text)
+  local C = mod and mod.exports and mod.exports.controllerLayout
+  if C and type(C.prompt) == "function" then
+    local ok, value = pcall(C.prompt, text)
+    if ok and value then return value end
+  end
+  return tostring(text or "")
+end
 
 local function customUIEnabled()
   local options = mod and mod.options
@@ -68,6 +79,10 @@ local function targetDimensions()
 end
 
 local function uiScaleFor(ww, wh)
+  local helper = mod and mod.exports and mod.exports.mobileUiScale
+  if helper and type(helper.scale) == "function" then
+    return helper.scale(ww, wh, 0.18, 1.15)
+  end
   return math.max(0.18, math.min(1, math.min(ww / 800, wh / 600)))
 end
 
@@ -151,7 +166,7 @@ local function selectorFooter(G, text, x, y, w, h, gap, wh, s)
   local metaFont = font(math.max(11 * s, wh * 0.013))
   if metaFont then G.setFont(metaFont) end
   G.setColor(1, 1, 1, 0.58)
-  G.printf(text, x + gap * 1.5, y + h - math.max(30 * s, wh * 0.037),
+  G.printf(controllerPrompt(text), x + gap * 1.5, y + h - math.max(30 * s, wh * 0.037),
            w - gap * 3, "left")
 end
 
@@ -167,6 +182,206 @@ local function rowDescription(item)
     return a ~= "" and a or b
   end
   return cleanText(desc)
+end
+
+local function spotifySnapshot(game)
+  if not (mod and type(mod.find) == "function") then return nil end
+  local okFind, found = pcall(mod.find, "spotify_gold_player")
+  if not okFind or type(found) ~= "table" or type(found.exports) ~= "table" then
+    return nil
+  end
+  local getter = found.exports.getNowPlaying
+  if type(getter) ~= "function" then return nil end
+  local okState, state = pcall(getter, game)
+  if not okState then
+    M.spotifyLastError = tostring(state)
+    return nil
+  end
+  if type(state) ~= "table" then return nil end
+  state._stadiumDrawAlbumArt = type(found.exports.drawAlbumArt) == "function"
+    and found.exports.drawAlbumArt or nil
+  state._stadiumDrawPauseArtwork = type(found.exports.drawStadiumPauseArtwork) == "function"
+    and found.exports.drawStadiumPauseArtwork or nil
+  M.spotifyLastError = nil
+  return state
+end
+
+local function spotifyCardHeight(wh, s)
+  return math.max(92 * s, math.min(126 * s, wh * 0.145))
+end
+
+local function spotifySelected(menu)
+  local list = menu and menu.list
+  local item = list and type(list.current) == "function" and list:current() or nil
+  return cleanText(item and item.label or "") == "SPOTIFY"
+end
+
+local DISC_COLORS = {
+  { 0.85, 0.35, 0.42 }, { 0.95, 0.68, 0.24 }, { 0.78, 0.90, 0.30 },
+  { 0.28, 0.82, 0.60 }, { 0.28, 0.68, 0.95 }, { 0.48, 0.42, 0.90 },
+}
+
+local function drawSpotifyDisc(cx, cy, diameter, angle)
+  local G = love.graphics
+  local r = math.max(4, diameter * 0.5)
+  G.push("all")
+  G.translate(cx, cy)
+  G.rotate(tonumber(angle) or 0)
+  G.setColor(0.82, 0.84, 0.86, 0.98)
+  G.circle("fill", 0, 0, r)
+  G.setColor(1, 1, 1, 0.44)
+  G.setLineWidth(math.max(1, diameter * 0.012))
+  G.circle("line", 0, 0, r * 0.95)
+  G.setColor(0.38, 0.42, 0.47, 0.24)
+  G.circle("line", 0, 0, r * 0.72)
+  G.circle("line", 0, 0, r * 0.54)
+  for i, c in ipairs(DISC_COLORS) do
+    local a = (i - 1) * (math.pi * 2 / #DISC_COLORS) - 0.18
+    local b = a + 0.30
+    G.setColor(c[1], c[2], c[3], 0.23)
+    G.polygon("fill", 0, 0,
+      math.cos(a) * r * 0.92, math.sin(a) * r * 0.92,
+      math.cos(b) * r * 0.92, math.sin(b) * r * 0.92)
+  end
+  G.setColor(1, 1, 1, 0.34)
+  G.polygon("fill", 0, 0,
+    math.cos(-0.78) * r * 0.88, math.sin(-0.78) * r * 0.88,
+    math.cos(-0.60) * r * 0.88, math.sin(-0.60) * r * 0.88)
+  G.setColor(0.33, 0.35, 0.38, 0.96)
+  G.circle("fill", 0, 0, r * 0.25)
+  G.setColor(0.70, 0.72, 0.74, 0.88)
+  G.circle("line", 0, 0, r * 0.34)
+  G.setColor(0.02, 0.02, 0.025, 1)
+  G.circle("fill", 0, 0, r * 0.105)
+  G.pop()
+end
+
+-- v0.2.90: artwork-only pause presentation.  This is deliberately independent
+-- of Spotify's own UI renderer so it cannot replace or disable the modern
+-- pause menu.  The album cover is drawn last, hiding the left half of the CD.
+local function drawSpotifyLargeArtwork(menu, ww, wh, menuX, s, state)
+  if not state then return 0 end
+  local cover = state.cover
+  local customDraw = state._stadiumDrawPauseArtwork
+  if type(customDraw) ~= "function"
+      and not (cover and type(cover.getDimensions) == "function") then return 0 end
+
+  local G = love.graphics
+  local margin = math.max(18 * s, wh * 0.025)
+  local available = math.max(0, menuX - margin * 2)
+  if available < 180 * s then return 0 end
+
+  -- Large, borderless bottom-left art while the modern glass menu remains on
+  -- the right.  Size is intentionally much larger than the old compact card.
+  local size = math.min(wh * 0.46, available * 0.56)
+  size = math.max(190 * s, size)
+  local x = margin
+  local y = wh - size - margin
+
+  -- Preferred path: the custom Spotify Stadium Edition owns its disc/cover
+  -- composition.  This keeps its rotation state and future art styling in one
+  -- place without letting Spotify replace the pause menu itself.
+  if type(customDraw) == "function" then
+    local okDraw, result = pcall(customDraw, x, y, size, menu and menu.game, {
+      pop = 0.28,
+      discScale = 0.88,
+      maxWidth = available,
+      menuX = menuX,
+      margin = margin,
+    })
+    if okDraw and result ~= false then
+      M.spotifyCards = M.spotifyCards + 1
+      return size
+    end
+    if not okDraw then M.spotifyLastError = tostring(result) end
+  end
+
+  -- Compatibility fallback for ordinary Spotify builds: Stadium draws the
+  -- exact same artwork-only presentation itself.
+  if not (cover and type(cover.getDimensions) == "function") then return 0 end
+  local discSize = size * 0.88
+  local discCx = x + size * 0.91
+  local discCy = y + size * 0.50
+  drawSpotifyDisc(discCx, discCy, discSize, state.discAngle or 0)
+
+  local okDim, iw, ih = pcall(cover.getDimensions, cover)
+  if not (okDim and iw and ih and iw > 0 and ih > 0) then return 0 end
+  G.setColor(1, 1, 1, 1)
+  G.draw(cover, x, y, 0, size / iw, size / ih)
+
+  M.spotifyCards = M.spotifyCards + 1
+  return size
+end
+
+local function drawSpotifyCard(menu, ww, wh, menuX, s, state)
+  if not state then return 0 end
+  local G = love.graphics
+  local margin = math.max(18 * s, wh * 0.025)
+  local available = math.max(0, menuX - margin * 2)
+  if available < 130 * s then return 0 end
+
+  local w = math.min(ww * 0.54, 720 * s, available)
+  local h = spotifyCardHeight(wh, s)
+  local x, y = margin, wh - h - margin
+  local r = math.max(14 * s, wh * 0.022)
+  panel(x, y, w, h, r, 0.86, s)
+
+  local pad = math.max(9 * s, h * 0.085)
+  local art = math.max(1, h - pad * 2)
+  local drewCover = false
+  if type(state._stadiumDrawAlbumArt) == "function" then
+    local okDraw, result = pcall(state._stadiumDrawAlbumArt,
+      x + pad, y + pad, art, art, menu and menu.game)
+    drewCover = okDraw and result ~= false
+    if not okDraw then M.spotifyLastError = tostring(result) end
+  end
+  local cover = state.cover
+  if not drewCover and cover and type(cover.getDimensions) == "function" then
+    local okDim, iw, ih = pcall(cover.getDimensions, cover)
+    if okDim and iw and ih and iw > 0 and ih > 0 then
+      G.setColor(1, 1, 1, 1)
+      G.draw(cover, x + pad, y + pad, 0, art / iw, art / ih)
+      drewCover = true
+    end
+  end
+  if not drewCover then
+    G.setColor(1, 1, 1, 0.08)
+    roundRect("fill", x + pad, y + pad, art, art, r * 0.45)
+    local pf = font(math.max(10 * s, h * 0.10))
+    if pf then G.setFont(pf) end
+    G.setColor(1, 1, 1, 0.48)
+    G.printf("SPOTIFY", x + pad, y + h * 0.46, art, "center")
+  end
+
+  local tx = x + pad * 2 + art
+  local tw = math.max(1, w - (tx - x) - pad)
+  local labelF = font(math.max(9 * s, wh * 0.012))
+  local titleF = font(math.max(14 * s, wh * 0.018))
+  local artistF = font(math.max(11 * s, wh * 0.014))
+  if labelF then G.setFont(labelF) end
+  G.setColor(1, 1, 1, 0.52)
+  G.print((state.isPlaying and "NOW PLAYING" or cleanText(state.status or "SPOTIFY")),
+          tx, y + pad * 0.95)
+  if titleF then G.setFont(titleF) end
+  G.setColor(1, 1, 1, 0.98)
+  G.print(clipped(state.track or "NO TRACK", G.getFont(), tw), tx, y + h * 0.33)
+  if artistF then G.setFont(artistF) end
+  G.setColor(1, 1, 1, 0.66)
+  G.print(clipped(state.artist or "", G.getFont(), tw), tx, y + h * 0.57)
+
+  local barY = y + h - pad * 1.25
+  local barH = math.max(3 * s, 2)
+  G.setColor(1, 1, 1, 0.12)
+  roundRect("fill", tx, barY, tw, barH, barH)
+  local duration = tonumber(state.durationMs) or 0
+  if duration > 0 then
+    local ratio = math.max(0, math.min(1, (tonumber(state.progressMs) or 0) / duration))
+    G.setColor(1, 1, 1, 0.72)
+    roundRect("fill", tx, barY, tw * ratio, barH, barH)
+  end
+
+  M.spotifyCards = M.spotifyCards + 1
+  return h
 end
 
 local function drawRows(menu, x, y, w, rowH, gap, headerH, r, wh, s, rows)
@@ -220,7 +435,7 @@ local function drawRows(menu, x, y, w, rowH, gap, headerH, r, wh, s, rows)
   end
 end
 
-local function drawDescription(menu, ww, wh, menuX, s)
+local function drawDescription(menu, ww, wh, menuX, s, bottomReserve)
   if menu.showDescription == false then return end
   local list = menu.list
   local item = list and type(list.current) == "function" and list:current() or nil
@@ -234,7 +449,9 @@ local function drawDescription(menu, ww, wh, menuX, s)
   local w = math.min(ww * 0.54, 720 * s, available)
   local h = math.max(66 * s, math.min(105 * s, wh * 0.105))
   local x = margin
-  local y = wh - h - margin
+  local reserve = math.max(0, tonumber(bottomReserve) or 0)
+  local y = wh - h - margin - reserve
+  if y < margin then return end
   local r = math.max(14 * s, wh * 0.022)
   panel(x, y, w, h, r, 0.78, s)
 
@@ -337,7 +554,12 @@ local function drawPause(menu)
     selectorFooter(G,
       "D-PAD / ARROWS SELECT    CROSS/A CONFIRM    CIRCLE/B BACK",
       x, y, w, h, gap, wh, s)
-    drawDescription(menu, ww, wh, x, s)
+    local spotify = spotifySnapshot(menu.game)
+    local artH = spotify and drawSpotifyLargeArtwork(menu, ww, wh, x, s, spotify) or 0
+    if not spotifySelected(menu) then
+      local spotifyGap = artH > 0 and math.max(12 * s, wh * 0.014) or 0
+      drawDescription(menu, ww, wh, x, s, artH + spotifyGap)
+    end
   end
 
   G.pop()
@@ -380,6 +602,8 @@ function M.status()
     draws = M.draws,
     target = M.target,
     lastError = M.lastError,
+    spotifyCards = M.spotifyCards,
+    spotifyLastError = M.spotifyLastError,
   }
 end
 

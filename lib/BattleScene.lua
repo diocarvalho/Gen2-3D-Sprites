@@ -1,4 +1,4 @@
-﻿-- Overworld battles: one frame of the arena, as geometry.
+-- Overworld battles: one frame of the arena, as geometry.
 --
 -- The same world the free-roam mode draws, from a placed camera instead of
 -- the orbit, at the WINDOW's own pixel resolution -- not the GB's. The
@@ -31,6 +31,12 @@
 
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
+
+local function stadiumBattleFxPort()
+  local port = V and V.StadiumBattleFXPort
+  if type(port) == "table" then return port end
+  return nil
+end
 
 local Mat4 = V.require("Mat4")
 local Voxel3D = V.require("Voxel3D")
@@ -324,6 +330,7 @@ local function shadowSignature(state, arena, terrain, nbMesh, token)
   -- and a cast kept from the other one freezes the shadows across it
   local parts = { "battle", host.id, arena.x, arena.y, arena.shape,
                   tostring(arena.turn or 0),
+                  tostring(arena._stadiumFxVenue or ""),
                   tostring(terrain), tostring(token or 0),
                   -- the cycle keeps running through a fight, and an arena lit
                   -- from somewhere new must be re-cast from there
@@ -345,9 +352,17 @@ local function castShadows(state, arena, terrain, nbMesh, cx, cy, vw, vh,
   -- only thing the sun has to see besides the Pokemon themselves. Everything
   -- below this is a map that is not in the shot.
   if arena.discs then
-    pcall(function()
-      V.require("StadiumStage").cast(ShadowMap, arena, groundY or 0)
-    end)
+    local drewArena = false
+    local fxPort = stadiumBattleFxPort()
+    if fxPort and type(fxPort.castArena) == "function" then
+      local okFx, used = pcall(fxPort.castArena, ShadowMap, arena, groundY or 0)
+      drewArena = okFx and used and true or false
+    end
+    if not drewArena then
+      pcall(function()
+        V.require("StadiumStage").cast(ShadowMap, arena, groundY or 0)
+      end)
+    end
     pcall(function() V.require("Stadium").cast(ShadowMap) end)
     ShadowMap.finish(sig)
     return
@@ -586,6 +601,11 @@ function BattleScene.render(state, arena, textures, token)
     local okDress, dressed = pcall(Sky.dress, sky)
     if okDress and dressed then sky = dressed end
   end
+  local fxPort = stadiumBattleFxPort()
+  if fxPort and type(fxPort.arenaSky) == "function" then
+    local okSky, sourceSky = pcall(fxPort.arenaSky, arena)
+    if okSky and sourceSky then sky = sourceSky end
+  end
 
   Voxel3D.camera = cam
   -- the sun is turned up for the arena and put back afterwards, so the
@@ -642,11 +662,16 @@ function BattleScene.render(state, arena, textures, token)
       end
       Voxel3D.battleOcclusion(nil)
     elseif discs then
-      -- discs: the two platforms, and nothing else. No terrain, no
-      -- neighbouring maps, no water, no grass and no flowers -- see the
-      -- matching skips further down. What is behind them is the sky the
-      -- clear painted.
-      V.require("StadiumStage").draw(arena, groundY)
+      -- v0.3.21: use StadiumBattleFX's exact ROM-derived boss-room mesh when
+      -- this arena was decorated for one; otherwise retain the established
+      -- two-disc Stadium stage.
+      local drewArena = false
+      local fxPort = stadiumBattleFxPort()
+      if fxPort and type(fxPort.drawArena) == "function" then
+        local okFx, used = pcall(fxPort.drawArena, Voxel3D, arena, groundY)
+        drewArena = okFx and used and true or false
+      end
+      if not drewArena then V.require("StadiumStage").draw(arena, groundY) end
     else
       Voxel3D.draw(terrain, atlasFor(host), nil)
       for i, nb in ipairs(neighbors) do

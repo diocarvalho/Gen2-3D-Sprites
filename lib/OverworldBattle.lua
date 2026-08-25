@@ -39,6 +39,12 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+local function stadiumBattleFxPort()
+  local port = V and V.StadiumBattleFXPort
+  if type(port) == "table" then return port end
+  return nil
+end
+
 local ModSetting = V.require("ModSetting")
 local BattleArena = V.require("BattleArena")
 local BattleCam = V.require("BattleCam")
@@ -669,6 +675,16 @@ function OverworldBattle.begin(state, battle)
 
   local arena = OverworldBattle.stageFor(state)
   if not arena then return false end
+
+  -- v0.3.21: StadiumBattleFX's ROM-derived Kanto Gym Leader Castle / Elite 4 /
+  -- Champion rooms are an optional presentation replacement for compatible
+  -- boss trainer battles. Gold's logic battle and overworld position remain
+  -- untouched; only the arena geometry/camera tag is decorated.
+  local fxPort = stadiumBattleFxPort()
+  if fxPort and type(fxPort.decorateArena) == "function" then
+    local okDecorate, decorated = pcall(fxPort.decorateArena, arena, battle)
+    if okDecorate and decorated then arena = decorated end
+  end
 
   -- the fight is staged from here on, so the layout it is composed for is not
   -- optional any more (see forceOG)
