@@ -53,6 +53,7 @@ local function padKey(joystick) return joystick or NIL_PAD end
 local overlay = nil
 local itemEffectsCache = nil
 local partyPreviewCache = nil
+local expAnimationCache = {}
 
 local function customUIEnabled()
   local mod = V and V.mod
@@ -1109,6 +1110,46 @@ local function shownHp(screen, side, mon)
   return math.max(0, hp), math.max(1, maxHp)
 end
 
+
+local function shownExp(screen, side, mon)
+  if not mon then return 0, 1 end 
+
+  local Growth = require("src.pokemon.Growth")
+  local realExp = tonumber(mon.experience) or tonumber(mon.exp) or 0
+  local level = tonumber(mon.level) or 1
+  
+  -- identify battler
+  local cacheKey = tostring(side) .. "_" .. tostring(mon.species)
+  
+  if not expAnimationCache[cacheKey] then
+    expAnimationCache[cacheKey] = realExp
+  end
+  
+  -- lerp prog exp to real exp
+  local displayedExp = expAnimationCache[cacheKey]
+  if math.abs(displayedExp - realExp) > 0.1 then
+    -- animation speed
+    local dt = love.timer.delta and love.timer.delta() or 0.012
+    displayedExp = displayedExp + (realExp - displayedExp) * math.min(1, dt * 8)
+    expAnimationCache[cacheKey] = displayedExp
+  else
+    expAnimationCache[cacheKey] = realExp
+  end
+
+  local data = screen.game and screen.game.data or (screen.state and screen.state.game and screen.state.game.data)
+  local def = data.pokemon[mon.species] 
+  local growthRate = tostring(def and def.growthRate or "MEDIUM_FAST"):gsub("^GROWTH_", "")
+  
+  local currentLevelExp = Growth.expForLevel(growthRate, level)
+  local nextExp = Growth.expForLevel(growthRate, level + 1)
+
+  -- Draw smooth
+  local currentExp = displayedExp - currentLevelExp
+  local remainToNexLevel = nextExp - currentLevelExp
+  
+  return math.max(0, currentExp), math.max(1, remainToNexLevel)
+end
+
 local function hpColor(ratio)
   if ratio <= 0.20 then return 0.95, 0.23, 0.18 end
   if ratio <= 0.50 then return 0.96, 0.72, 0.15 end
@@ -1119,20 +1160,25 @@ local function drawBattlerHud(screen, mon, side, ww, wh)
   if not mon then return end
   local G = love.graphics
   local w = math.min(ww * 0.34, 430)
-  local h = math.max(76, math.min(112, wh * 0.125))
+
+  -- Define a altura dinamicamente: maior para o jogador (cabe a EXP), compacta para o inimigo
+  local isPlayer = (side == "player" or side == "player2")
+  local h = isPlayer and math.max(114, math.min(156, wh * 0.18)) or math.max(76, math.min(112, wh * 0.125))
+
   local margin = math.max(18, wh * 0.025)
   local x = side == "enemy" and margin or ww - margin - w
   local y = margin
   if side == "player2" then y = margin + h + math.max(8, wh * 0.010) end
   local r = math.max(12, h * 0.16)
+
   panel(x, y, w, h, r, 0.78)
 
-  local title = font(h * 0.24)
-  local small = font(h * 0.16)
+  local title = font(h * (isPlayer and 0.18 or 0.24))
+  local small = font(h * (isPlayer and 0.12 or 0.16))
   if title then G.setFont(title) end
   G.setColor(1, 1, 1, 0.98)
   local name = monName(screen, mon)
-  G.print(name, x + h * 0.18, y + h * 0.12)
+  G.print(name, x + h * 0.18, y + h * (isPlayer and 0.06 or 0.12))
 
   local level = tonumber(mon.level)
   if small then G.setFont(small) end
@@ -1140,15 +1186,16 @@ local function drawBattlerHud(screen, mon, side, ww, wh)
   if level then
     local label = "LV " .. tostring(math.floor(level))
     local tw = G.getFont():getWidth(label)
-    G.print(label, x + w - tw - h * 0.18, y + h * 0.16)
+    G.print(label, x + w - tw - h * 0.18, y + h * (isPlayer and 0.08 or 0.16))
   end
 
   local hp, maxHp = shownHp(screen, side, mon)
   local ratio = math.max(0, math.min(1, hp / maxHp))
   local bx = x + h * 0.18
-  local by = y + h * 0.57
+  local by = y + h * (isPlayer and 0.35 or 0.57)
   local bw = w - h * 0.36
-  local bh = math.max(9, h * 0.105)
+  local bh = math.max(6, h * (isPlayer and 0.075 or 0.105))
+
   G.setColor(0, 0, 0, 0.48)
   roundRect("fill", bx, by, bw, bh, bh * 0.5)
   local cr, cg, cb = hpColor(ratio)
@@ -1158,17 +1205,35 @@ local function drawBattlerHud(screen, mon, side, ww, wh)
   if small then G.setFont(small) end
   G.setColor(1, 1, 1, 0.78)
   local hpText = tostring(math.floor(hp)) .. " / " .. tostring(math.floor(maxHp))
-  G.print(hpText, bx, by + bh + h * 0.06)
+  G.print(hpText, bx, by + bh + h * (isPlayer and 0.02 or 0.06))
+
+  if isPlayer then
+    local exp, maxExp = shownExp(screen, side, mon)
+    local expRatio = math.max(0, math.min(1, exp / maxExp))
+    local expBy = by + bh + h * 0.22
+
+    G.setColor(0, 0, 0, 0.48)
+    roundRect("fill", bx, expBy, bw, bh, bh * 0.5)
+
+    G.setColor(0.2, 0.6, 1.0, 0.98)
+    if expRatio > 0 then roundRect("fill", bx, expBy, math.max(2, bw * expRatio), bh, bh * 0.5) end
+    
+    G.setColor(1, 1, 1, 0.78)
+    local expText = "EXP " .. tostring(math.floor(exp)) .. " / " .. tostring(math.floor(maxExp))
+    G.print(expText, bx, expBy + bh + h * 0.02)
+  end
+
   if mon.status then
     local st = cleanText(mon.status)
     local sw = G.getFont():getWidth(st)
-    G.print(st, x + w - sw - h * 0.18, by + bh + h * 0.06)
+    G.print(st, x + w - sw - h * 0.18, by + bh + h * (isPlayer and 0.02 or 0.06))
   end
+
   if side == "player2" then
     G.setColor(1, 1, 1, 0.50)
     local tag = "PARTNER"
     local tw = G.getFont():getWidth(tag)
-    G.print(tag, x + w - tw - h * 0.18, y + h * 0.16)
+    G.print(tag, x + w - tw - h * 0.18, y + h * 0.08)
   end
 end
 
